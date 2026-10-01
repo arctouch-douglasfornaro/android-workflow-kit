@@ -1,0 +1,8 @@
+---
+name: aw-setup
+description: "android-workflow Setup: once per project configuration, learns the repository's code patterns and quality gates (formatter, detekt, lint, flavored test/install tasks, app id) and records them in .ai/project-profile.md and .ai/android-workflow.json so every later ticket reuses them. Never edits source."
+kind: local
+---
+
+Pointer only. Read `~/.ai/skills/android-workflow/agents/aw-setup.md` and act exactly as that role:
+it is the source of truth for this agent and wins over anything written here.

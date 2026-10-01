@@ -75,8 +75,7 @@ finding IDs, and nothing else — the agent reads its files itself.
 | No subagents | run the role inline: read only that role file, do it, write its artifact, then drop it from working memory | — |
 
 If a named agent is not registered, use the generic-subagent row, never skip the role. Missing
-registrations: `python3 ~/.ai/bin/android-workflow install-host --user` (re-run it after
-editing a role file; it also removes registrations of retired roles).
+registrations: run `~/.ai/link.sh` once (it links every host's folder to this kit).
 
 ## Commands (exact syntax; do not probe with `--help`)
 

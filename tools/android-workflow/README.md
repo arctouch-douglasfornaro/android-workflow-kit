@@ -22,7 +22,6 @@ How the workflow runs (stages, agents, levels, stops) is described in one place 
 | `finish --target APP [--skip-device "reason"] [--draft "reason"]` | Final check: gate, review and device belong to the code that ships. `--draft` turns what is still unresolved into a draft PR's known issues |
 | `deliver --target APP [--subject "ID: title"] [--no-commit\|--no-push\|--no-pr]` | Commits app source only, pushes, opens the PR (as a draft after `finish --draft`) |
 | `status`, `list`, `clean --ticket ID \| --stale [HOURS] \| --all` | Run housekeeping |
-| `install-host --user \| --target APP` | Registers the skill and `aw-*` agents in every host |
 
 ## Quality gate details
 

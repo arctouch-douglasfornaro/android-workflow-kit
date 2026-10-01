@@ -15,9 +15,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from android_workflow.host import canonical_skill_dir
-from android_workflow.host import install_host as install_host_skill
 from android_workflow.paths import (
+    SKILL_DIR,
     cache_dir,
     clean_runs,
     ensure_gitignore,
@@ -2384,7 +2383,7 @@ def resume(target: Path, question_id: str, answer: str) -> dict[str, Any]:
 
 
 def validate_artifact(name: str, value: dict[str, Any], schema_path: Path | None = None) -> list[str]:
-    schema_path = schema_path or canonical_skill_dir() / "artifacts.schema.json"
+    schema_path = schema_path or SKILL_DIR / "artifacts.schema.json"
     contracts = read_json(schema_path)["definitions"]
     contract = contracts.get(name)
     if not contract:
@@ -2483,10 +2482,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     spec_parser.add_argument("--complexity", choices=("low", "medium", "high"))
     spec_parser.add_argument("--risk", choices=("low", "medium", "high"))
     spec_parser.add_argument("--reproduction")
-    install_parser = subparsers.add_parser("install-host")
-    install_parser.add_argument("--user", action="store_true")
-    install_parser.add_argument("--target", type=Path)
-    install_parser.add_argument("--home", type=Path, default=Path.home())
     list_parser = subparsers.add_parser("list")
     list_parser.add_argument("--target", required=True, type=Path)
     clean_parser = subparsers.add_parser("clean")
@@ -2509,13 +2504,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
-    if args.command == "install-host":
-        return install_host_skill(
-            user=args.user,
-            target=args.target,
-            home=args.home,
-            python_executable=sys.executable,
-        ), 0
     target = args.target.resolve()
     ensure_gitignore(target)
     if args.command == "start":

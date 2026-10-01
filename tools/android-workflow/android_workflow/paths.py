@@ -15,6 +15,9 @@ CURRENT_NAME = "current.json"
 
 RESERVED_NAMES = {CACHE_NAME, CURRENT_NAME, "_setup", "preview"}
 MEDIA_NAME = "media"
+# The kit root (~/.ai): tools/android-workflow/android_workflow/paths.py → four levels up.
+KIT_ROOT = Path(__file__).resolve().parents[3]
+SKILL_DIR = KIT_ROOT / "skills" / "android-workflow"
 MANIFEST_NAME = "manifest.json"
 COMPARE_NAME = "compare.md"
 

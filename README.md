@@ -21,6 +21,8 @@ The repository mirrors `~/.ai`, which is where every host reads it from.
 
 | Path | What it is |
 | --- | --- |
+| `.claude/`, `.codex/`, `.cursor/`, `.gemini/`, `.agents/` | Ready-made folders for each tool. They hold only pointers: links to the skills and small agent files that say "read `~/.ai/skills/android-workflow/agents/aw-…md`". |
+| `link.sh` | One-time setup: links those folders into your home so every tool finds them. |
 | `skills/android-workflow/SKILL.md` | The workflow: stages, agents, levels, stops and delivery rules (single source of truth). |
 | `skills/android-workflow/agents/` | The six `aw-*` agents: setup, planner, implementer, reviewer, device, delivery. |
 | `skills/device-driving/` | How the Device agent drives the phone or emulator (Maestro first, adb fallback). |
@@ -35,15 +37,18 @@ Requires Python 3.11+ (standard library only).
 git clone https://github.com/arctouch-douglasfornaro/android-workflow-kit.git ~/.ai
 ```
 
-Render the `android-workflow` skill and `aw-*` agents for every host:
+Then, once:
 
 ```bash
-python3 ~/.ai/bin/android-workflow install-host --user              # ~/.claude, ~/.codex, ~/.cursor, ~/.gemini, ~/.agents
-python3 ~/.ai/bin/android-workflow install-host --target /path/app  # project-level copies + AGENTS.md
+~/.ai/link.sh
 ```
 
-Codex needs `[features] multi_agent_v2 = true` to spawn the agents. Re-run
-`install-host` after editing a role file.
+It links `~/.claude`, `~/.codex`, `~/.cursor`, `~/.gemini` and `~/.agents` to the matching folder in
+this kit and enables `multi_agent_v2` in `~/.codex/config.toml` (Codex needs it to spawn agents).
+Anything already there with the same name is moved to `~/.ai-backup/`, never deleted.
+
+Everything points at one source of truth, so edits to the workflow apply at once in every tool. Run
+`link.sh` again only when the kit adds or removes an agent or skill.
 
 ## Use
 

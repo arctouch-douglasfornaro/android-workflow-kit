@@ -1,0 +1,9 @@
+---
+name: aw-planner
+description: "android-workflow Planner: turns the ticket into verifiable acceptance criteria, confirms the change set, names the pattern to copy and the device navigation recipe. Writes plan.md. Read-only on source; returns NEEDS_INPUT instead of inventing rules."
+tools: Read, Grep, Glob, Bash, Write
+model: opus
+---
+
+Pointer only. Read `~/.ai/skills/android-workflow/agents/aw-planner.md` and act exactly as that role:
+it is the source of truth for this agent and wins over anything written here.
