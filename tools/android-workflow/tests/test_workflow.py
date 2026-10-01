@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 import json
+import re
 import shutil
 import tempfile
 import unittest
@@ -242,7 +245,13 @@ class HostDrivenTests(unittest.TestCase):
         self.assertNotIn("Reviewer notes", pr_body)
 
     def test_every_host_points_at_the_source_of_truth(self) -> None:
-        import tomllib
+        try:
+            from tomllib import loads as load_toml  # Python 3.11+ also checks the TOML syntax
+        except ImportError:
+            def load_toml(text: str) -> dict:
+                values = {key: json.loads(value) for key, value in re.findall(r'^(\w+) = (".*")$', text, re.M)}
+                values["developer_instructions"] = text.split("'''")[1]
+                return values
 
         roles = {}
         for path in sorted((SKILL_DIR / "agents").glob("aw-*.md")):
@@ -270,7 +279,7 @@ class HostDrivenTests(unittest.TestCase):
             self.assertIn(f"model: {models[meta['tier']]}\n", claude)
             self.assertIn(f"tools: {meta['tools']}\n", claude)
             self.assertIn("kind: local", (KIT_ROOT / ".gemini/agents" / f"{name}.md").read_text(encoding="utf-8"))
-            codex = tomllib.loads((KIT_ROOT / ".codex/agents" / f"{name}.toml").read_text(encoding="utf-8"))
+            codex = load_toml((KIT_ROOT / ".codex/agents" / f"{name}.toml").read_text(encoding="utf-8"))
             self.assertEqual((codex["name"], codex["description"]), (name, meta["description"]))
             self.assertEqual(codex["model_reasoning_effort"], efforts[meta["tier"]])
             self.assertIn(source, codex["developer_instructions"])

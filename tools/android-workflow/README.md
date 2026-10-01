@@ -1,6 +1,6 @@
 # android-workflow CLI
 
-The Python package behind `python3 ~/.ai/bin/android-workflow`. Python 3.11+, standard library
+The Python package behind `python3 ~/.ai/bin/android-workflow`. Python 3.9+, standard library
 only, no app-specific facts. It detects the project, records the run, runs the quality gate and
 refuses to finish without a verified source diff. The coding agent writes the code.
 

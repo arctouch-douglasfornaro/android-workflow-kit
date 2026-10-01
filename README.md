@@ -31,7 +31,7 @@ The repository mirrors `~/.ai`, which is where every host reads it from.
 
 ## Install
 
-Requires Python 3.11+ (standard library only).
+Requires Python 3.9+ (the `python3` that ships with macOS is enough; standard library only).
 
 ```bash
 git clone https://github.com/arctouch-douglasfornaro/android-workflow-kit.git ~/.ai
@@ -56,7 +56,7 @@ Everything points at one source of truth, so edits to the workflow apply at once
 
 | Needed for | What |
 | --- | --- |
-| Always | Python 3.11+, `git`, and an Android project that builds with Gradle |
+| Always | Python 3.9+ (macOS already has it), `git`, and an Android project that builds with Gradle |
 | Opening the PR | `gh` (GitHub) or `glab` (GitLab), logged in. Without it you get a link to open the PR by hand |
 | Device check | An emulator or phone visible in `adb devices`. Maestro is installed automatically on first use |
 | Jira tickets | A Jira connector (MCP) in your coding tool, so the ticket text is fetched for you |

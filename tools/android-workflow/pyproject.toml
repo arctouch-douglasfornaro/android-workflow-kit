@@ -7,7 +7,7 @@ name = "android-multi-agent-workflow"
 version = "0.1.0"
 description = "Host-driven multi-agent workflow toolkit for Android tickets"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.9"
 
 [project.scripts]
 android-workflow = "android_workflow.cli:main"
