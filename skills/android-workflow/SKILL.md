@@ -87,7 +87,7 @@ CLI prebuild --target T [--wait|--status]           CLI gate     --target T
 CLI finish   --target T [--skip-device "r"] [--draft "r"] CLI deliver  --target T [--subject "ID: …"] [--no-push|--no-pr]
 CLI log --target T --stage <Role> --status completed --note "…" [--file P]… [--tokens N] [--wait-seconds S]
 CLI evidence capture|ingest|compare|list --target T [--phase before|after] [--name N] [--file F]
-CLI status|list --target T                          CLI clean --target T --ticket ID | --stale [HOURS] | --all
+CLI status|list --target T                          CLI clean --target T [--ticket ID | --stale [HOURS]]
 ```
 
 ## Execute

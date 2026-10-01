@@ -21,7 +21,7 @@ How the workflow runs (stages, agents, levels, stops) is described in one place 
 | `evidence capture\|ingest\|compare\|list --target APP` | Screenshots/videos in `media/{before,after}/` and `media/compare.md` |
 | `finish --target APP [--skip-device "reason"] [--draft "reason"]` | Final check: gate, review and device belong to the code that ships. `--draft` turns what is still unresolved into a draft PR's known issues |
 | `deliver --target APP [--subject "ID: title"] [--no-commit\|--no-push\|--no-pr]` | Commits app source only, pushes, opens the PR (as a draft after `finish --draft`) |
-| `status`, `list`, `clean --ticket ID \| --stale [HOURS] \| --all` | Run housekeeping |
+| `status`, `list`, `clean [--ticket ID \| --stale [HOURS]]` | Run housekeeping: one ticket, unfinished idle runs, or everything when nothing is given |
 
 ## Quality gate details
 

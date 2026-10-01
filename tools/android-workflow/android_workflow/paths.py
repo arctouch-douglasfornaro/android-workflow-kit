@@ -157,15 +157,15 @@ def stale_runs(target: Path, hours: float) -> list[str]:
 def clean_runs(
     target: Path,
     ticket_id: str | None = None,
-    all_runs: bool = False,
     stale_hours: float | None = None,
 ) -> dict[str, Any]:
+    """One ticket's run, the unfinished runs idle for `stale_hours`, or — with neither — every run."""
     removed: list[str] = []
     if stale_hours is not None:
         for stale in stale_runs(target, stale_hours):
             removed.extend(clean_runs(target, ticket_id=stale)["removed"])
         return {"removed": removed}
-    if all_runs:
+    if not ticket_id:
         for run in list_runs(target):
             shutil.rmtree(run["path"], ignore_errors=True)
             removed.append(run["ticket_id"])
@@ -178,8 +178,6 @@ def clean_runs(
             pointer.unlink()
             removed.append(CURRENT_NAME)
         return {"removed": removed}
-    if not ticket_id:
-        raise ValueError("clean requires --ticket, --stale or --all")
     slug = ticket_slug(ticket_id)
     dest = workflow_root(target) / slug
     if dest.exists():

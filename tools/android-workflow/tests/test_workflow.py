@@ -321,6 +321,16 @@ class RunLayoutTests(unittest.TestCase):
             self.assertFalse(artifacts(root, "APP-1").exists())
             self.assertTrue((artifacts(root, "APP-2") / "ticket-spec.json").exists())
 
+    def test_clean_without_a_ticket_removes_every_run(self) -> None:
+        with AndroidProject() as root:
+            run(root, {"id": "APP-1", "title": "One", "type": "chore"})
+            run(root, {"id": "APP-2", "title": "Two", "type": "chore"})
+            code = main(["clean", "--target", str(root)])
+            self.assertEqual(code, 0)
+            self.assertFalse(artifacts(root, "APP-1").exists())
+            self.assertFalse(artifacts(root, "APP-2").exists())
+            self.assertFalse((root / ".ai/workflow/current.json").exists())
+
     def test_locate_skips_idea_and_weak_words(self) -> None:
         with AndroidProject() as root:
             (root / "generated").mkdir()
@@ -831,7 +841,7 @@ class SetupTests(unittest.TestCase):
             overrides.write_text(json.dumps({"module_commands": {"unit_tests": "./gradlew {module}:testProdDebugUnitTest"}}),
                                  encoding="utf-8")
             configure(root, overrides)
-            main(["clean", "--target", str(root), "--all"])
+            main(["clean", "--target", str(root)])
             run(root, {"id": "D-1", "title": "Change ProfileScreen", "type": "chore"})
             config = read_json(cache_dir(root) / "project-config.json")
         self.assertEqual(config["module_commands"]["unit_tests"], "./gradlew {module}:testProdDebugUnitTest")

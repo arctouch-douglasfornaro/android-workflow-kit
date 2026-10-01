@@ -116,15 +116,23 @@ It only stops **before writing code**, when it would otherwise have to guess: a 
 ticket does not define, a bug without steps to reproduce it, or a project fact Setup could not find.
 Answer in the chat and it continues.
 
-### 6. Housekeeping
+### 6. Cleaning up old runs (optional)
+
+Each run leaves its files (plan, notes, log, screenshots) in `.ai/workflow/<TICKET>/` inside the app.
+They never go to git, but they pile up, one folder per ticket. From the app's folder:
 
 ```bash
-python3 ~/.ai/bin/android-workflow list  --target .               # runs in this app
-python3 ~/.ai/bin/android-workflow clean --target . --ticket APP-123
-python3 ~/.ai/bin/android-workflow clean --target . --stale       # unfinished runs idle for 24h
+python3 ~/.ai/bin/android-workflow list  --target .                    # which tickets have run here
+python3 ~/.ai/bin/android-workflow clean --target . --ticket APP-123   # delete one ticket's files
+python3 ~/.ai/bin/android-workflow clean --target .                    # delete them all
 ```
 
-Update the kit with `git -C ~/.ai pull`; every tool picks the change up at once.
+The project profile (`.ai/project-profile.md`) is kept, so the next run does not redo Setup.
+
+### 7. Updating the kit
+
+If you installed with `git clone`, run `git -C ~/.ai pull` to get the newest version. Every tool
+uses it at once; nothing else to do.
 
 More: the full workflow rules are in [`skills/android-workflow/SKILL.md`](skills/android-workflow/SKILL.md)
 and the CLI reference in [`tools/android-workflow/README.md`](tools/android-workflow/README.md).

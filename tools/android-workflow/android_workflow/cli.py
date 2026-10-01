@@ -459,7 +459,7 @@ OVERRIDES_FILE = Path(".ai") / "android-workflow.json"
 
 
 def durable_overrides(root: Path) -> dict[str, Any]:
-    """Facts the Setup agent (or a human) proved; they survive `clean --all` and re-detection."""
+    """Facts the Setup agent (or a human) proved; they survive `clean` and re-detection."""
     path = root / OVERRIDES_FILE
     return read_json(path) if path.is_file() else {}
 
@@ -2486,8 +2486,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     list_parser.add_argument("--target", required=True, type=Path)
     clean_parser = subparsers.add_parser("clean")
     clean_parser.add_argument("--target", required=True, type=Path)
-    clean_parser.add_argument("--ticket")
-    clean_parser.add_argument("--all", action="store_true", dest="all_runs")
+    clean_parser.add_argument("--ticket", help="delete only this ticket's run; without it every run is deleted")
     clean_parser.add_argument(
         "--stale", nargs="?", type=float, const=24.0, metavar="HOURS",
         help="remove unfinished runs (awaiting_host/paused/running) idle for HOURS (default 24)",
@@ -2573,7 +2572,7 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
         current = next((item["ticket_id"] for item in runs if item["current"]), None)
         return {"runs": runs, "current": current}, 0
     if args.command == "clean":
-        return clean_runs(target, ticket_id=args.ticket, all_runs=args.all_runs, stale_hours=args.stale), 0
+        return clean_runs(target, ticket_id=args.ticket, stale_hours=args.stale), 0
     if args.command == "evidence":
         from android_workflow.evidence import dispatch_evidence
 
