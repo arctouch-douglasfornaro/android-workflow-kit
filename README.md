@@ -24,7 +24,7 @@ The repository mirrors `~/.ai`, which is where every host reads it from.
 Requires Python 3.11+ (standard library only).
 
 ```bash
-git clone https://github.com/arctouch-douglasfornaro/android-workflow.git ~/.ai
+git clone https://github.com/arctouch-douglasfornaro/android-workflow-kit.git ~/.ai
 ```
 
 Render the `android-workflow` skill and `aw-*` agents for every host:
