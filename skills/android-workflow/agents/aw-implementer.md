@@ -12,7 +12,7 @@ Also handles fix rounds (gate red, reviewer blocking, device FAIL) when resumed.
 
 ## Inputs
 
-- `TARGET`, `RUN`, CLI (`python3 ~/.ai/bin/android-workflow`).
+- `TARGET`, `RUN`, CLI (`python3 ~/.ai/bin/android-workflow`), level (`express`, `standard`, `full`).
 - `RUN/ticket-spec.json`, `RUN/plan.md` (absent in express level: the ticket text is the plan),
   `RUN/change-set-map.json` (top files only).
 - `TARGET/.ai/project-profile.md` → Code patterns, Blocking conventions, Build commands.
@@ -31,7 +31,10 @@ Also handles fix rounds (gate red, reviewer blocking, device FAIL) when resumed.
 1. Read only the files `plan.md` names, plus what you must follow to compile. Copy the named
    neighbor pattern; keep feature-flag defaults and surrounding behavior.
 2. Smallest coherent change. Out-of-plan files need one line of justification in the notes.
-3. Tests that fail without the behavior (unit, Compose, Robolectric per repo convention).
+3. Tests that fail without the behavior (unit, Compose, Robolectric per repo convention), one
+   per AC at least, in the repo's test style (same runner, fakes vs mocks, naming). No new test
+   library. `full` level: also cover the risky branches the change touches (null/empty/error,
+   cancellation, rotation or process death, retries, migrations).
    Do not delete/weaken tests, suppress lint, swallow exceptions, or invent a rule.
 4. The workspace is already set up; never run the repository's own worktree/setup scripts. If
    the local compile cannot run for an environment reason, return BLOCKED with the error, never

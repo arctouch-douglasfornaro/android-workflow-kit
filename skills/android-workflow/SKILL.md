@@ -10,11 +10,17 @@ disable-model-invocation: true
 
 # Android Workflow
 
-Canonical workflow: `~/.ai/workflows/android-workflow.md`. This file is enough to run it.
+This file is the single source of truth for the workflow. Each agent's own rules live in
+`agents/aw-*.md` next to it.
 
-You are the **orchestrator**. The Python CLI detects, locates, gates and records. Five
-agents do the work; you keep your own context small (paths and ≤10-line returns only —
-never read the diff, Gradle logs or images yourself).
+**Goal:** a precise PR, fast and cheap. Every rule below serves one of the three: precision
+(project patterns, verifiable AC, tests, gate, independent review, device proof), speed
+(parallel work, scoped builds, skipped stages on simple tickets) and cost (small orchestrator
+context, the cheapest model tier that does each job).
+
+You are the **orchestrator**. The Python CLI detects, locates, gates and records. Six agents do
+the work; you keep your own context small (paths and ≤10-line returns only — never read the
+diff, Gradle logs or images yourself).
 
 ## Invocation
 
@@ -24,9 +30,9 @@ never read the diff, Gradle logs or images yourself).
     [--no-commit] [--no-push] [--no-pr] [--base BRANCH]
 ```
 
-If the user omitted fields, ask once. Do not invent acceptance criteria or business rules.
-Delivery (commit, push, PR) is **on by default**: invoking the workflow authorizes it. The
-`--no-*` flags stop earlier.
+Codex: `$android-workflow`. If the user omitted fields, ask once. Do not invent acceptance
+criteria or business rules. Delivery (commit, push, PR) is **on by default**: invoking the
+workflow authorizes it. The `--no-*` flags stop earlier.
 
 ## Resolve paths
 
@@ -44,19 +50,18 @@ pass it to the Planner.
 |---|---|---|---|
 | Setup | `aw-setup` | strong | only when `CLI setup` says `needs_setup_agent` (a build change, not a dependency-version bump) |
 | Planner | `aw-planner` | strong | standard and full levels |
-| Implementer | `aw-implementer` | standard | always; resumed for every fix round |
-| Tester | `aw-tester` | standard | full level only |
+| Implementer | `aw-implementer` | standard | always: code **and** its unit tests; resumed for every fix round |
 | Reviewer | `aw-reviewer` | strong | after a green gate |
 | Device | `aw-device` | standard | `before` + `after` when `device_required` |
 | Delivery | `aw-delivery` | fast | after `finish`, unless `--no-commit`: writes the PR body, runs `CLI deliver` |
 
 Tier maps to opus/sonnet/haiku on Claude Code and high/medium/low reasoning on Codex;
-Cursor and Gemini inherit the session model. Role files: `agents/` next to this file.
+Cursor and Gemini inherit the session model.
 
 ### How to delegate, per host
 
-Every spawn passes the same inputs: `TARGET`, `RUN`, `CLI`, the mode or fix-round finding IDs,
-and nothing else — the agent reads its files itself.
+Every spawn passes the same inputs: `TARGET`, `RUN`, `CLI`, the level, the mode or fix-round
+finding IDs, and nothing else — the agent reads its files itself.
 
 | Host | Spawn | Resume for a fix round |
 |---|---|---|
@@ -68,16 +73,20 @@ and nothing else — the agent reads its files itself.
 | No subagents | run the role inline: read only that role file, do it, write its artifact, then drop it from working memory | — |
 
 If a named agent is not registered, use the generic-subagent row, never skip the role. Missing
-registrations: `python3 ~/.ai/bin/android-workflow install-host --user`.
+registrations: `python3 ~/.ai/bin/android-workflow install-host --user` (re-run it after
+editing a role file; it also removes registrations of retired roles).
 
 ## Commands (exact syntax; do not probe with `--help`)
 
 ```text
+python3 ~/.ai/bin/feature_workspace.py --repo-root T --ticket ID --title "…" [--worktree]
 CLI setup    --target T [--source-repo MAIN]        CLI start    --target T --id ID --title "…" [--type bug --reproduction "…"]
+CLI resume   --target T --question-id Q --answer "…" CLI update-spec --target T --surfaces ui --acceptance "a|b"
 CLI prebuild --target T [--wait|--status]           CLI gate     --target T
 CLI finish   --target T [--skip-device "reason"]    CLI deliver  --target T [--subject "ID: …"] [--no-push|--no-pr]
 CLI log --target T --stage <Role> --status completed --note "…" [--file P]… [--tokens N] [--wait-seconds S]
-python3 ~/.ai/bin/feature_workspace.py --repo-root T --ticket ID --title "…" [--worktree]
+CLI evidence capture|ingest|compare|list --target T [--phase before|after] [--name N] [--file F]
+CLI status|list --target T                          CLI clean --target T --ticket ID | --stale [HOURS] | --all
 ```
 
 ## Execute
@@ -95,15 +104,16 @@ python3 ~/.ai/bin/feature_workspace.py --repo-root T --ticket ID --title "…" [
    `ready` → reuse (the profile is inherited or refreshed when only dependency versions moved).
    `needs_setup_agent` → spawn `aw-setup` with the JSON; its questions are batched to the user
    once; a missing formatter or app id never blocks a domain-only ticket.
-3. **Bootstrap/Triage/Localizer:** `CLI start` (add `--type bug --reproduction "..."`,
-   `--acceptance "a|b"`, `--surfaces` when known). `paused` → ask the human, then `CLI resume`.
+3. **Ticket:** `CLI start` (add `--type bug --reproduction "..."`, `--acceptance "a|b"`,
+   `--surfaces` when known). It writes `ticket-spec.json` and `change-set-map.json` (the likely
+   files). `paused` → ask the human, then `CLI resume`.
 4. **Level** (`--level` wins; otherwise decide from the ticket and `ticket-spec.json`):
    - `express`: chore/feature, low risk, the ticket names the screen or file, ≤3 files,
      no business question. Skip the Planner: run `CLI update-spec` yourself with the AC and
      surfaces from the ticket text (a visible change is `ui`).
    - `full`: high risk or complexity, or surfaces lifecycle, room_migration, workmanager,
-     payments/auth. Planner + Tester.
-   - `standard`: everything else. Planner, no Tester.
+     payments/auth. Planner, and the Implementer also covers the edge cases its role file lists.
+   - `standard`: everything else. Planner.
    Bugs are never express (the Planner checks the reproduction).
 5. **Base build in the background:** when the route has a device stage, a device is connected and
    not `--no-device`, run `CLI prebuild --target TARGET` right after `start`. It returns at once and
@@ -117,47 +127,53 @@ python3 ~/.ai/bin/feature_workspace.py --repo-root T --ticket ID --title "…" [
    capture touches only the emulator and `RUN/media`. Any other status (`tainted`, `failed`,
    `skipped`) → `aw-device` `before` builds and captures itself, and the Implementer waits for it.
    No device → skip before, note it.
-7. **Implementer:** spawn `aw-implementer`. Keep its agent id for fix rounds.
-8. **Tester** (full): spawn `aw-tester`. Production findings go back to the Implementer.
-9. **Quality gate:** `CLI gate --target TARGET`. The formatter fixes first when Setup found one that
-   can (`format_apply`); otherwise the format check runs alone before the slow tasks. Then compile,
-   unit tests, detekt and lint for the touched modules in one `--continue` build, plus compile and
-   unit tests for downstream modules that reference a changed declaration (`consumer_modules`), and
-   the feature-doc check when the project records `feature_docs.glob`. A lint or format
-   failure whose findings are all in files this change does not touch is **waived**, recorded in
-   `gate-report.json` → `waivers` and logged; the PR must disclose it (`deliver` adds the line if the
-   body omits it). Findings in a touched file fail the gate, whether or not they predate the branch.
-   `unverified` lint also fails. Red → resume the Implementer with `gate-report.json` (max 2), then
-   re-gate. Third red → STOP. Never ask the user to waive lint by hand and never route around a
-   refused `finish`. If the gate itself looks wrong (a misclassified waiver, a parser miss), STOP
-   and report it as a toolkit defect for the human: no agent edits the toolkit
-   (`~/.ai`, where the toolkit lives) during a run. `start` fingerprints the toolkit; after
-   any change the gate reports `blocked` (`toolkit_modified_during_run`) and `finish` refuses.
-10. **Reviewer:** spawn `aw-reviewer`. `changes_requested` → resume the Implementer with the
-    blocking IDs once, re-gate, then resume the Reviewer for a delta review. Still blocking →
-    STOP.
-11. **Device after** (if `device_required`, not `--no-device`): spawn `aw-device` mode
-    `after`. FAIL → Implementer once → gate → Reviewer delta → Device again. Second FAIL →
-    STOP. BLOCKED when required → STOP and say what unblocks (device, login, flag).
-12. **Finish:** `CLI finish --target TARGET`. It refuses unless the gate, the approved review
-    and the device PASS all belong to the current source (any later edit makes them stale) and
-    a visual ticket has `media/after/`. `--no-device` or no device: `--skip-device "<reason>"`,
-    which is logged and must be repeated in the PR body.
-13. **Delivery:** spawn `aw-delivery` with flags. It writes `pr-description.md`, then `CLI deliver`
-    commits app source only, pushes (git hooks run, nothing is force-pushed) and opens the PR.
+7. **Implementer:** spawn `aw-implementer` with the level. It writes the code and the unit tests
+   that prove it. Keep its agent id for fix rounds.
+8. **Quality gate:** `CLI gate --target TARGET`. It runs the project's formatter (fixing first when
+   it can), then compile, unit tests, detekt and lint for the touched modules in one build, plus
+   compile and unit tests for modules that use a changed declaration, and a secret scan. Lint or
+   format findings only in files the change does not touch are **waived** and disclosed in the PR;
+   findings in a touched file fail. Red → resume the Implementer with `gate-report.json` (max 2),
+   then re-gate. Third red → STOP. Never ask the user to waive lint by hand and never route
+   around a refused `finish`. If the gate itself looks wrong (a misclassified waiver, a parser
+   miss), STOP and report it as a toolkit defect: no agent edits the toolkit (`~/.ai`) during a
+   run. `start` fingerprints the toolkit; after any change the gate reports `blocked`
+   (`toolkit_modified_during_run`) and `finish` refuses.
+9. **Reviewer:** spawn `aw-reviewer`. `changes_requested` → resume the Implementer with the
+   blocking IDs once, re-gate, then resume the Reviewer for a delta review. Still blocking →
+   STOP.
+10. **Device after** (if `device_required`, not `--no-device`): spawn `aw-device` mode
+    `after`. It verifies the AC on the device and writes `media/compare.md` (before vs after).
+    FAIL → Implementer once → gate → Reviewer delta → Device again. Second FAIL → STOP.
+    BLOCKED when required → STOP and say what unblocks (device, login, flag).
+11. **Finish** (final check before the PR): `CLI finish --target TARGET`. It confirms that the
+    gate, the approved review and the device PASS all belong to the code that will ship (any
+    later edit makes them stale) and that a visual ticket has `media/after/`. `--no-device` or
+    no device: `--skip-device "<reason>"`, which is logged and repeated in the PR body.
+12. **Delivery:** spawn `aw-delivery` with flags. It writes `pr-description.md`, then `CLI deliver`
+    commits app source only, pushes (git hooks run, nothing is force-pushed) and opens the PR,
+    ready for review.
 
 Overlaps that cannot race on the working tree are safe: Planner with the base build, Implementer
 with the `before` capture. Anything that edits source waits for the base build.
 
-## Chat log
+## Run files
+
+Everything the run writes lives in `RUN` (gitignored, never committed): `ticket-spec.json`,
+`change-set-map.json`, `plan.md`, `implementation-notes.md`, `gate-report.json`, `review.json`,
+`device-report.md`, `pr-description.md`, `stage-log.md`, `stage-metrics.json` and
+`media/{before,after}/`. The shared cache is `TARGET/.ai/workflow/_cache/`; `current.json`
+points at the active ticket. A new ticket gets a new folder.
+
+## Chat log and telemetry
 
 Speak in **role names**, never bare T-codes. One line per stage:
 `{Role}: {result} → {artifact}`. Example: `Reviewer: approved, 0 blocking → review.json`.
-Durable log: `RUN/stage-log.md`. Every `log` for an
-agent stage passes the token total that agent's result reports (`--tokens N`); never estimate.
-`log` answers with a `warnings` entry when an agent stage has none; if the host truly exposes no
-count, say so once in the final summary. When
-you paused to ask the user, add `--wait-seconds S` so waiting is not counted as work.
+Durable log: `RUN/stage-log.md`; time and tokens per stage: `RUN/stage-metrics.json` (used to
+debug runs and find improvements). Every `log` for an agent stage passes the token total that
+agent's result reports (`--tokens N`); never estimate. `log` answers with a `warnings` entry
+when an agent stage has none; if the host truly exposes no count, say so once in the final
+summary. When you paused to ask the user, add `--wait-seconds S` so waiting is not counted.
 
 ## Stop
 

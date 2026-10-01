@@ -17,7 +17,6 @@ from android_workflow.paths import (
     media_dir,
     run_dir,
     ticket_slug,
-    workflow_root,
 )
 
 PHASES = ("before", "after")
@@ -200,40 +199,8 @@ def ingest(target: Path, phase: str, name: str, source: Path) -> dict[str, Any]:
     return {**item, "abs_path": str(destination)}
 
 
-def baseline(target: Path, from_ticket: str) -> dict[str, Any]:
-    source_root = workflow_root(target) / ticket_slug(from_ticket) / "media" / "after"
-    if not source_root.is_dir():
-        raise ValueError(f"no after/ media in {from_ticket}")
-    copied: list[str] = []
-    for src in sorted(source_root.iterdir()):
-        if src.suffix.lower() not in {".png", ".mp4", ".webm"}:
-            continue
-        name = src.stem
-        kind = "screenshot" if src.suffix.lower() == ".png" else "video"
-        destination = media_dir(target) / "before" / f"{name}{src.suffix.lower()}"
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, destination)
-        record_item(
-            target,
-            {
-                "name": name,
-                "phase": "before",
-                "kind": kind,
-                "path": relative_to_run(target, destination),
-                "tool": "baseline",
-                "source_ticket": ticket_slug(from_ticket),
-                "bytes": destination.stat().st_size,
-                "captured_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "ok": True,
-            },
-        )
-        copied.append(name)
-    if not copied:
-        raise ValueError(f"{from_ticket} after/ has no png/mp4")
-    return {"from": ticket_slug(from_ticket), "copied": copied, "phase": "before"}
-
-
-def compare(target: Path, previous: str | None = None) -> dict[str, Any]:
+def compare(target: Path) -> dict[str, Any]:
+    """Pair this ticket's before and after captures by name in `media/compare.md`."""
     run = run_dir(target)
     media = media_dir(target)
     names = sorted(
@@ -244,43 +211,22 @@ def compare(target: Path, previous: str | None = None) -> dict[str, Any]:
             if path.suffix.lower() in {".png", ".mp4", ".webm"}
         }
     )
-    previous_after = None
-    if previous:
-        previous_after = workflow_root(target) / ticket_slug(previous) / "media" / "after"
     rows: list[dict[str, Any]] = []
-    lines = [
-        "# Visual compare",
-        "",
-        f"- Current run: `{run.name}`",
-        f"- Previous after: `{previous}`" if previous else "- Previous after: none",
-        "",
-        "| name | before | after | previous after |",
-        "|---|---|---|---|",
-    ]
+    lines = ["# Visual compare", "", f"- Run: `{run.name}`", "", "| name | before | after |", "|---|---|---|"]
     for name in names:
         before = next((media / "before").glob(f"{name}.*"), None)
         after = next((media / "after").glob(f"{name}.*"), None)
-        prior = next(previous_after.glob(f"{name}.*"), None) if previous_after and previous_after.is_dir() else None
         rows.append(
             {
                 "name": name,
                 "before": str(before.relative_to(run)) if before else None,
                 "after": str(after.relative_to(run)) if after else None,
-                "previous_after": str(prior.relative_to(workflow_root(target))) if prior else None,
             }
         )
-        lines.append(
-            f"| `{name}` | {rows[-1]['before'] or '—'} | {rows[-1]['after'] or '—'} | {rows[-1]['previous_after'] or '—'} |"
-        )
+        lines.append(f"| `{name}` | {rows[-1]['before'] or '—'} | {rows[-1]['after'] or '—'} |")
     if not names:
-        lines.append("| *(none)* | — | — | — |")
-    lines.extend(
-        [
-            "",
-            "Open the files on disk. Do not paste PNG/MP4 bytes into chat.",
-            "",
-        ]
-    )
+        lines.append("| *(none)* | — | — |")
+    lines.extend(["", "Open the files on disk. Do not paste PNG/MP4 bytes into chat.", ""])
     path = media / COMPARE_NAME
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -307,12 +253,8 @@ def dispatch_evidence(target: Path, args: Any, config: dict[str, Any] | None) ->
         if not args.file:
             raise ValueError("ingest requires --file")
         return ingest(target, args.phase, args.name, args.file)
-    if action == "baseline":
-        if not args.from_ticket:
-            raise ValueError("baseline requires --from TICKET")
-        return baseline(target, args.from_ticket)
     if action == "compare":
-        return compare(target, args.previous)
+        return compare(target)
     if action == "capture":
         if args.kind == "video":
             return capture_video(target, config, args.phase, args.name, args.seconds)

@@ -6,13 +6,22 @@ A tool-agnostic kit for running Android tickets end to end with coding agents
 standard-library Python CLI detects the project, localizes the change, runs the
 quality gate and device checks, and refuses to finish without a real source diff.
 
+**Goal:** a precise PR, fast and cheap to produce.
+
+```text
+Input (Jira / description) → Orchestrator (setup, branch, level)
+  → Planner → Implementer (code + unit tests) → Quality gate → Code reviewer → Device check → Delivery (commit, push, PR)
+      fix rounds: gate / reviewer / device ──→ Implementer
+```
+
+The workflow is described in one place: [`skills/android-workflow/SKILL.md`](skills/android-workflow/SKILL.md).
 The repository mirrors `~/.ai`, which is where every host reads it from.
 
 ## Layout
 
 | Path | What it is |
 | --- | --- |
-| `workflows/android-workflow.md` | Canonical workflow doc: stages, artifacts, stops and delivery rules. |
+| `skills/android-workflow/SKILL.md` | The workflow: stages, agents, levels, stops and delivery rules (single source of truth). |
 | `skills/` | Agent Skills (`SKILL.md` folders): `android-workflow`, Android/Compose skills, delivery and review skills, coding-discipline skills and lateral-thinking techniques. |
 | `agents/` | `cavecrew-*` subagents used by the `cavecrew` skill. |
 | `skills/android-workflow/agents/` | Role prompts for the `aw-*` subagents rendered by `install-host`. |
@@ -52,8 +61,7 @@ done
 /android-workflow APP-123 Show empty state on profile
 ```
 
-Codex: `$android-workflow`. See `tools/android-workflow/README.md` for the CLI
-reference and `workflows/android-workflow.md` for the full stage contracts.
+Codex: `$android-workflow`. CLI reference: `tools/android-workflow/README.md`.
 
 ## Tests
 

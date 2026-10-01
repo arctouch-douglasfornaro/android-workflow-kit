@@ -46,7 +46,7 @@ STAGE_ROLES = {
 
 # Agents that work inside a stage; the log shows the agent that actually ran.
 AGENT_STAGES = {
-    "setup": "T0", "planner": "T3", "implementer": "T4", "tester": "T4", "quality gate": "T5",
+    "setup": "T0", "planner": "T3", "implementer": "T4", "quality gate": "T5",
     "gate": "T5", "reviewer": "T6", "device": "T7", "delivery": "T8",
 }
 
@@ -57,7 +57,7 @@ def stage_label(stage: str) -> str:
 
 
 def resolve_stage(value: str) -> tuple[str, str]:
-    """`Implementer`, `aw-tester`, `quality-gate` or `T4` → (stage id, role name to show)."""
+    """`Implementer`, `aw-implementer`, `quality-gate` or `T4` → (stage id, role name to show)."""
     text = value.strip()
     if text.upper() in STAGE_ROLES:
         return text.upper(), STAGE_ROLES[text.upper()]
@@ -2876,7 +2876,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     log_parser.add_argument("--target", required=True, type=Path)
     log_parser.add_argument(
         "--stage", required=True,
-        help="role name: Planner, Implementer, Tester, Quality gate, Reviewer, Device, Delivery",
+        help="role name: Planner, Implementer, Quality gate, Reviewer, Device, Delivery",
     )
     log_parser.add_argument("--status", required=True)
     log_parser.add_argument("--note", default="")
@@ -2939,15 +2939,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="remove unfinished runs (awaiting_host/paused/running) idle for HOURS (default 24)",
     )
     evidence_parser = subparsers.add_parser("evidence")
-    evidence_parser.add_argument("action", choices=("capture", "ingest", "baseline", "compare", "list"))
+    evidence_parser.add_argument("action", choices=("capture", "ingest", "compare", "list"))
     evidence_parser.add_argument("--target", required=True, type=Path)
     evidence_parser.add_argument("--phase", choices=("before", "after"), default="after")
     evidence_parser.add_argument("--name", default="screen")
     evidence_parser.add_argument("--kind", choices=("screenshot", "video"), default="screenshot")
     evidence_parser.add_argument("--seconds", type=int, default=8)
     evidence_parser.add_argument("--file", type=Path)
-    evidence_parser.add_argument("--from", dest="from_ticket")
-    evidence_parser.add_argument("--previous")
     return parser.parse_args(argv)
 
 
@@ -3068,7 +3066,7 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
         config_path = cache_dir(target) / "project-config.json"
         config = read_json(config_path) if config_path.exists() else None
         result = dispatch_evidence(target, args, config)
-        if args.action in {"capture", "ingest", "baseline"}:
+        if args.action in {"capture", "ingest"}:
             append_stage_log(run_dir(target), "T7", "completed", "cli", f"evidence {args.action} {args.name}")
         return result, 0
     errors: dict[str, list[str]] = {}
