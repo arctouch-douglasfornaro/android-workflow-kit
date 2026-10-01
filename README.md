@@ -73,22 +73,23 @@ On Codex use `$android-workflow`. The first argument is the ticket id (a Jira ke
 is the task. That's all: the workflow creates the branch, writes the code and tests, checks
 everything and opens the PR.
 
-Optional flags, added at the end:
+**Without any flag**, this is what the workflow decides for you. Add a flag at the end of the
+command only to change one of them:
 
-| Flag | Effect |
-| --- | --- |
-| `--level express\|standard\|full` | Force how deep it goes (normally chosen for you, see below) |
-| `--no-device` | Skip the device check (the PR says so) |
-| `--worktree` | Work in a separate worktree instead of the current checkout |
-| `--base BRANCH` | Base branch for the PR when it is not the repo default |
-| `--no-pr` / `--no-push` / `--no-commit` | Stop before opening the PR / pushing / committing |
-| `--target PATH` | The app's path, when your tool is not opened in it |
+| What | Default (no flag) | Flag to change it |
+| --- | --- | --- |
+| App | The folder your tool is opened in (it must have `settings.gradle`) | `--target PATH` |
+| Branch | On `main` (or the repo's base branch): creates `<user>/<TICKET>-<slug>` in the same checkout. On any other branch: keeps working on it | `--worktree` to work in a separate folder instead |
+| PR base | The repo's default branch (`origin/HEAD`, else `main`, `master` or `develop`) | `--base BRANCH` |
+| Depth | Chosen from the ticket: `express` for a small, clear change (no Planner); `full` for risky areas (lifecycle, migrations, payments, auth); `standard` otherwise. Bugs are never `express` | `--level express\|standard\|full` |
+| Device check | Runs when the change is visible or runtime and a device is connected. No device connected: skipped, and the PR says it was not verified on a device | `--no-device` to always skip it |
+| Delivery | Commits, pushes and opens the PR (a draft if some check is still failing) | `--no-pr`, `--no-push` or `--no-commit` to stop earlier |
 
 ### 3. What happens
 
 1. **Branch** — on the base branch it creates `<user>/<TICKET>-<slug>`; on any other branch it keeps working there.
 2. **Setup (first run only)** — learns the project's patterns and quality tools and saves them in `.ai/project-profile.md`. Later tickets reuse it.
-3. **Level** — `express` for small, clear changes (skips the Planner), `full` for risky ones (lifecycle, migrations, payments, auth), `standard` for everything else. Bugs are never express.
+3. **Depth** — picks `express`, `standard` or `full` from the ticket (see *Depth* in the table above).
 4. **Planner** — reads the code and writes verifiable acceptance criteria. Meanwhile the unchanged app is built in the background.
 5. **Implementer** — writes the change and the unit tests that prove it. In parallel, if a device is connected, the **before** screenshots are captured.
 6. **Quality gate** — formatter, compile, unit tests, detekt and lint for the modules touched. Failures go back to the Implementer (up to 2 times).

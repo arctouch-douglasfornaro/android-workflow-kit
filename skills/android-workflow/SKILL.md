@@ -146,7 +146,8 @@ CLI status|list --target T                          CLI clean --target T [--tick
 10. **Device after** (if `device_required`, not `--no-device`): spawn `aw-device` mode
     `after`. It verifies the AC on the device and writes `media/compare.md` (before vs after).
     FAIL → Implementer once → gate → Reviewer delta → Device again. Second FAIL → draft PR.
-    BLOCKED when required (no device, login, flag) → draft PR that says what unblocks it.
+    BLOCKED with a device connected (login, feature flag, screen unreachable) → draft PR that says
+    what unblocks it. No device connected at all → skip it at Finish (`--skip-device`).
 11. **Finish** (final check before the PR): `CLI finish --target TARGET`. It confirms that the
     gate, the approved review and the device PASS all belong to the code that will ship (any
     later edit makes them stale) and that a visual ticket has `media/after/`. `--no-device` or
@@ -184,7 +185,7 @@ UI ticket), an unanswered business question, a missing bug reproduction — ther
 in a PR: STOP, ask the user, and continue once answered.
 
 **After the code exists** — red gate after 2 fixes, blocking review after one fix, second device
-FAIL, required device BLOCKED, a toolkit defect — never end without a PR:
+FAIL, device BLOCKED with a device connected, a toolkit defect — never end without a PR:
 `CLI finish --target TARGET --draft "<why it stopped>"` records every unresolved check as a known
 issue, then `aw-delivery` delivers a **draft** PR that lists them. Tell the user what unblocks it.
 
