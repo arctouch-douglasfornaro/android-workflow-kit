@@ -748,6 +748,9 @@ def ticket_spec(ticket: dict[str, Any], target: Path | None = None) -> dict[str,
     }
 
 
+RUN_VERDICTS = ("gate-report.json", "review.json", "device-report.md", "delivery.json", "prebuild.json")
+
+
 def initialize_later_artifacts(agent_dir: Path) -> None:
     artifacts = {
         "change-set-map.json": {
@@ -1124,11 +1127,12 @@ def feature_docs_step(target: Path, config: dict[str, Any], changes: list[str]) 
     pattern = (config.get("feature_docs") or {}).get("glob")
     if not pattern:
         return None
-    changed = set(changes)
+    # `changes` holds source files only; the docs themselves (.md) come from the full change list.
+    edited = set(changes) | set(changed_paths(target)[0])
     stale: list[str] = []
     for doc in sorted(target.glob(pattern)):
         relative = doc.relative_to(target).as_posix()
-        if relative in changed:
+        if relative in edited:
             continue
         covered = [
             name for name in changes
@@ -1782,10 +1786,9 @@ def gate_attempt(
     steps: list[dict[str, Any]] = []
     docs = feature_docs_step(target, config, changes)
     if docs:
+        # A stale doc fails the gate but does not stop the build: one round reports every problem.
         docs["attempt"] = attempt
         steps.append(docs)
-        if not gate_steps_pass([docs]):
-            return steps, warnings
     for index, unit in enumerate(units, 1):
         log_path = run_dir(target) / f"{stem}-{index}.log"
         unit_steps, unit_warnings = run_gate_unit(target, config, unit, log_path, fallbacks)
@@ -1914,10 +1917,14 @@ def append_stage_log(
         handle.write(f"| {stamp} {row}\n")
 
 
-def source_changes(target: Path) -> list[str]:
+def changed_paths(target: Path) -> tuple[list[str], list[str]]:
+    """Every path the change touched, of any type, and the tracked subset: (names, tracked)."""
     names: list[str] = []
-    recorded = run_dir(target) / "t4-files.json"
-    if recorded.exists():
+    try:
+        recorded = run_dir(target) / "t4-files.json"
+    except FileNotFoundError:
+        recorded = None
+    if recorded and recorded.exists():
         names.extend(str(item) for item in read_json(recorded).get("files", []))
     repo_map_path = cache_dir(target) / "repo-map.json"
     base = read_json(repo_map_path).get("base_commit") if repo_map_path.exists() else None
@@ -1936,6 +1943,11 @@ def source_changes(target: Path) -> list[str]:
     for entry in status.stdout.splitlines():
         if len(entry) >= 4:
             names.append(entry[3:].strip().split(" -> ")[-1].strip('"'))
+    return names, tracked
+
+
+def source_changes(target: Path) -> list[str]:
+    names, tracked = changed_paths(target)
     suffixes = {".kt", ".java", ".xml", ".kts", ".gradle"}
     changed: set[str] = set()
     for name in names:
@@ -2337,6 +2349,9 @@ def run(target: Path, ticket: dict[str, Any]) -> dict[str, Any]:
     set_current(target, ticket_id)
     write_json(agent_dir / "ticket-spec.json", spec)
     write_json(agent_dir / TOOLKIT_FINGERPRINT_FILE, {"files": toolkit_fingerprint()})
+    # Starting a ticket again is a new run: verdicts of the previous one must not carry over.
+    for verdict in RUN_VERDICTS:
+        (agent_dir / verdict).unlink(missing_ok=True)
     initialize_later_artifacts(agent_dir)
     # A new start is a new run: metrics from an earlier start of this ticket would be double-counted.
     metrics: dict[str, Any] = {"schema_version": 1, "stages": {}}

@@ -129,6 +129,8 @@ class FeatureDocsTests(unittest.TestCase):
     def test_a_covered_production_change_without_the_doc_fails(self) -> None:
         with Project() as root:
             (root / "core/domain/README.md").write_text(DOC, encoding="utf-8")
+            git(root, "add", ".")
+            git(root, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base")
             step = feature_docs_step(root, {"feature_docs": {"glob": "*/*/README.md"}}, CHANGED)
 
         self.assertEqual(step["outcome"], "failed")
@@ -140,6 +142,17 @@ class FeatureDocsTests(unittest.TestCase):
             step = feature_docs_step(
                 root, {"feature_docs": {"glob": "*/*/README.md"}}, [*CHANGED, "core/domain/README.md"],
             )
+
+        self.assertEqual(step["outcome"], "passed")
+
+    def test_a_doc_edited_in_the_working_tree_counts_even_though_it_is_markdown(self) -> None:
+        with Project() as root:
+            (root / "core/domain/README.md").write_text(DOC, encoding="utf-8")
+            git(root, "add", ".")
+            git(root, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base")
+            (root / "core/domain/README.md").write_text(DOC + "\nEmpty state documented.\n", encoding="utf-8")
+            # Only source files are passed in, as the gate does; the README edit must still be seen.
+            step = feature_docs_step(root, {"feature_docs": {"glob": "*/*/README.md"}}, CHANGED)
 
         self.assertEqual(step["outcome"], "passed")
 

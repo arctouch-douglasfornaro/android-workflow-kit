@@ -310,6 +310,18 @@ class RunLayoutTests(unittest.TestCase):
             self.assertTrue((cache_dir(root) / "repo-map.json").exists())
             self.assertIn(".ai/workflow/", ignore)
 
+    def test_starting_a_ticket_again_drops_the_previous_verdicts(self) -> None:
+        with AndroidProject() as root:
+            run(root, {"id": "R-1", "title": "Change ProfileScreen", "type": "chore"})
+            path = run_dir(root) / "gate-report.json"
+            path.write_text(json.dumps({**read_json(path), "status": "failed"}), encoding="utf-8")
+            approve_review(root)
+            run(root, {"id": "R-1", "title": "Change ProfileScreen", "type": "chore"})
+            gate = read_json(run_dir(root) / "gate-report.json")
+            review = read_json(run_dir(root) / "review.json")
+        self.assertEqual(gate["status"], "not_run")
+        self.assertEqual(review["status"], "not_run")
+
     def test_second_ticket_keeps_first_run(self) -> None:
         with AndroidProject() as root:
             run(root, {"id": "APP-1", "title": "One", "type": "chore"})
@@ -972,6 +984,22 @@ class BatchedGateTests(unittest.TestCase):
             (root / "fake-gradle.json").write_text(json.dumps(working_fake), encoding="utf-8")
         self.code = main(["gate", "--target", str(root)])
         return read_json(run_dir(root) / "gate-report.json")
+
+    def test_a_stale_feature_doc_fails_but_still_runs_the_build(self) -> None:
+        with AndroidProject() as root:
+            (root / "app/README.md").write_text("---\ncovers:\n  - app\n---\n# App\n", encoding="utf-8")
+            fake_gradle_project(root, {})
+            overrides = root / ".ai/android-workflow.json"
+            overrides.write_text(json.dumps({**read_json(overrides), "feature_docs": {"glob": "*/README.md"}}), encoding="utf-8")
+            run(root, {"id": "B-2", "title": "Change ProfileScreen", "type": "chore"})
+            implement(root)
+            main(["gate", "--target", str(root)])
+            report = read_json(run_dir(root) / "gate-report.json")
+            calls = gradle_calls(root)
+        outcomes = {step["command"]: step["outcome"] for step in report["steps"]}
+        self.assertEqual(report["status"], "failed")
+        self.assertEqual(outcomes["feature docs (*/README.md)"], "failed")
+        self.assertTrue(calls, "compile/test/lint must still run when only the doc is stale")
 
     def test_gradle_tasks_share_one_continue_invocation(self) -> None:
         with AndroidProject() as root:
