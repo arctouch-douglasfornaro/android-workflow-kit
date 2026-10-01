@@ -18,7 +18,7 @@ from typing import Any
 
 from android_workflow.paths import run_dir
 
-EXCLUDED_PREFIXES = (".ai/", ".agent/")
+EXCLUDED_PREFIXES = (".ai/",)
 EXCLUDED_NAMES = frozenset({"local.properties", ".DS_Store"})
 EXCLUDED_SUFFIXES = (".jks", ".keystore", ".log", ".hprof", ".apk", ".aab", ".mp4", ".orig", ".rej")
 UNTRACKED_SOURCE_SUFFIXES = frozenset({
@@ -81,9 +81,13 @@ def stage_plan(target: Path) -> tuple[list[str], list[str]]:
 
 
 def pull_request_disclosures(gate: dict[str, Any], state: dict[str, Any], body: str) -> list[str]:
-    """Lines the PR must carry that its author may not have written: waived lint, skipped device."""
+    """Lines the PR must carry that its author may not have written: draft issues, waived lint, skipped device."""
     lower = body.lower()
     lines = []
+    draft = state.get("draft") or {}
+    if draft.get("issues") and "not ready" not in lower:
+        lines.append(f"**Not ready for review:** {draft.get('reason') or 'the workflow stopped before every check passed'}.")
+        lines.extend(f"- {issue}" for issue in draft["issues"])
     waivers = gate.get("waivers") or []
     if waivers and "lint" not in lower:
         findings = sum(int(item.get("count") or 0) for item in waivers)
@@ -117,7 +121,7 @@ def compare_url(remote: str, branch: str, base: str) -> str | None:
 
 def open_pull_request(
     target: Path, host: str, remote: str, branch: str, base: str, subject: str, body_file: Path,
-    timeout: int,
+    timeout: int, draft: bool = False,
 ) -> dict[str, Any]:
     cli = {"github": "gh", "gitlab": "glab"}.get(host)
     if not cli or not shutil.which(cli):
@@ -136,16 +140,19 @@ def open_pull_request(
             url = existing.stdout.split(" ", 1)[1].strip()
             edited = run("pr", "edit", branch, "--body-file", str(body_file))
             return {"status": "updated", "url": url, **({} if edited.returncode == 0 else {"warning": tail(edited.stderr, 5)})}
-        created = run("pr", "create", "--base", base, "--head", branch, "--title", subject, "--body-file", str(body_file))
+        created = run(
+            "pr", "create", "--base", base, "--head", branch, "--title", subject, "--body-file", str(body_file),
+            *(["--draft"] if draft else []),
+        )
     else:
         created = run(
             "mr", "create", "--target-branch", base, "--source-branch", branch, "--title", subject,
-            "--description", body_file.read_text(encoding="utf-8"), "--yes",
+            "--description", body_file.read_text(encoding="utf-8"), "--yes", *(["--draft"] if draft else []),
         )
     if created.returncode != 0:
         raise ValueError(f"`{cli}` could not open the PR: {tail(created.stderr or created.stdout, 8)}")
     urls = re.findall(r"https?://\S+", created.stdout)
-    return {"status": "created", "url": urls[-1] if urls else None}
+    return {"status": "created", "url": urls[-1] if urls else None, "draft": draft}
 
 
 def deliver(
@@ -173,7 +180,7 @@ def deliver(
     spec = read_json(agent_dir / "ticket-spec.json")
     gate = read_json(agent_dir / "gate-report.json") if (agent_dir / "gate-report.json").is_file() else {}
     if state.get("status") != "completed":
-        raise ValueError("run `finish` first: delivery ships only a verified run")
+        raise ValueError("run `finish` first (or `finish --draft` when the run stopped after the code was written)")
     finished = state.get("finished_fingerprint")
     if finished and finished != source_fingerprint(target):
         raise ValueError("source changed after `finish`; re-run the gate, review and `finish`")
@@ -267,7 +274,8 @@ def deliver(
         write_json(agent_dir / "delivery.json", result)
         return result
     host, remote = remote_host(target)
-    pr = open_pull_request(target, host, remote, branch, base_name, subject, body_file, timeout=300)
+    draft = bool((state.get("draft") or {}).get("issues"))
+    pr = open_pull_request(target, host, remote, branch, base_name, subject, body_file, timeout=300, draft=draft)
     result["pr"] = pr
     result["warnings"] = warnings
     result["duration_seconds"] = round(time.monotonic() - started, 1)

@@ -153,6 +153,42 @@ class DeliverTests(unittest.TestCase):
         self.assertIn("no emulator", lines[1])
         self.assertEqual(pull_request_disclosures(gate, state, BODY + "Lint: pre-existing, untouched. Device: none."), [])
 
+    def test_draft_lists_what_is_not_ready(self) -> None:
+        state = {"draft": {"reason": "review still blocking", "issues": ["review.json is not approved"]}}
+        lines = pull_request_disclosures({}, state, BODY)
+        self.assertIn("**Not ready for review:** review still blocking.", lines)
+        self.assertIn("- review.json is not approved", lines)
+        self.assertEqual(pull_request_disclosures({}, {"draft": None}, BODY), [])
+
+    def test_draft_run_opens_a_draft_pull_request(self) -> None:
+        from unittest import mock
+
+        from android_workflow.delivery import open_pull_request
+
+        with AndroidProject() as root:
+            bin_dir = root / "fakebin"
+            bin_dir.mkdir()
+            calls = root / "gh-calls.txt"
+            gh = bin_dir / "gh"
+            gh.write_text(
+                "#!/bin/sh\n"
+                f"echo \"$@\" >> {calls}\n"
+                "[ \"$2\" = view ] && exit 1\n"
+                "echo https://github.com/o/r/pull/7\n",
+                encoding="utf-8",
+            )
+            gh.chmod(0o755)
+            body = root / "body.md"
+            body.write_text(BODY, encoding="utf-8")
+            with mock.patch.dict("os.environ", {"PATH": f"{bin_dir}:/usr/bin:/bin"}):
+                draft = open_pull_request(root, "github", "git@github.com:o/r.git", "b", "main", "S", body, 30, draft=True)
+                ready = open_pull_request(root, "github", "git@github.com:o/r.git", "b", "main", "S", body, 30)
+            created = [line for line in calls.read_text(encoding="utf-8").splitlines() if line.startswith("pr create")]
+        self.assertEqual((draft["status"], draft["draft"]), ("created", True))
+        self.assertFalse(ready["draft"])
+        self.assertTrue(created[0].endswith("--draft"))
+        self.assertFalse(created[1].endswith("--draft"))
+
     def test_waived_lint_is_disclosed_in_the_body_that_ships(self) -> None:
         with AndroidProject() as root:
             finished_run(root)

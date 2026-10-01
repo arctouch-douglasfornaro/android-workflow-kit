@@ -12,25 +12,7 @@ from typing import Any
 WORKFLOW_ROOT = ".ai/workflow"
 CACHE_NAME = "_cache"
 CURRENT_NAME = "current.json"
-LEGACY_AGENT = ".agent"
 
-CACHE_FILES = ("project-config.json", "env.json", "repo-map.json")
-RUN_JSON = (
-    "ticket-spec.json",
-    "change-set-map.json",
-    "gate-report.json",
-    "review.json",
-    "stage-metrics.json",
-    "run-state.json",
-    "t4-files.json",
-)
-RUN_MARKDOWN = (
-    "plan.md",
-    "implementation-notes.md",
-    "device-report.md",
-    "pr-description.md",
-    "stage-log.md",
-)
 RESERVED_NAMES = {CACHE_NAME, CURRENT_NAME, "_setup", "preview"}
 MEDIA_NAME = "media"
 MANIFEST_NAME = "manifest.json"
@@ -77,22 +59,11 @@ def run_dir(target: Path, ticket_id: str | None = None) -> Path:
     slug = ticket_slug(ticket_id) if ticket_id else current_ticket_id(target)
     if slug:
         return workflow_root(target) / slug
-    legacy = target / LEGACY_AGENT
-    if (legacy / "run-state.json").exists() or (legacy / "ticket-spec.json").exists():
-        return legacy
     raise FileNotFoundError("no active workflow run; call start first")
 
 
 def media_dir(target: Path, ticket_id: str | None = None) -> Path:
     return run_dir(target, ticket_id) / MEDIA_NAME
-
-
-def is_generated_path(path: Path) -> bool:
-    return WORKFLOW_ROOT in path.as_posix() or LEGACY_AGENT in path.parts
-
-
-def is_toolkit_repo(target: Path) -> bool:
-    return (target / "android_workflow" / "cli.py").exists()
 
 
 LOCAL_ONLY_PATHS = (".ai/workflow/", ".ai/project-profile.md", ".ai/android-workflow.json")
@@ -123,44 +94,12 @@ def ensure_gitignore(target: Path) -> None:
     existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
     lines = existing.splitlines()
     wanted = list(LOCAL_ONLY_PATHS) if exclude else [".ai/workflow/"]
-    if not is_toolkit_repo(target):
-        wanted.append(".agent/")
     gitignore.parent.mkdir(parents=True, exist_ok=True)
     missing = [line for line in wanted if line not in lines]
     if not missing:
         return
     suffix = ("\n" if existing and not existing.endswith("\n") else "") + "\n".join(missing) + "\n"
     gitignore.write_text(existing + suffix, encoding="utf-8")
-
-
-def migrate_legacy(target: Path) -> Path | None:
-    ensure_gitignore(target)
-    legacy = target / LEGACY_AGENT
-    spec_path = legacy / "ticket-spec.json"
-    if not spec_path.exists():
-        return None
-    spec = json.loads(spec_path.read_text(encoding="utf-8"))
-    ticket_id = ticket_slug((spec.get("ticket") or {}).get("id"))
-    dest = workflow_root(target) / ticket_id
-    cache = cache_dir(target)
-    dest.mkdir(parents=True, exist_ok=True)
-    cache.mkdir(parents=True, exist_ok=True)
-    for name in CACHE_FILES:
-        src = legacy / name
-        if src.exists() and not (cache / name).exists():
-            shutil.move(str(src), str(cache / name))
-    for name in RUN_JSON + RUN_MARKDOWN:
-        src = legacy / name
-        if src.exists() and not (dest / name).exists():
-            shutil.move(str(src), str(dest / name))
-    set_current(target, ticket_id)
-    leftover = [path for path in legacy.iterdir() if path.name not in {"agents", "skills", "schemas"}]
-    if not leftover:
-        try:
-            legacy.rmdir()
-        except OSError:
-            pass
-    return dest
 
 
 def list_runs(target: Path) -> list[dict[str, Any]]:

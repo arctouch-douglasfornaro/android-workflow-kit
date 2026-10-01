@@ -22,7 +22,6 @@ from android_workflow.paths import (
     clean_runs,
     ensure_gitignore,
     list_runs,
-    migrate_legacy,
     run_dir,
     set_current,
     ticket_slug,
@@ -90,7 +89,7 @@ def role_view(value: Any) -> Any:
 
 
 DEFAULT_CONFIG: dict[str, Any] = {
-    "tools": {"gradle": "./gradlew", "adb": "adb", "emulator": "emulator"},
+    "tools": {"gradle": "./gradlew", "adb": "adb"},
     "commands": {
         "build": "./gradlew assembleDebug",
         "unit_tests": "./gradlew testDebugUnitTest",
@@ -100,7 +99,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "format_apply": None,
         "detekt": None,
         "install": "./gradlew installDebug",
-        "instrumented_tests": "./gradlew connectedDebugAndroidTest",
     },
     "device": {"app_module": None, "application_id": None, "launch_activity": None},
     # Pure Kotlin/Java modules have no variants: `:data:compileKotlin`, not `compileDebugKotlin`.
@@ -116,24 +114,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "android_lint": "./gradlew {module}:lintDebug",
     },
     "quality_gates": {
-        "assume_base_green": True,
-        "use_remote_gradle_cache": False,
-        "max_t4_retries": 2,
-        "max_review_retries": 1,
-        "max_device_retries": 1,
         # One Gradle invocation with --continue instead of one per task.
         "batch_gradle": True,
         # Downstream modules that reference a changed declaration get compile + unit tests.
         "max_consumer_modules": 12,
     },
-    "emulator": {
-        "expected_running": True,
-        "boot_async_from_stage": "T4",
-        "avd_name": None,
-    },
-    "orchestrator": {"token_budget": None, "time_budget_seconds": None},
-    "stage_adapters": {"T4": None, "T6": None, "T8": None},
-    "execution": {"command_timeout_seconds": 900, "device_boot_timeout_seconds": 180},
+    "execution": {"command_timeout_seconds": 900},
     "overrides": {},
 }
 
@@ -203,7 +189,7 @@ def toolkit_changes(agent_dir: Path) -> list[str]:
 
 
 PRUNE_DIRS = frozenset({
-    ".git", "build", ".gradle", ".ai", ".agent", ".idea", ".kotlin", "node_modules", "out",
+    ".git", "build", ".gradle", ".ai", ".idea", ".kotlin", "node_modules", "out",
     ".cxx", "generated", "intermediates",
 })
 
@@ -556,7 +542,6 @@ def bootstrap(target: Path, override_path: Path | None = None) -> tuple[dict[str
         "commands": detected["commands"],
         "quality_gates": config["quality_gates"],
         "tests": detected["tests"],
-        "emulator": config["emulator"],
     }
     repo_map = {
         "schema_version": SCHEMA_VERSION,
@@ -957,27 +942,13 @@ def write_plan(agent_dir: Path, spec: dict[str, Any], change_set: dict[str, Any]
     (agent_dir / "plan.md").write_text(content, encoding="utf-8")
 
 
-def adapter_environment(target: Path) -> dict[str, str]:
-    run = run_dir(target)
-    cache = cache_dir(target)
-    return {
-        "ANDROID_WORKFLOW_TARGET": str(target),
-        "ANDROID_WORKFLOW_ENV": str(cache / "env.json"),
-        "ANDROID_WORKFLOW_TICKET": str(run / "ticket-spec.json"),
-        "ANDROID_WORKFLOW_CHANGE_SET": str(run / "change-set-map.json"),
-        "ANDROID_WORKFLOW_PLAN": str(run / "plan.md"),
-        "ANDROID_WORKFLOW_PR_BODY": str(run / "pr-description.md"),
-    }
-
-
 def execute_command(
     command: str,
     target: Path,
     timeout: int,
     full_output: bool = False,
-    env_root: Path | None = None,
 ) -> dict[str, Any]:
-    """Run `command` in `target`; adapter variables describe `env_root` (default: `target`)."""
+    """Run `command` in `target` and keep the tail of its output."""
     started = time.monotonic()
     try:
         result = subprocess.run(
@@ -987,7 +958,6 @@ def execute_command(
             capture_output=True,
             timeout=timeout,
             check=False,
-            env={**__import__("os").environ, **adapter_environment(env_root or target)},
         )
         combined = (result.stdout + "\n" + result.stderr).strip().splitlines()
         command_result = {
@@ -998,13 +968,6 @@ def execute_command(
         }
         if full_output:
             command_result["output"] = combined
-        for line in combined:
-            if line.startswith("ANDROID_WORKFLOW_METRICS="):
-                try:
-                    reported = json.loads(line.split("=", 1)[1])
-                    command_result["tokens"] = int(reported["tokens"])
-                except (json.JSONDecodeError, KeyError, TypeError, ValueError):
-                    pass
         return command_result
     except (OSError, subprocess.TimeoutExpired) as error:
         return {
@@ -1014,48 +977,6 @@ def execute_command(
             "output_excerpt": [str(error)],
             **({"output": [str(error)]} if full_output else {}),
         }
-
-
-def device_ready(config: dict[str, Any], target: Path) -> bool:
-    result = execute_command(f"{config['tools']['adb']} get-state", target, 10)
-    return result["exit_code"] == 0 and "device" in result["output_excerpt"]
-
-
-def start_emulator_async(config: dict[str, Any], target: Path) -> bool:
-    avd = config["emulator"].get("avd_name")
-    if not avd:
-        return False
-    command = shlex.split(f"{config['tools']['emulator']} -avd {avd}")
-    try:
-        subprocess.Popen(
-            command,
-            cwd=target,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        return True
-    except OSError:
-        return False
-
-
-def wait_for_device(config: dict[str, Any], target: Path) -> bool:
-    deadline = time.monotonic() + config["execution"]["device_boot_timeout_seconds"]
-    while time.monotonic() < deadline:
-        if device_ready(config, target):
-            return True
-        time.sleep(2)
-    return False
-
-
-def capture_screenshot(config: dict[str, Any], target: Path) -> Path | None:
-    from android_workflow.evidence import capture_still
-
-    try:
-        item = capture_still(target, config, phase="after", name="device")
-    except (OSError, ValueError):
-        return None
-    return Path(item["abs_path"])
 
 
 def secret_scan(target: Path) -> dict[str, Any]:
@@ -1481,7 +1402,6 @@ def run_gradle_batch(
     root: Path,
     timeout: int,
     log_path: Path,
-    env_root: Path | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Run every task in one `--continue` build and give each original command its own outcome.
 
@@ -1511,7 +1431,7 @@ def run_gradle_batch(
         batch_args.extend(["--init-script", str(lint_init_script)])
     batch = shlex.join([*batch_args, "--continue", "--console=plain"])
     try:
-        result = execute_command(batch, root, timeout * len(commands), full_output=True, env_root=env_root)
+        result = execute_command(batch, root, timeout * len(commands), full_output=True)
     finally:
         if lint_init_script is not None:
             lint_init_script.unlink(missing_ok=True)
@@ -1653,7 +1573,7 @@ def touched_files(target: Path) -> set[str]:
         text=True, capture_output=True, check=False,
     )
     names.update(line.strip() for line in diff.stdout.splitlines() if line.strip())
-    return {name for name in names if ".agent" not in Path(name).parts and ".ai" not in Path(name).parts}
+    return {name for name in names if ".ai" not in Path(name).parts}
 
 
 def tree_state(target: Path) -> dict[str, str]:
@@ -1884,33 +1804,13 @@ def run_gate_rounds(
     config: dict[str, Any],
     change_set: dict[str, Any],
     needs_device: bool,
-    adapter: str | None,
-    corrections: list[dict[str, Any]] | None = None,
     run_number: int = 1,
     extras: dict[str, Any] | None = None,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int, list[str], float]:
-    """Gate, then let the T4 adapter fix and re-gate up to `max_t4_retries` times."""
+) -> tuple[list[dict[str, Any]], list[str], float]:
+    """One gate attempt; a red gate goes back to the Implementer, not to a retry loop here."""
     started = time.monotonic()
-    steps: list[dict[str, Any]] = []
-    last_attempt_steps: list[dict[str, Any]] = []
-    warnings: list[str] = []
-    retries = 0
-    while True:
-        last_attempt_steps, warnings = gate_attempt(
-            target, config, change_set, needs_device, retries + 1, run_number, extras,
-        )
-        steps.extend(last_attempt_steps)
-        if gate_steps_pass(last_attempt_steps):
-            break
-        if not adapter or retries >= config["quality_gates"]["max_t4_retries"]:
-            break
-        retries += 1
-        correction = execute_command(adapter, target, config["execution"]["command_timeout_seconds"])
-        if corrections is not None:
-            corrections.append(correction)
-        if correction["exit_code"] != 0:
-            break
-    return steps, last_attempt_steps, retries, warnings, round(time.monotonic() - started, 3)
+    steps, warnings = gate_attempt(target, config, change_set, needs_device, 1, run_number, extras)
+    return steps, warnings, round(time.monotonic() - started, 3)
 
 
 def markdown_section_value(content: str, heading: str) -> str:
@@ -2041,7 +1941,7 @@ def source_changes(target: Path) -> list[str]:
     changed: set[str] = set()
     for name in names:
         path = Path(name)
-        if ".agent" in path.parts or ".ai" in path.parts:
+        if ".ai" in path.parts:
             continue
         # A lint baseline only counts when a tracked one changed; a new one is a gate side effect.
         if BASELINE_NAME_PATTERN.search(name) and name not in tracked:
@@ -2113,18 +2013,12 @@ def ticket_from_flags(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
-def run_quality_gate(target: Path, execute_external: bool) -> dict[str, Any]:
+def run_quality_gate(target: Path) -> dict[str, Any]:
     agent_dir = run_dir(target)
     config = read_json(cache_dir(target) / "project-config.json")
     change_set = read_json(agent_dir / "change-set-map.json")
     spec = read_json(agent_dir / "ticket-spec.json")
     needs_device = "T7" in spec["route"]
-    adapter = config["stage_adapters"].get("T4")
-    steps: list[dict[str, Any]] = []
-    last_attempt_steps: list[dict[str, Any]] = []
-    retries = 0
-    warnings: list[str] = []
-    duration = 0.0
     previous = read_json(agent_dir / "gate-report.json") if (agent_dir / "gate-report.json").exists() else {}
     prior_runs = list(previous.get("prior_runs") or [])
     if previous.get("status") == "failed":
@@ -2132,7 +2026,6 @@ def run_quality_gate(target: Path, execute_external: bool) -> dict[str, Any]:
             {
                 "status": "failed",
                 "steps": previous.get("steps") or [],
-                "retries": previous.get("retries") or 0,
             }
         )
     run_number = int(previous.get("run") or 0) + 1
@@ -2146,23 +2039,19 @@ def run_quality_gate(target: Path, execute_external: bool) -> dict[str, Any]:
             "toolkit_files": changed_toolkit,
             "fingerprint": source_fingerprint(target),
             "steps": [],
-            "retries": 0,
             "prohibitions_respected": False,
             "prior_runs": prior_runs[-3:],
         }
         write_json(agent_dir / "gate-report.json", report)
         return report
     extras: dict[str, Any] = {}
-    if execute_external:
-        steps, last_attempt_steps, retries, warnings, duration = run_gate_rounds(
-            target, config, change_set, needs_device, adapter, run_number=run_number, extras=extras,
-        )
+    steps, warnings, duration = run_gate_rounds(
+        target, config, change_set, needs_device, run_number=run_number, extras=extras,
+    )
     scan = secret_scan(target)
-    gate_status = "passed" if gate_steps_pass(last_attempt_steps) and scan["status"] == "passed" else "failed"
-    if not execute_external:
-        gate_status = "not_run"
+    gate_status = "passed" if gate_steps_pass(steps) and scan["status"] == "passed" else "failed"
     waivers = [
-        {"command": step["command"], **step["waiver"]} for step in last_attempt_steps if step.get("waiver")
+        {"command": step["command"], **step["waiver"]} for step in steps if step.get("waiver")
     ]
     units = [
         {"tasks": step["batch"], "duration_seconds": step["duration_seconds"], "log": step["log"]}
@@ -2179,71 +2068,12 @@ def run_quality_gate(target: Path, execute_external: bool) -> dict[str, Any]:
         "warnings": warnings,
         "duration_seconds": duration,
         "secret_scan": scan,
-        "retries": retries,
         "prior_runs": prior_runs[-3:],
         "prohibitions_respected": True,
         **extras,
     }
     write_json(agent_dir / "gate-report.json", report)
     return report
-
-
-def run_device_check(target: Path) -> dict[str, Any]:
-    agent_dir = run_dir(target)
-    config = read_json(cache_dir(target) / "project-config.json")
-    spec = read_json(agent_dir / "ticket-spec.json")
-    existing = agent_dir / "device-report.md"
-    if existing.exists():
-        recorded = device_report_status(existing.read_text(encoding="utf-8"))
-        if recorded in {"pass", "passed", "fail", "failed"} and existing.stat().st_size > 400:
-            return {"status": "passed" if recorded.startswith("pass") else "failed", "reason": "host_report_kept"}
-    if "T7" not in spec["route"]:
-        (agent_dir / "device-report.md").write_text(
-            "# Status\n\nnot_required\n\n# Device\n\n# Scenarios\n\n# Evidence\n\n# Not verified\n",
-            encoding="utf-8",
-        )
-        return {"status": "skipped", "reason": "not_required"}
-    ready = device_ready(config, target) or wait_for_device(config, target)
-    result = (
-        execute_command(
-            config["commands"]["instrumented_tests"],
-            target,
-            config["execution"]["command_timeout_seconds"],
-        )
-        if ready and config["commands"].get("instrumented_tests")
-        else {"exit_code": 1, "output_excerpt": ["device is not ready"]}
-    )
-    attempts = 1
-    flaky = False
-    adapter = config["stage_adapters"].get("T4")
-    if result["exit_code"] != 0 and ready and config["commands"].get("instrumented_tests"):
-        second = execute_command(
-            config["commands"]["instrumented_tests"],
-            target,
-            config["execution"]["command_timeout_seconds"],
-        )
-        attempts = 2
-        flaky = second["exit_code"] == 0
-        result = second
-        if result["exit_code"] != 0 and adapter and config["quality_gates"]["max_device_retries"] > 0:
-            correction = execute_command(adapter, target, config["execution"]["command_timeout_seconds"])
-            if correction["exit_code"] == 0:
-                result = execute_command(
-                    config["commands"]["instrumented_tests"],
-                    target,
-                    config["execution"]["command_timeout_seconds"],
-                )
-                attempts = 3
-    status = "passed" if result["exit_code"] == 0 else "failed"
-    screenshot = capture_screenshot(config, target) if status == "passed" else None
-    (agent_dir / "device-report.md").write_text(
-        f"# Status\n\n{status}\n\n# Device\n\n{'ready' if ready else 'not_ready'}\n\n"
-        f"# Scenarios\n\n- Instrumented tests: {status}\n- Flaky: {'yes' if flaky else 'no'}\n\n"
-        f"# Evidence\n\n- {str(screenshot.relative_to(target)) if screenshot else 'Screenshot not available.'}\n\n"
-        "# Not verified\n\n- Manual navigation and accessibility.\n",
-        encoding="utf-8",
-    )
-    return {"status": status, "attempts": attempts, "flaky": flaky, "command": result}
 
 
 def load_state(target: Path) -> dict[str, Any]:
@@ -2280,7 +2110,7 @@ def log_stage(
         kept = [
             item
             for item in files
-            if ".agent" not in Path(item).parts and ".ai" not in Path(item).parts
+            if ".ai" not in Path(item).parts
         ]
         if kept:
             write_json(agent_dir / "t4-files.json", {"files": kept})
@@ -2372,9 +2202,10 @@ def verification_errors(
 
 def finish_run(
     target: Path,
-    allow_unverified_gate: bool = False,
     skip_device: str | None = None,
+    draft: str | None = None,
 ) -> dict[str, Any]:
+    """Final check before the PR. With `draft`, unresolved checks become known issues of a draft PR."""
     errors = implementation_errors(target)
     if errors:
         raise ValueError("Implementer incomplete: " + "; ".join(errors))
@@ -2383,26 +2214,28 @@ def finish_run(
     state = load_state(target)
     metrics = read_json(agent_dir / "stage-metrics.json")
     gate = read_json(agent_dir / "gate-report.json")
+    issues: list[str] = []
     if gate.get("status") == "failed":
-        raise ValueError("gate is failed; fix it before finish")
-    if gate.get("status") == "not_run" and not allow_unverified_gate:
-        raise ValueError("run `gate --execute-external` before finish")
-    if gate.get("status") == "blocked":
-        raise ValueError("gate is blocked: " + (gate.get("reason") or "see gate-report.json"))
+        issues.append("quality gate is failing; see gate-report.json")
+    elif gate.get("status") == "blocked":
+        issues.append("quality gate is blocked: " + (gate.get("reason") or "see gate-report.json"))
+    elif gate.get("status") != "passed":
+        issues.append("quality gate was not run")
     changed_toolkit = toolkit_changes(agent_dir)
     if changed_toolkit:
-        raise ValueError(
+        issues.append(
             "the workflow toolkit changed during this run (" + ", ".join(changed_toolkit)
-            + "); a human must review that change, then start the run again"
+            + "); a human must review that change"
         )
-    errors = verification_errors(target, spec, state, gate, skip_device)
-    if errors:
-        raise ValueError("not verified: " + "; ".join(errors))
+    issues.extend(verification_errors(target, spec, state, gate, skip_device))
+    if issues and not draft:
+        raise ValueError(
+            "not verified: " + "; ".join(issues)
+            + ". Fix it, or `finish --draft \"<reason>\"` to open the PR as a draft with these issues listed"
+        )
+    state["draft"] = {"reason": draft, "issues": issues} if issues else None
     finish_started = time.monotonic()
-    if gate.get("status") == "passed":
-        state["stages"]["T5"] = {"status": "completed"}
-    else:
-        state["stages"]["T5"] = {"status": "skipped", "reason": "gate_not_run"}
+    state["stages"]["T5"] = {"status": "completed" if gate.get("status") == "passed" else "escalated"}
     if "T7" not in spec["route"]:
         state["stages"]["T7"] = {"status": "skipped", "reason": "not_required"}
     elif skip_device:
@@ -2410,7 +2243,7 @@ def finish_run(
         append_stage_log(agent_dir, "T7", "skipped", "host", skip_device)
     changed = source_changes(target)
     state["stages"]["T4"] = {"status": "completed", "files": changed}
-    state["stages"]["T8"] = {"status": "completed", "ready_for_review": True}
+    state["stages"]["T8"] = {"status": "completed", "ready_for_review": not issues}
     state["stages"]["T9"] = {"status": "completed"}
     delivery_started = time.monotonic()
     write_delivery(agent_dir, spec, state)
@@ -2421,6 +2254,8 @@ def finish_run(
         "status": "completed", "current_stage": None, "pending_question": None,
         "finished_fingerprint": source_fingerprint(target),
     })
+    if issues:
+        append_stage_log(agent_dir, "T8", "draft", "host", f"{draft}: {len(issues)} known issue(s)")
     append_stage_log(agent_dir, "T9", "completed", "cli", "run completed")
     record_stage_metrics(metrics, "T9", "completed", seconds=time.monotonic() - finish_started)
     record_totals(metrics, state)
@@ -2454,76 +2289,12 @@ def status_payload(target: Path) -> dict[str, Any]:
     }
 
 
-def budget_reason(config: dict[str, Any], state: dict[str, Any], metrics: dict[str, Any]) -> str | None:
-    time_budget = config["orchestrator"].get("time_budget_seconds")
-    if time_budget and time.time() - state["created_at"] >= time_budget * 0.8:
-        return "time_budget_threshold_reached"
-    token_budget = config["orchestrator"].get("token_budget")
-    reported_tokens = sum(
-        item.get("tokens") or 0 for item in metrics["stages"].values() if isinstance(item, dict)
-    )
-    if token_budget and reported_tokens >= token_budget * 0.8:
-        return "token_budget_threshold_reached"
-    return None
-
-
-def finish_at_budget(
-    target: Path,
-    state: dict[str, Any],
-    spec: dict[str, Any],
-    metrics: dict[str, Any],
-    reason: str,
-) -> dict[str, Any]:
+def execute_pipeline(target: Path, state: dict[str, Any], spec: dict[str, Any]) -> dict[str, Any]:
+    """Triage is done; locate the change set, check the plan precondition, then hand over to the host."""
     agent_dir = run_dir(target)
-    for stage in ("T2", "T3", "T4", "T5", "T6", "T7"):
-        if stage not in state["stages"] or state["stages"][stage]["status"] == "running":
-            state["stages"][stage] = {"status": "skipped", "reason": reason}
-            metrics["stages"][stage] = {
-                "status": "skipped", "wall_time_seconds": 0, "attempts": 0, "tokens": None
-            }
-    write_delivery(agent_dir, spec, state)
-    state["stages"]["T8"] = {"status": "completed", "delivery": "artifact_only", "ready_for_review": True}
-    metrics["stages"]["T8"] = {
-        "status": "completed", "wall_time_seconds": 0, "attempts": 1, "tokens": None
-    }
-    state["stages"]["T9"] = {"status": "completed"}
-    metrics["stages"]["T9"] = {
-        "status": "completed", "wall_time_seconds": 0, "attempts": 1, "tokens": None
-    }
-    state.update(
-        {
-            "status": "completed",
-            "current_stage": None,
-            "pending_question": None,
-            "stop_reason": reason,
-            "updated_at": int(time.time()),
-        }
-    )
-    record_totals(metrics, state)
-    write_json(agent_dir / "stage-metrics.json", metrics)
-    write_json(agent_dir / "run-state.json", state)
-    return state
-
-
-def execute_pipeline(
-    target: Path,
-    state: dict[str, Any],
-    spec: dict[str, Any],
-    execute_external: bool,
-) -> dict[str, Any]:
-    agent_dir = run_dir(target)
-    config = read_json(cache_dir(target) / "project-config.json")
     repo_map = read_json(cache_dir(target) / "repo-map.json")
     metrics = read_json(agent_dir / "stage-metrics.json")
     state["stages"]["T1"] = {"status": "completed"}
-    metrics["stages"].setdefault(
-        "T0", {"status": "completed", "wall_time_seconds": None, "attempts": 1, "tokens": None}
-    )
-    metrics["stages"].setdefault(
-        "T1", {"status": "completed", "wall_time_seconds": None, "attempts": 1, "tokens": None}
-    )
-    if reason := budget_reason(config, state, metrics):
-        return finish_at_budget(target, state, spec, metrics, reason)
 
     started = stage_start(state, "T2")
     change_set = locate_change_set(target, spec, repo_map)
@@ -2537,210 +2308,23 @@ def execute_pipeline(
         if spec["type"] == "bug" and not spec.get("reproduction"):
             stage_end(state, metrics, "T3", started, "escalated", reason="bug_reproduction_missing")
             state.update({"status": "escalated", "current_stage": "T3"})
-            write_json(agent_dir / "run-state.json", state)
-            write_json(agent_dir / "stage-metrics.json", metrics)
+            save_state(target, state, metrics)
             return state
         stage_end(state, metrics, "T3", started)
     else:
         stage_end(state, metrics, "T3", started, "skipped", reason="not_required")
 
     started = stage_start(state, "T4")
-    adapter = config["stage_adapters"].get("T4")
-    emulator_started = False
-    if execute_external and "T7" in spec["route"] and not device_ready(config, target):
-        emulator_started = start_emulator_async(config, target)
-    if adapter and execute_external:
-        result = execute_command(adapter, target, config["execution"]["command_timeout_seconds"])
-        status = "completed" if result["exit_code"] == 0 else "escalated"
-        stage_end(
-            state, metrics, "T4", started, status,
-            command=result, emulator_started=emulator_started, tokens=result.get("tokens"),
-        )
-        if status == "escalated":
-            state.update({"status": "escalated", "current_stage": "T4"})
-            write_json(agent_dir / "run-state.json", state)
-            write_json(agent_dir / "stage-metrics.json", metrics)
-            return state
-    else:
-        append_stage_log(agent_dir, "T4", "awaiting_host", "cli", "host must implement source")
-        stage_end(
-            state, metrics, "T4", started, "awaiting_host",
-            reason="host_must_implement",
-            emulator_started=emulator_started,
-        )
-        state.update({"status": "awaiting_host", "current_stage": "T4"})
-        save_state(target, state, metrics)
-        return state
-    if reason := budget_reason(config, state, metrics):
-        return finish_at_budget(target, state, spec, metrics, reason)
-
-    started = stage_start(state, "T5")
-    change_set = read_json(agent_dir / "change-set-map.json")
-    needs_device = "T7" in spec["route"]
-    steps: list[dict[str, Any]] = []
-    last_attempt_steps: list[dict[str, Any]] = []
-    retries = 0
-    warnings: list[str] = []
-    duration = 0.0
-    if execute_external:
-        steps, last_attempt_steps, retries, warnings, duration = run_gate_rounds(
-            target, config, change_set, needs_device, adapter,
-            corrections=state["stages"]["T4"].setdefault("corrections", []),
-        )
-        if not state["stages"]["T4"]["corrections"]:
-            del state["stages"]["T4"]["corrections"]
-    scan = secret_scan(target)
-    gate_status = "passed" if gate_steps_pass(last_attempt_steps) and scan["status"] == "passed" else "failed"
-    if not execute_external:
-        gate_status = "not_run"
-    gate_report = {
-        "schema_version": 1,
-        "status": gate_status,
-        "fingerprint": source_fingerprint(target),
-        "steps": steps,
-        "warnings": warnings,
-        "duration_seconds": duration,
-        "secret_scan": scan,
-        "retries": retries,
-        "prohibitions_respected": True,
-    }
-    write_json(agent_dir / "gate-report.json", gate_report)
-    stage_end(
-        state, metrics, "T5", started,
-        "completed" if gate_status == "passed" else ("skipped" if gate_status == "not_run" else "escalated"),
-        reason="external_execution_disabled" if gate_status == "not_run" else None,
-        attempts=retries + 1,
-    )
-    if gate_status == "failed":
-        state.update({"status": "escalated", "current_stage": "T5"})
-        write_json(agent_dir / "run-state.json", state)
-        write_json(agent_dir / "stage-metrics.json", metrics)
-        return state
-    if reason := budget_reason(config, state, metrics):
-        return finish_at_budget(target, state, spec, metrics, reason)
-
-    started = stage_start(state, "T6")
-    review_adapter = config["stage_adapters"].get("T6")
-    if review_adapter and execute_external:
-        result = execute_command(review_adapter, target, config["execution"]["command_timeout_seconds"])
-        review = read_json(agent_dir / "review.json")
-        review_attempts = 1
-        if result["exit_code"] == 0 and review["blocking"] and adapter:
-            correction = execute_command(adapter, target, config["execution"]["command_timeout_seconds"])
-            if correction["exit_code"] == 0:
-                regate, _ = gate_attempt(target, config, change_set, needs_device, retries + 2)
-                if gate_steps_pass(regate):
-                    result = execute_command(review_adapter, target, config["execution"]["command_timeout_seconds"])
-                    review = read_json(agent_dir / "review.json")
-                    review_attempts += 1
-                else:
-                    result = {"exit_code": 1, "output_excerpt": ["gate failed after review correction"]}
-        status = "completed" if result["exit_code"] == 0 and not review["blocking"] else "escalated"
-        review["status"] = "approved" if status == "completed" else "changes_requested"
-        write_json(agent_dir / "review.json", review)
-        stage_end(
-            state, metrics, "T6", started, status,
-            command=result, attempts=review_attempts, tokens=result.get("tokens"),
-        )
-        if status == "escalated":
-            state.update({"status": "escalated", "current_stage": "T6"})
-            write_json(agent_dir / "run-state.json", state)
-            write_json(agent_dir / "stage-metrics.json", metrics)
-            return state
-    else:
-        stage_end(
-            state, metrics, "T6", started, "skipped",
-            reason="adapter_not_configured" if not review_adapter else "external_execution_disabled",
-        )
-    if reason := budget_reason(config, state, metrics):
-        return finish_at_budget(target, state, spec, metrics, reason)
-
-    started = stage_start(state, "T7")
-    if not needs_device:
-        stage_end(state, metrics, "T7", started, "skipped", reason="not_required")
-    elif not execute_external:
-        stage_end(state, metrics, "T7", started, "skipped", reason="external_execution_disabled")
-    else:
-        ready = device_ready(config, target) or (emulator_started and wait_for_device(config, target))
-        result = (
-            execute_command(config["commands"]["instrumented_tests"], target, config["execution"]["command_timeout_seconds"])
-            if ready and config["commands"].get("instrumented_tests")
-            else {"exit_code": 1, "output_excerpt": ["device is not ready"]}
-        )
-        attempts = 1
-        flaky = False
-        if result["exit_code"] != 0 and ready and config["commands"].get("instrumented_tests"):
-            second = execute_command(
-                config["commands"]["instrumented_tests"], target, config["execution"]["command_timeout_seconds"]
-            )
-            attempts = 2
-            flaky = second["exit_code"] == 0
-            result = second
-            if result["exit_code"] != 0 and adapter and config["quality_gates"]["max_device_retries"] > 0:
-                correction = execute_command(adapter, target, config["execution"]["command_timeout_seconds"])
-                if correction["exit_code"] == 0:
-                    result = execute_command(
-                        config["commands"]["instrumented_tests"],
-                        target,
-                        config["execution"]["command_timeout_seconds"],
-                    )
-                    attempts = 3
-        status = "passed" if result["exit_code"] == 0 else "failed"
-        screenshot = capture_screenshot(config, target) if status == "passed" else None
-        (agent_dir / "device-report.md").write_text(
-            f"# Status\n\n{status}\n\n# Device\n\n{'ready' if ready else 'not_ready'}\n\n"
-            f"# Scenarios\n\n- Instrumented tests: {status}\n- Flaky: {'yes' if flaky else 'no'}\n\n"
-            f"# Evidence\n\n- {str(screenshot.relative_to(target)) if screenshot else 'Screenshot not available.'}\n\n"
-            "# Not verified\n\n- Manual navigation and accessibility.\n",
-            encoding="utf-8",
-        )
-        stage_end(
-            state, metrics, "T7", started,
-            "completed" if status == "passed" else "escalated",
-            command=result, attempts=attempts, flaky=flaky,
-        )
-        if status == "failed":
-            state.update({"status": "escalated", "current_stage": "T7"})
-            write_json(agent_dir / "run-state.json", state)
-            write_json(agent_dir / "stage-metrics.json", metrics)
-            return state
-
-    started = stage_start(state, "T8")
-    write_delivery(agent_dir, spec, state)
-    delivery_adapter = config["stage_adapters"].get("T8")
-    if delivery_adapter and execute_external:
-        delivery_result = execute_command(
-            delivery_adapter, target, config["execution"]["command_timeout_seconds"]
-        )
-        delivery_status = "completed" if delivery_result["exit_code"] == 0 else "escalated"
-        stage_end(
-            state, metrics, "T8", started, delivery_status,
-            command=delivery_result, tokens=delivery_result.get("tokens"),
-        )
-        if delivery_status == "escalated":
-            state.update({"status": "escalated", "current_stage": "T8"})
-            write_json(agent_dir / "run-state.json", state)
-            write_json(agent_dir / "stage-metrics.json", metrics)
-            return state
-    else:
-        stage_end(
-            state, metrics, "T8", started, "completed",
-            delivery="artifact_only" if not delivery_adapter else "external_execution_disabled",
-            ready_for_review=True,
-        )
-
-    started = stage_start(state, "T9")
-    stage_end(state, metrics, "T9", started)
-    record_totals(metrics, state)
-    write_json(agent_dir / "stage-metrics.json", metrics)
-    state.update({"status": "completed", "current_stage": None, "pending_question": None, "updated_at": int(time.time())})
-    write_json(agent_dir / "run-state.json", state)
+    append_stage_log(agent_dir, "T4", "awaiting_host", "cli", "host must implement source")
+    stage_end(state, metrics, "T4", started, "awaiting_host", reason="host_must_implement")
+    state.update({"status": "awaiting_host", "current_stage": "T4"})
+    save_state(target, state, metrics)
     return state
 
 
-def run(target: Path, ticket: dict[str, Any], execute_external: bool = False) -> dict[str, Any]:
+def run(target: Path, ticket: dict[str, Any]) -> dict[str, Any]:
     started = time.monotonic()
-    migrate_legacy(target)
+    ensure_gitignore(target)
     bootstrap(target)
     bootstrap_seconds = time.monotonic() - started
     started = time.monotonic()
@@ -2757,7 +2341,6 @@ def run(target: Path, ticket: dict[str, Any], execute_external: bool = False) ->
     record_stage_metrics(metrics, "T0", "completed", seconds=bootstrap_seconds)
     record_stage_metrics(metrics, "T1", "completed", seconds=time.monotonic() - started)
     write_json(agent_dir / "stage-metrics.json", metrics)
-    config = read_json(cache_dir(target) / "project-config.json")
     state = {
         "schema_version": 1,
         "run_id": str(uuid.uuid4()),
@@ -2766,7 +2349,6 @@ def run(target: Path, ticket: dict[str, Any], execute_external: bool = False) ->
         "stages": {"T0": {"status": "completed"}, "T1": {"status": "running"}},
         "pending_question": None,
         "answers": {},
-        "budgets": config["orchestrator"],
         "created_at": int(time.time()),
         "updated_at": int(time.time()),
     }
@@ -2775,11 +2357,10 @@ def run(target: Path, ticket: dict[str, Any], execute_external: bool = False) ->
         state.update({"status": "paused", "pending_question": question})
         write_json(agent_dir / "run-state.json", state)
         return state
-    return execute_pipeline(target, state, spec, execute_external)
+    return execute_pipeline(target, state, spec)
 
 
-def resume(target: Path, question_id: str, answer: str, execute_external: bool = False) -> dict[str, Any]:
-    migrate_legacy(target)
+def resume(target: Path, question_id: str, answer: str) -> dict[str, Any]:
     agent_dir = run_dir(target)
     state_path = agent_dir / "run-state.json"
     state = read_json(state_path)
@@ -2799,7 +2380,7 @@ def resume(target: Path, question_id: str, answer: str, execute_external: bool =
         state.update({"pending_question": next_question, "updated_at": int(time.time())})
         write_json(state_path, state)
         return state
-    return execute_pipeline(target, state, spec, execute_external)
+    return execute_pipeline(target, state, spec)
 
 
 def validate_artifact(name: str, value: dict[str, Any], schema_path: Path | None = None) -> list[str]:
@@ -2819,26 +2400,9 @@ def validate_artifact(name: str, value: dict[str, Any], schema_path: Path | None
     return errors
 
 
-def validate_markdown(name: str, content: str, schema_path: Path | None = None) -> list[str]:
-    schema_path = schema_path or canonical_skill_dir() / "artifacts.schema.json"
-    contracts = read_json(schema_path)["x-markdown-contracts"]
-    if name not in contracts:
-        return [f"unknown contract: {name}"]
-    headings = contracts[name]
-    return [f"missing required section: {heading}" for heading in headings if f"# {heading}" not in content]
-
-
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="android-workflow")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for command in ("configure", "bootstrap"):
-        child = subparsers.add_parser(command)
-        child.add_argument("--target", required=True, type=Path)
-        child.add_argument("--overrides", type=Path)
-    run_parser = subparsers.add_parser("run")
-    run_parser.add_argument("--target", required=True, type=Path)
-    run_parser.add_argument("--ticket", required=True, type=Path)
-    run_parser.add_argument("--execute-external", action="store_true")
     start_parser = subparsers.add_parser("start")
     start_parser.add_argument("--target", required=True, type=Path)
     start_parser.add_argument("--ticket", type=Path)
@@ -2856,10 +2420,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     resume_parser.add_argument("--target", required=True, type=Path)
     resume_parser.add_argument("--question-id", required=True)
     resume_parser.add_argument("--answer", required=True)
-    resume_parser.add_argument("--execute-external", action="store_true")
-    for command in ("plan", "status"):
-        child = subparsers.add_parser(command)
-        child.add_argument("--target", required=True, type=Path)
+    status_parser = subparsers.add_parser("status")
+    status_parser.add_argument("--target", required=True, type=Path)
     setup_parser = subparsers.add_parser("setup")
     setup_parser.add_argument("--target", required=True, type=Path)
     setup_parser.add_argument("--force", action="store_true", help="re-probe even if nothing changed")
@@ -2867,11 +2429,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     setup_parser.add_argument("--source-repo", type=Path, help="main checkout whose setup a worktree may reuse")
     gate_parser = subparsers.add_parser("gate")
     gate_parser.add_argument("--target", required=True, type=Path)
-    # `gate` and `device` always execute; the flag is accepted because the skill docs pass it.
-    gate_parser.add_argument("--execute-external", action="store_true", help=argparse.SUPPRESS)
-    device_parser = subparsers.add_parser("device")
-    device_parser.add_argument("--target", required=True, type=Path)
-    device_parser.add_argument("--execute-external", action="store_true", help=argparse.SUPPRESS)
     log_parser = subparsers.add_parser("log")
     log_parser.add_argument("--target", required=True, type=Path)
     log_parser.add_argument(
@@ -2890,11 +2447,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     finish_parser = subparsers.add_parser("finish")
     finish_parser.add_argument("--target", required=True, type=Path)
-    finish_parser.add_argument("--allow-unverified-gate", action="store_true")
     finish_parser.add_argument(
         "--skip-device",
         metavar="REASON",
         help="finish without the required Device stage; the reason is logged",
+    )
+    finish_parser.add_argument(
+        "--draft",
+        metavar="REASON",
+        help="the run stopped after the code was written: deliver a draft PR that lists what is unresolved",
     )
     prebuild_parser = subparsers.add_parser(
         "prebuild", help="build the base APK in the background while the Planner works",
@@ -2926,8 +2487,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     install_parser.add_argument("--user", action="store_true")
     install_parser.add_argument("--target", type=Path)
     install_parser.add_argument("--home", type=Path, default=Path.home())
-    validate_parser = subparsers.add_parser("validate")
-    validate_parser.add_argument("--target", required=True, type=Path)
     list_parser = subparsers.add_parser("list")
     list_parser.add_argument("--target", required=True, type=Path)
     clean_parser = subparsers.add_parser("clean")
@@ -2958,42 +2517,28 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
             python_executable=sys.executable,
         ), 0
     target = args.target.resolve()
-    migrate_legacy(target)
-    if args.command == "configure":
-        return configure(target, args.overrides), 0
-    if args.command == "bootstrap":
-        env, repo_map = bootstrap(target, args.overrides)
-        return {"env": env, "repo_map": repo_map}, 0
-    if args.command == "run":
-        return run(target, read_json(args.ticket), args.execute_external), 0
+    ensure_gitignore(target)
     if args.command == "start":
         if not args.ticket and not (args.id and args.title):
             raise ValueError("start requires --ticket or --id and --title")
         if args.overrides:
             configure(target, args.overrides)
-        return run(target, ticket_from_flags(args), execute_external=False), 0
+        return run(target, ticket_from_flags(args)), 0
     if args.command == "resume":
-        return resume(target, args.question_id, args.answer, args.execute_external), 0
-    if args.command == "plan":
-        agent_dir = run_dir(target)
-        spec = read_json(agent_dir / "ticket-spec.json")
-        change_set = read_json(agent_dir / "change-set-map.json")
-        write_plan(agent_dir, spec, change_set)
-        append_stage_log(agent_dir, "T3", "completed", "host", "plan.md")
-        return {"plan": str(agent_dir / "plan.md")}, 0
+        return resume(target, args.question_id, args.answer), 0
     if args.command == "log":
         return log_stage(
             target, args.stage, args.status, args.note, args.actor, args.files, args.tokens, args.seconds,
             args.wait_seconds,
         ), 0
     if args.command == "gate":
-        report = run_quality_gate(target, execute_external=True)
+        report = run_quality_gate(target)
         state = load_state(target)
         metrics = read_json(run_dir(target) / "stage-metrics.json")
         status = "completed" if report["status"] == "passed" else "escalated"
         state["stages"]["T5"] = {"status": status, "gate": report["status"]}
         record_stage_metrics(
-            metrics, "T5", status, seconds=report.get("duration_seconds"), attempts=report.get("retries", 0) + 1,
+            metrics, "T5", status, seconds=report.get("duration_seconds"),
         )
         if status == "escalated":
             state.update({"status": "escalated", "current_stage": "T5"})
@@ -3010,29 +2555,10 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
         append_stage_log(run_dir(target), "T5", status, "cli", "; ".join(notes))
         save_state(target, state, metrics)
         return {"gate": report, "run": state}, 0 if status == "completed" else 1
-    if args.command == "device":
-        started = time.monotonic()
-        report = run_device_check(target)
-        state = load_state(target)
-        metrics = read_json(run_dir(target) / "stage-metrics.json")
-        status = "completed" if report["status"] in {"passed", "skipped"} else "escalated"
-        state["stages"]["T7"] = report
-        record_stage_metrics(
-            metrics, "T7", status, seconds=time.monotonic() - started, attempts=report.get("attempts", 1),
-        )
-        if status == "escalated":
-            state.update({"status": "escalated", "current_stage": "T7"})
-        append_stage_log(run_dir(target), "T7", report["status"], "cli", report.get("reason", ""))
-        save_state(target, state, metrics)
-        return {"device": report, "run": state}, 0 if status == "completed" else 1
     if args.command == "status":
         return status_payload(target), 0
     if args.command == "finish":
-        return finish_run(
-            target,
-            allow_unverified_gate=args.allow_unverified_gate,
-            skip_device=args.skip_device,
-        ), 0
+        return finish_run(target, skip_device=args.skip_device, draft=args.draft), 0
     if args.command == "prebuild":
         from android_workflow.prebuild import current_status, start_prebuild, wait_prebuild
 
@@ -3069,23 +2595,7 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
         if args.action in {"capture", "ingest"}:
             append_stage_log(run_dir(target), "T7", "completed", "cli", f"evidence {args.action} {args.name}")
         return result, 0
-    errors: dict[str, list[str]] = {}
-    agent_dir = run_dir(target)
-    for path in sorted(agent_dir.glob("*.json")):
-        if path.name == "project-config.json":
-            continue
-        artifact_errors = validate_artifact(path.name, read_json(path))
-        if artifact_errors:
-            errors[path.name] = artifact_errors
-    schema = canonical_skill_dir() / "artifacts.schema.json"
-    contracts = read_json(schema)["x-markdown-contracts"]
-    for path in sorted(agent_dir.glob("*.md")):
-        if path.name not in contracts:
-            continue
-        artifact_errors = validate_markdown(path.name, path.read_text(encoding="utf-8"))
-        if artifact_errors:
-            errors[path.name] = artifact_errors
-    return {"valid": not errors, "errors": errors}, 0 if not errors else 1
+    raise ValueError(f"unknown command: {args.command}")
 
 
 def main(argv: list[str] | None = None) -> int:

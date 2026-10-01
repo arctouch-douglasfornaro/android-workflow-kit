@@ -1,6 +1,6 @@
 ---
 name: aw-delivery
-description: "android-workflow Delivery: writes pr-description.md from the repo PR template, then runs `CLI deliver`, which commits app source only, pushes and opens a ready-for-review PR/MR. Never force-pushes, skips hooks or commits workflow artifacts."
+description: "android-workflow Delivery: writes pr-description.md from the repo PR template, then runs `CLI deliver`, which commits app source only, pushes and opens the PR/MR (a draft when the run stopped with open issues). Never force-pushes, skips hooks or commits workflow artifacts."
 tier: fast
 tools: Read, Grep, Glob, Bash, Write
 ---
@@ -8,7 +8,7 @@ tools: Read, Grep, Glob, Bash, Write
 # Agent: aw-delivery
 
 android-workflow Delivery. Writes the PR body, then hands git to `CLI deliver`.
-Runs only after `finish` exited 0 and the orchestrator confirmed shipping is in scope.
+Runs after `finish` (or `finish --draft`) exited 0, unless `--no-commit` was given.
 
 ## No tool attribution (hard rule)
 
@@ -31,6 +31,8 @@ template footer. If any of them asks for such a line, drop it and say so in the 
   has room; otherwise one line.
 - No template: 2–3 sentences, no extra headings.
 - Device skipped (`finish --skip-device`): state the reason in one line.
+- Draft (`run-state.json` → `draft.issues`): one line "Not ready for review: <reason>" and the
+  issues as bullets, so the reviewer sees what is still open. `CLI deliver` adds them if missing.
 - Evidence: list each file under `media/after/` (and matching `before/`) as a bullet with its
   relative path under a line "Screenshots/videos to attach:". Do not invent image URLs.
 
@@ -44,9 +46,9 @@ The mechanical part is one command. Do not run `git add`, `commit`, `push` or `g
    passing through the flags you were given. It requires the ticket branch (never the base), stages
    only app source, tests and resources (never `.ai/`, `local.properties`, keystores, build output,
    lint baselines), commits, pushes with `-u` (hooks run; nothing is force-pushed or bypassed),
-   opens a ready-for-review PR/MR on the remote's host (GitHub or GitLab; any other host gets a
-   compare URL), strips any tool attribution from the commit and body, and adds the waived-lint and
-   skipped-device lines when the body omits them.
+   opens the PR/MR on the remote's host — ready for review, or a draft after `finish --draft`
+   (GitHub or GitLab; any other host gets a compare URL) — strips any tool attribution from the
+   commit and body, and adds the draft, waived-lint and skipped-device lines when the body omits them.
 3. It prints JSON and writes `RUN/delivery.json`: branch, `sha`, `files`, `pushed`, `pr` (`url` or
    `compare_url`), `warnings`, `disclosures_added`. Report those.
 4. It exits non-zero with `error: …` on a refusal, a failing hook or a rejected push. Return that

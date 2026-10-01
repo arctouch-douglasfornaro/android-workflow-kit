@@ -32,7 +32,9 @@ diff, Gradle logs or images yourself).
 
 Codex: `$android-workflow`. If the user omitted fields, ask once. Do not invent acceptance
 criteria or business rules. Delivery (commit, push, PR) is **on by default**: invoking the
-workflow authorizes it. The `--no-*` flags stop earlier.
+workflow authorizes it, and **every run that produced code ends in a PR** — ready for review when
+every check passed, a draft listing what is still open when it did not. The `--no-*` flags stop
+earlier.
 
 ## Resolve paths
 
@@ -83,7 +85,7 @@ python3 ~/.ai/bin/feature_workspace.py --repo-root T --ticket ID --title "…" [
 CLI setup    --target T [--source-repo MAIN]        CLI start    --target T --id ID --title "…" [--type bug --reproduction "…"]
 CLI resume   --target T --question-id Q --answer "…" CLI update-spec --target T --surfaces ui --acceptance "a|b"
 CLI prebuild --target T [--wait|--status]           CLI gate     --target T
-CLI finish   --target T [--skip-device "reason"]    CLI deliver  --target T [--subject "ID: …"] [--no-push|--no-pr]
+CLI finish   --target T [--skip-device "r"] [--draft "r"] CLI deliver  --target T [--subject "ID: …"] [--no-push|--no-pr]
 CLI log --target T --stage <Role> --status completed --note "…" [--file P]… [--tokens N] [--wait-seconds S]
 CLI evidence capture|ingest|compare|list --target T [--phase before|after] [--name N] [--file F]
 CLI status|list --target T                          CLI clean --target T --ticket ID | --stale [HOURS] | --all
@@ -134,22 +136,23 @@ CLI status|list --target T                          CLI clean --target T --ticke
    compile and unit tests for modules that use a changed declaration, and a secret scan. Lint or
    format findings only in files the change does not touch are **waived** and disclosed in the PR;
    findings in a touched file fail. Red → resume the Implementer with `gate-report.json` (max 2),
-   then re-gate. Third red → STOP. Never ask the user to waive lint by hand and never route
-   around a refused `finish`. If the gate itself looks wrong (a misclassified waiver, a parser
-   miss), STOP and report it as a toolkit defect: no agent edits the toolkit (`~/.ai`) during a
-   run. `start` fingerprints the toolkit; after any change the gate reports `blocked`
-   (`toolkit_modified_during_run`) and `finish` refuses.
+   then re-gate. Third red → draft PR (see Stop). Never ask the user to waive lint by hand. If
+   the gate itself looks wrong (a misclassified waiver, a parser miss), report it as a toolkit
+   defect and deliver a draft PR: no agent edits the toolkit (`~/.ai`) during a run. `start`
+   fingerprints the toolkit; after any change the gate reports `blocked`
+   (`toolkit_modified_during_run`) and only a draft PR can ship.
 9. **Reviewer:** spawn `aw-reviewer`. `changes_requested` → resume the Implementer with the
    blocking IDs once, re-gate, then resume the Reviewer for a delta review. Still blocking →
-   STOP.
+   draft PR.
 10. **Device after** (if `device_required`, not `--no-device`): spawn `aw-device` mode
     `after`. It verifies the AC on the device and writes `media/compare.md` (before vs after).
-    FAIL → Implementer once → gate → Reviewer delta → Device again. Second FAIL → STOP.
-    BLOCKED when required → STOP and say what unblocks (device, login, flag).
+    FAIL → Implementer once → gate → Reviewer delta → Device again. Second FAIL → draft PR.
+    BLOCKED when required (no device, login, flag) → draft PR that says what unblocks it.
 11. **Finish** (final check before the PR): `CLI finish --target TARGET`. It confirms that the
     gate, the approved review and the device PASS all belong to the code that will ship (any
     later edit makes them stale) and that a visual ticket has `media/after/`. `--no-device` or
-    no device: `--skip-device "<reason>"`, which is logged and repeated in the PR body.
+    no device: `--skip-device "<reason>"`, which is logged and repeated in the PR body. When a
+    check is still open after its fix rounds: `--draft "<why it stopped>"` (see Stop).
 12. **Delivery:** spawn `aw-delivery` with flags. It writes `pr-description.md`, then `CLI deliver`
     commits app source only, pushes (git hooks run, nothing is force-pushed) and opens the PR,
     ready for review.
@@ -177,16 +180,21 @@ summary. When you paused to ask the user, add `--wait-seconds S` so waiting is n
 
 ## Stop
 
-Setup fact that blocks this ticket (e.g. unknown install task for a UI ticket), unanswered
-business question, missing bug reproduction, red gate after 2 fixes, blocking
-review after one fix, second device FAIL, required device BLOCKED. Preserve work and say
-what unblocks.
+**Before any code exists** — a setup fact that blocks this ticket (e.g. unknown install task for a
+UI ticket), an unanswered business question, a missing bug reproduction — there is nothing to put
+in a PR: STOP, ask the user, and continue once answered.
+
+**After the code exists** — red gate after 2 fixes, blocking review after one fix, second device
+FAIL, required device BLOCKED, a toolkit defect — never end without a PR:
+`CLI finish --target TARGET --draft "<why it stopped>"` records every unresolved check as a known
+issue, then `aw-delivery` delivers a **draft** PR that lists them. Tell the user what unblocks it.
 
 ## Done
 
-`finish` exited 0, TARGET has a source diff outside `.ai/workflow/`, review is `approved`,
-device is PASS (or not required), and — unless a `--no-*` flag stopped earlier — the PR is
-open. Show: PR URL, changed files, stage log path, and the absolute `media/before` and
+`finish` exited 0, TARGET has a source diff outside `.ai/workflow/`, and — unless a `--no-*` flag
+stopped earlier — the PR is open: ready for review when the gate passed, the review is `approved`
+and the device is PASS (or not required); a draft with its open issues otherwise.
+Show: PR URL (and whether it is a draft), changed files, stage log path, and the absolute `media/before` and
 `media/after` paths so the user can drag the evidence into the PR.
 
 Commit message and PR body are product copy only: no host/agent/tool names, no

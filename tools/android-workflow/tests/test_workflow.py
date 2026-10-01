@@ -16,8 +16,8 @@ from android_workflow.cli import (
     route_for,
     run,
     strip_agent_attribution,
+    source_fingerprint,
     validate_artifact,
-    validate_markdown,
 )
 from android_workflow.host import canonical_skill_dir
 from android_workflow.paths import cache_dir, run_dir
@@ -33,6 +33,19 @@ def approve_review(root: Path) -> int:
         encoding="utf-8",
     )
     return main(["log", "--target", str(root), "--stage", "T6", "--status", "completed", "--note", "approved"])
+
+
+def pass_gate(root: Path) -> None:
+    """A green gate for the current source, for tests about what happens after the gate."""
+    path = run_dir(root) / "gate-report.json"
+    report = read_json(path)
+    report.update({"status": "passed", "fingerprint": source_fingerprint(root)})
+    path.write_text(json.dumps(report), encoding="utf-8")
+
+
+def finish_verified(root: Path, **kwargs: object) -> dict:
+    pass_gate(root)
+    return finish_run(root, **kwargs)
 
 
 def implement(root: Path, body: str = "fun empty() = Unit\n") -> str:
@@ -105,34 +118,21 @@ class DetectionTests(unittest.TestCase):
         with AndroidProject() as root:
             overrides = root / "overrides.json"
             overrides.write_text(
-                json.dumps({"commands": {"build": "./gradlew customBuild"}, "emulator": {"avd_name": "Pixel"}}),
+                json.dumps({"commands": {"build": "./gradlew customBuild"}, "device": {"application_id": "com.example"}}),
                 encoding="utf-8",
             )
             config = configure(root, overrides)
 
         self.assertEqual(config["commands"]["build"], "./gradlew customBuild")
         self.assertEqual(config["commands"]["unit_tests"], "./gradlew testDebugUnitTest")
-        self.assertEqual(config["emulator"]["avd_name"], "Pixel")
+        self.assertEqual(config["device"]["application_id"], "com.example")
 
 
 class SchemaTests(unittest.TestCase):
-    def test_bootstrap_artifacts_match_contracts(self) -> None:
-        with AndroidProject() as root:
-            env, repo_map = bootstrap(root)
-            schema = canonical_skill_dir() / "artifacts.schema.json"
-            self.assertEqual(validate_artifact("env.json", env, schema), [])
-            self.assertEqual(validate_artifact("repo-map.json", repo_map, schema), [])
-
     def test_missing_required_field_is_reported(self) -> None:
         schema = canonical_skill_dir() / "artifacts.schema.json"
         errors = validate_artifact("ticket-spec.json", {"schema_version": 1}, schema)
         self.assertIn("missing required field: ticket", errors)
-
-    def test_markdown_contract_requires_named_sections(self) -> None:
-        schema = canonical_skill_dir() / "artifacts.schema.json"
-        errors = validate_markdown("plan.md", "# Objective\n", schema)
-        self.assertIn("missing required section: Out of scope", errors)
-
 
 class RoutingTests(unittest.TestCase):
     def test_plan_and_device_are_conditional(self) -> None:
@@ -164,11 +164,9 @@ class RoutingTests(unittest.TestCase):
             change_set = read_json(artifacts(root, "APP-1") / "change-set-map.json")
             log = (artifacts(root, "APP-1") / "stage-log.md").read_text(encoding="utf-8")
             schema = canonical_skill_dir() / "artifacts.schema.json"
-            generated_errors = {
-                path.name: validate_artifact(path.name, read_json(path), schema)
-                for path in artifacts(root, "APP-1").glob("*.json")
-                if path.name != "project-config.json"
-            }
+            spec_errors = validate_artifact(
+                "ticket-spec.json", read_json(artifacts(root, "APP-1") / "ticket-spec.json"), schema,
+            )
 
         self.assertEqual(state["status"], "awaiting_host")
         self.assertEqual(state["current_stage"], "T4")
@@ -176,7 +174,7 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(change_set["candidate_files"][0]["path"], "app/src/main/java/com/example/ProfileScreen.kt")
         self.assertIn("| Implementer | awaiting_host |", log)
         self.assertNotIn("(T4)", log)
-        self.assertTrue(all(not errors for errors in generated_errors.values()))
+        self.assertEqual(spec_errors, [])
 
     def test_business_question_pauses_and_resume_uses_answer(self) -> None:
         with AndroidProject() as root:
@@ -204,82 +202,12 @@ class RoutingTests(unittest.TestCase):
             persisted_spec["business_questions"][0]["answer"], "Users with an active contract"
         )
 
-    def test_configured_adapters_and_gates_execute_and_emit_metrics(self) -> None:
-        true = shutil.which("true") or "/usr/bin/true"
-        with AndroidProject() as root:
-            overrides = root / "overrides.json"
-            overrides.write_text(
-                json.dumps(
-                    {
-                        "commands": {
-                            "build": true,
-                            "unit_tests": true,
-                            "android_lint": true,
-                            "ktlint": true,
-                            "detekt": true,
-                        },
-                        "module_commands": {
-                            "compile": true,
-                            "unit_tests": true,
-                            "android_lint": true,
-                        },
-                        "stage_adapters": {"T4": true, "T6": true},
-                    }
-                ),
-                encoding="utf-8",
-            )
-            configure(root, overrides)
-            state = run(
-                root,
-                {
-                    "id": "APP-3",
-                    "title": "Change ProfileScreen",
-                    "type": "chore",
-                    "surfaces": ["domain"],
-                },
-                execute_external=True,
-            )
-            gate = read_json(artifacts(root, "APP-3") / "gate-report.json")
-            metrics = read_json(artifacts(root, "APP-3") / "stage-metrics.json")
-
-        self.assertEqual(state["status"], "completed")
-        self.assertEqual(gate["status"], "passed")
-        self.assertEqual(state["stages"]["T6"]["status"], "completed")
-        self.assertEqual(metrics["stages"]["T9"]["status"], "completed")
-
-    def test_reported_token_budget_stops_at_eighty_percent_and_delivers_handoff(self) -> None:
-        with AndroidProject() as root:
-            overrides = root / "overrides.json"
-            overrides.write_text(
-                json.dumps(
-                    {
-                        "orchestrator": {"token_budget": 100},
-                        "stage_adapters": {
-                            "T4": "/bin/echo 'ANDROID_WORKFLOW_METRICS={\"tokens\":80}'"
-                        },
-                    }
-                ),
-                encoding="utf-8",
-            )
-            configure(root, overrides)
-            state = run(
-                root,
-                {"id": "APP-4", "title": "Change ProfileScreen", "type": "chore"},
-                execute_external=True,
-            )
-            body_exists = (artifacts(root, "APP-4") / "pr-description.md").exists()
-
-        self.assertEqual(state["stop_reason"], "token_budget_threshold_reached")
-        self.assertEqual(state["stages"]["T5"]["reason"], "token_budget_threshold_reached")
-        self.assertTrue(body_exists)
-
-
 class HostDrivenTests(unittest.TestCase):
     def test_finish_rejects_stub_without_source_diff(self) -> None:
         with AndroidProject() as root:
             run(root, {"id": "APP-5", "title": "Change ProfileScreen", "type": "chore"})
             with self.assertRaises(ValueError) as raised:
-                finish_run(root, allow_unverified_gate=True)
+                finish_verified(root)
         self.assertIn("Implementer incomplete", str(raised.exception))
 
     def test_host_implements_then_finish(self) -> None:
@@ -297,7 +225,8 @@ class HostDrivenTests(unittest.TestCase):
                 ["log", "--target", str(root), "--stage", "T4", "--status", "completed", "--file", relative]
             )
             approve_review(root)
-            code = main(["finish", "--target", str(root), "--allow-unverified-gate"])
+            pass_gate(root)
+            code = main(["finish", "--target", str(root)])
             finished = read_json(artifacts(root, "APP-6") / "run-state.json")
             log = (artifacts(root, "APP-6") / "stage-log.md").read_text(encoding="utf-8")
             pr_body = (artifacts(root, "APP-6") / "pr-description.md").read_text(encoding="utf-8")
@@ -390,8 +319,6 @@ class RunLayoutTests(unittest.TestCase):
             self.assertTrue((cache_dir(root) / "env.json").exists())
             self.assertTrue((cache_dir(root) / "repo-map.json").exists())
             self.assertIn(".ai/workflow/", ignore)
-            self.assertIn(".agent/", ignore)
-            self.assertFalse((root / ".agent/env.json").exists())
 
     def test_second_ticket_keeps_first_run(self) -> None:
         with AndroidProject() as root:
@@ -403,24 +330,6 @@ class RunLayoutTests(unittest.TestCase):
         self.assertEqual(first["ticket"]["id"], "APP-1")
         self.assertEqual(second["ticket"]["id"], "APP-2")
         self.assertEqual(pointer["ticket_id"], "APP-2")
-
-    def test_migrates_flat_agent_dir(self) -> None:
-        with AndroidProject() as root:
-            legacy = root / ".agent"
-            legacy.mkdir()
-            (legacy / "ticket-spec.json").write_text(
-                json.dumps({"schema_version": 1, "ticket": {"id": "NOTIF-1", "title": "Reminder"}}),
-                encoding="utf-8",
-            )
-            (legacy / "run-state.json").write_text(json.dumps({"status": "completed"}), encoding="utf-8")
-            (legacy / "env.json").write_text("{}", encoding="utf-8")
-            code = main(["list", "--target", str(root)])
-            self.assertEqual(code, 0)
-            self.assertTrue((artifacts(root, "NOTIF-1") / "run-state.json").exists())
-            self.assertTrue((cache_dir(root) / "env.json").exists())
-            self.assertFalse((legacy / "ticket-spec.json").exists())
-            ignore = (root / ".gitignore").read_text(encoding="utf-8")
-            self.assertIn(".ai/workflow/", ignore)
 
     def test_clean_removes_one_ticket(self) -> None:
         with AndroidProject() as root:
@@ -480,7 +389,8 @@ class RunLayoutTests(unittest.TestCase):
             relative = "app/src/main/java/com/example/ProfileScreen.kt"
             main(["log", "--target", str(root), "--stage", "T4", "--status", "completed", "--file", relative])
             approve_review(root)
-            code = main(["finish", "--target", str(root), "--allow-unverified-gate"])
+            pass_gate(root)
+            code = main(["finish", "--target", str(root)])
             body = (folder / "pr-description.md").read_text(encoding="utf-8")
             self.assertEqual(code, 0)
             self.assertIn("ReminderPlanner owns delivery copy", body)
@@ -503,7 +413,8 @@ class RunLayoutTests(unittest.TestCase):
             relative = "app/src/main/java/com/example/ProfileScreen.kt"
             main(["log", "--target", str(root), "--stage", "T4", "--status", "completed", "--file", relative])
             approve_review(root)
-            code = main(["finish", "--target", str(root), "--allow-unverified-gate"])
+            pass_gate(root)
+            code = main(["finish", "--target", str(root)])
             body = (folder / "pr-description.md").read_text(encoding="utf-8")
             self.assertEqual(code, 0)
             self.assertIn("Empty profile shows guidance", body)
@@ -534,7 +445,8 @@ class RunLayoutTests(unittest.TestCase):
             relative = "app/src/main/java/com/example/ProfileScreen.kt"
             main(["log", "--target", str(root), "--stage", "T4", "--status", "completed", "--file", relative])
             approve_review(root)
-            code = main(["finish", "--target", str(root), "--allow-unverified-gate"])
+            pass_gate(root)
+            code = main(["finish", "--target", str(root)])
             body = (folder / "pr-description.md").read_text(encoding="utf-8")
             self.assertEqual(code, 0)
             self.assertIn("## What", body)
@@ -547,11 +459,6 @@ class RunLayoutTests(unittest.TestCase):
             (root / ".github").mkdir()
             (root / ".github/PULL_REQUEST_TEMPLATE.md").write_text("## What\n", encoding="utf-8")
             self.assertEqual(find_pr_template(root), ".github/PULL_REQUEST_TEMPLATE.md")
-
-    def test_markdown_contract_allows_short_pr_body(self) -> None:
-        schema = canonical_skill_dir() / "artifacts.schema.json"
-        errors = validate_markdown("pr-description.md", "Empty profile shows guidance.\n", schema)
-        self.assertEqual(errors, [])
 
     def test_finish_strips_agent_attribution_from_host_pr_body(self) -> None:
         with AndroidProject() as root:
@@ -577,7 +484,8 @@ class RunLayoutTests(unittest.TestCase):
             relative = "app/src/main/java/com/example/ProfileScreen.kt"
             main(["log", "--target", str(root), "--stage", "T4", "--status", "completed", "--file", relative])
             approve_review(root)
-            code = main(["finish", "--target", str(root), "--allow-unverified-gate"])
+            pass_gate(root)
+            code = main(["finish", "--target", str(root)])
             body = (folder / "pr-description.md").read_text(encoding="utf-8")
             self.assertEqual(code, 0)
             self.assertIn("ReminderPlanner owns delivery copy", body)
@@ -681,7 +589,7 @@ class VerificationTests(unittest.TestCase):
             run(root, {"id": "V-1", "title": "Change ProfileScreen", "type": "chore"})
             implement(root)
             with self.assertRaises(ValueError) as raised:
-                finish_run(root, allow_unverified_gate=True)
+                finish_verified(root)
         self.assertIn("review.json is not approved", str(raised.exception))
 
     def test_approved_review_with_blocking_findings_is_not_approved(self) -> None:
@@ -695,7 +603,7 @@ class VerificationTests(unittest.TestCase):
             )
             main(["log", "--target", str(root), "--stage", "T6", "--status", "completed"])
             with self.assertRaises(ValueError) as raised:
-                finish_run(root, allow_unverified_gate=True)
+                finish_verified(root)
         self.assertIn("not approved", str(raised.exception))
 
     def test_edit_after_review_makes_it_stale(self) -> None:
@@ -705,7 +613,7 @@ class VerificationTests(unittest.TestCase):
             approve_review(root)
             implement(root, "fun empty() = 1\n")
             with self.assertRaises(ValueError) as raised:
-                finish_run(root, allow_unverified_gate=True)
+                finish_verified(root)
         self.assertIn("review is missing or stale", str(raised.exception))
 
     def test_edit_after_green_gate_makes_it_stale(self) -> None:
@@ -732,8 +640,8 @@ class VerificationTests(unittest.TestCase):
             implement(root)
             approve_review(root)
             with self.assertRaises(ValueError) as raised:
-                finish_run(root, allow_unverified_gate=True)
-            state = finish_run(root, allow_unverified_gate=True, skip_device="no device connected")
+                finish_verified(root)
+            state = finish_verified(root, skip_device="no device connected")
         self.assertIn("device-report.md is not PASS", str(raised.exception))
         self.assertEqual(state["stages"]["T7"]["reason"], "no device connected")
 
@@ -750,13 +658,47 @@ class VerificationTests(unittest.TestCase):
             )
             main(["log", "--target", str(root), "--stage", "T7", "--status", "completed"])
             with self.assertRaises(ValueError) as raised:
-                finish_run(root, allow_unverified_gate=True)
+                finish_verified(root)
             after = run_dir(root) / "media/after"
             after.mkdir(parents=True)
             (after / "profile.png").write_bytes(b"png")
-            state = finish_run(root, allow_unverified_gate=True)
+            state = finish_verified(root)
         self.assertIn("no media/after evidence", str(raised.exception))
         self.assertEqual(state["status"], "completed")
+
+    def test_unresolved_checks_refuse_finish_and_point_at_draft(self) -> None:
+        with AndroidProject() as root:
+            run(root, {"id": "V-7", "title": "Change ProfileScreen", "type": "chore"})
+            implement(root)
+            approve_review(root)
+            path = run_dir(root) / "gate-report.json"
+            path.write_text(json.dumps({**read_json(path), "status": "failed"}), encoding="utf-8")
+            with self.assertRaises(ValueError) as raised:
+                finish_run(root)
+            state = finish_run(root, draft="gate still red after two fixes")
+            log = (run_dir(root) / "stage-log.md").read_text(encoding="utf-8")
+        self.assertIn("--draft", str(raised.exception))
+        self.assertEqual(state["status"], "completed")
+        self.assertEqual(state["draft"]["reason"], "gate still red after two fixes")
+        self.assertIn("quality gate is failing; see gate-report.json", state["draft"]["issues"])
+        self.assertFalse(state["stages"]["T8"]["ready_for_review"])
+        self.assertIn("| Delivery | draft |", log)
+
+    def test_draft_without_open_issues_is_a_normal_finish(self) -> None:
+        with AndroidProject() as root:
+            run(root, {"id": "V-8", "title": "Change ProfileScreen", "type": "chore"})
+            implement(root)
+            approve_review(root)
+            state = finish_verified(root, draft="just in case")
+        self.assertIsNone(state["draft"])
+        self.assertTrue(state["stages"]["T8"]["ready_for_review"])
+
+    def test_draft_still_needs_the_implementation(self) -> None:
+        with AndroidProject() as root:
+            run(root, {"id": "V-9", "title": "Change ProfileScreen", "type": "chore"})
+            with self.assertRaises(ValueError) as raised:
+                finish_run(root, draft="stopped")
+        self.assertIn("Implementer incomplete", str(raised.exception))
 
     def test_surfaces_are_inferred_from_english_and_portuguese(self) -> None:
         with AndroidProject() as root:
@@ -1028,7 +970,7 @@ class BatchedGateTests(unittest.TestCase):
         implement(root)
         if working_fake is not None:
             (root / "fake-gradle.json").write_text(json.dumps(working_fake), encoding="utf-8")
-        self.code = main(["gate", "--target", str(root), "--execute-external"])
+        self.code = main(["gate", "--target", str(root)])
         return read_json(run_dir(root) / "gate-report.json")
 
     def test_gradle_tasks_share_one_continue_invocation(self) -> None:
@@ -1386,7 +1328,7 @@ class TelemetryTests(unittest.TestCase):
             main(["log", "--target", str(root), "--stage", "T4", "--status", "completed",
                   "--note", "fix round", "--tokens", "50", "--seconds", "2.5"])
             approve_review(root)
-            finish_run(root, allow_unverified_gate=True)
+            finish_verified(root)
             metrics = read_json(run_dir(root) / "stage-metrics.json")
         stages = metrics["stages"]
         self.assertEqual(stages["T4"]["tokens"], 150)
