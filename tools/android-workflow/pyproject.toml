@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "android-multi-agent-workflow"
+version = "0.1.0"
+description = "Host-driven multi-agent workflow toolkit for Android tickets"
+readme = "README.md"
+requires-python = ">=3.11"
+
+[project.scripts]
+android-workflow = "android_workflow.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["android_workflow*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

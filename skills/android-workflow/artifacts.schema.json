@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/android-workflow/artifacts.schema.json",
+  "title": "Android Workflow artifact contracts",
+  "type": "object",
+  "definitions": {
+    "env.json": {
+      "type": "object",
+      "required": ["schema_version", "target_root", "versions", "tools", "commands", "quality_gates", "tests", "emulator"],
+      "properties": {
+        "schema_version": {"const": 1},
+        "target_root": {"type": "string"},
+        "versions": {"type": "object"},
+        "tools": {"type": "object"},
+        "commands": {"type": "object"},
+        "quality_gates": {"type": "object"},
+        "tests": {"type": "object"},
+        "emulator": {"type": "object"}
+      }
+    },
+    "repo-map.json": {
+      "type": "object",
+      "required": ["schema_version", "base_commit", "modules", "module_graph", "architecture", "conventions"],
+      "properties": {
+        "schema_version": {"const": 1},
+        "base_commit": {"type": ["string", "null"]},
+        "modules": {"type": "array"},
+        "module_graph": {"type": "object"},
+        "architecture": {"type": "object"},
+        "conventions": {"type": "object"}
+      }
+    },
+    "ticket-spec.json": {
+      "type": "object",
+      "required": ["schema_version", "ticket", "type", "reproduction", "acceptance_criteria", "surfaces", "complexity", "risk", "business_questions", "route"],
+      "properties": {
+        "schema_version": {"const": 1},
+        "ticket": {"type": "object"},
+        "type": {"enum": ["bug", "feature", "chore"]},
+        "reproduction": {"type": ["string", "null"]},
+        "acceptance_criteria": {"type": "array"},
+        "surfaces": {"type": "array"},
+        "complexity": {"enum": ["low", "medium", "high"]},
+        "risk": {"enum": ["low", "medium", "high"]},
+        "business_questions": {"type": "array"},
+        "route": {"type": "array"},
+        "pr_template": {"type": ["string", "null"]}
+      }
+    },
+    "change-set-map.json": {
+      "type": "object",
+      "required": ["schema_version", "candidate_files", "symbols", "related_tests", "extension_points", "neighbor_patterns", "affected_modules", "public_api_changed"],
+      "properties": {"schema_version": {"const": 1}}
+    },
+    "gate-report.json": {
+      "type": "object",
+      "required": ["schema_version", "status", "steps", "retries", "prohibitions_respected"],
+      "properties": {"schema_version": {"const": 1}, "status": {"enum": ["not_run", "passed", "failed", "escalated", "blocked"]}}
+    },
+    "toolkit-fingerprint.json": {
+      "type": "object",
+      "required": ["files"]
+    },
+    "review.json": {
+      "type": "object",
+      "required": ["schema_version", "status", "blocking", "concerns", "suggestions"],
+      "properties": {"schema_version": {"const": 1}, "status": {"enum": ["not_run", "approved", "changes_requested", "escalated"]}}
+    },
+    "stage-metrics.json": {
+      "type": "object",
+      "required": ["schema_version", "stages"],
+      "properties": {"schema_version": {"const": 1}, "stages": {"type": "object"}}
+    },
+    "run-state.json": {
+      "type": "object",
+      "required": ["schema_version", "run_id", "status", "current_stage", "stages", "pending_question", "answers", "budgets"],
+      "properties": {
+        "schema_version": {"const": 1},
+        "status": {"enum": ["running", "paused", "completed", "escalated", "awaiting_host"]},
+        "stages": {"type": "object"}
+      }
+    }
+  },
+  "x-markdown-contracts": {
+    "plan.md": ["Objective", "Steps", "Out of scope", "Verification"],
+    "implementation-notes.md": ["Decisions", "Trade-offs", "Out of scope", "Assumptions"],
+    "device-report.md": ["Status", "Device", "Scenarios", "Evidence", "Not verified"],
+    "pr-description.md": [],
+    "stage-log.md": ["Stage log"]
+  }
+}
