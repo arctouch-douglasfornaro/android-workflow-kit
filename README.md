@@ -111,13 +111,30 @@ You see one line per stage in the chat, e.g. `Reviewer: approved, 0 blocking →
 
 Everything under `.ai/workflow/` stays on your machine; it is git-ignored and never committed.
 
-### 5. When it stops to ask you
+### 5. Watch the agents work
+
+The workflow keeps a page that shows the run as a pixel-art office: one desk per agent, who is
+working right now and what on, who finished, who sent work back for a fix, plus time and tokens per
+agent, the timeline and the before/after screenshots. It is on by default, costs nothing (it is
+built from the run's own files, no AI involved) and refreshes itself every few seconds.
+
+![The agent office while the Reviewer works](docs/office.png)
+
+The link appears in the chat when a run starts. To open it yourself, from the app's folder:
+
+```bash
+python3 ~/.ai/bin/android-workflow office --target .
+```
+
+It is a local file (`.ai/workflow/office.html`); nothing leaves your machine.
+
+### 6. When it stops to ask you
 
 It only stops **before writing code**, when it would otherwise have to guess: a business rule the
 ticket does not define, a bug without steps to reproduce it, or a project fact Setup could not find.
 Answer in the chat and it continues.
 
-### 6. Cleaning up old runs (optional)
+### 7. Cleaning up old runs (optional)
 
 Each run leaves its files (plan, notes, log, screenshots) in `.ai/workflow/<TICKET>/` inside the app.
 They never go to git, but they pile up, one folder per ticket. From the app's folder:
@@ -130,7 +147,7 @@ python3 ~/.ai/bin/android-workflow clean --target .                    # delete 
 
 The project profile (`.ai/project-profile.md`) is kept, so the next run does not redo Setup.
 
-### 7. Updating the kit
+### 8. Updating the kit
 
 If you installed with `git clone`, run `git -C ~/.ai pull` to get the newest version. Every tool
 uses it at once; nothing else to do.

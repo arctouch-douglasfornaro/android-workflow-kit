@@ -42,7 +42,9 @@ earlier.
 2. If this repo is the toolkit (has `android_workflow/cli.py`) and TARGET was omitted, STOP.
 3. `CLI` = `python3 ~/.ai/bin/android-workflow`. `RUN` = `TARGET/.ai/workflow/<ticket-id>/`.
 
-Record `TARGET`, `RUN` and `CLI` in the first chat message. If the ticket id looks like a
+Record `TARGET`, `RUN` and `CLI` in the first chat message, plus the office page the user can open
+to watch the agents: `TARGET/.ai/workflow/office.html` (`CLI office --target TARGET` opens it). Never
+read that page yourself. If the ticket id looks like a
 Jira key and this host has a Jira tool (MCP server or connector), fetch the issue body and
 pass it to the Planner.
 
@@ -85,7 +87,9 @@ CLI setup    --target T [--source-repo MAIN]        CLI start    --target T --id
 CLI resume   --target T --question-id Q --answer "…" CLI update-spec --target T --surfaces ui --acceptance "a|b"
 CLI prebuild --target T [--wait|--status]           CLI gate     --target T
 CLI finish   --target T [--skip-device "r"] [--draft "r"] CLI deliver  --target T [--subject "ID: …"] [--no-push|--no-pr]
+CLI log --target T --stage <Role> --status started --note "<what it is about to do>"
 CLI log --target T --stage <Role> --status completed --note "…" [--file P]… [--tokens N] [--wait-seconds S]
+CLI office --target T                               (opens the office page; it updates itself)
 CLI evidence capture|ingest|compare|list --target T [--phase before|after] [--name N] [--file F]
 CLI status|list --target T                          CLI clean --target T [--ticket ID | --stale [HOURS]]
 ```
@@ -169,6 +173,10 @@ Everything the run writes lives in `RUN` (gitignored, never committed): `ticket-
 points at the active ticket. A new ticket gets a new folder.
 
 ## Chat log and telemetry
+
+Right before you spawn or resume an agent, run `CLI log --stage <Role> --status started --note
+"<one line: what it will do>"`. It costs nothing, it starts that agent's clock, and it is what lights
+up its desk on the office page.
 
 Speak in **role names**, never bare T-codes. One line per stage:
 `{Role}: {result} → {artifact}`. Example: `Reviewer: approved, 0 blocking → review.json`.

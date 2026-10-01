@@ -16,11 +16,12 @@ How the workflow runs (stages, agents, levels, stops) is described in one place 
 | `resume --target APP --question-id Q --answer "…"` | Answers a business question that paused the run |
 | `update-spec --target APP --surfaces ui --acceptance "a\|b"` | Planner corrections; the route is recomputed |
 | `prebuild --target APP [--wait\|--status]` | Builds the unmodified app in the background for the `before` capture |
-| `log --target APP --stage Implementer --status completed --file P [--tokens N]` | Records an agent stage (role names) |
+| `log --target APP --stage Implementer --status started\|completed [--note …] [--file P] [--tokens N]` | Records when an agent starts and ends (role names) |
 | `gate --target APP` | Formatter, compile, unit tests, detekt, lint, consumer modules, secret scan |
 | `evidence capture\|ingest\|compare\|list --target APP` | Screenshots/videos in `media/{before,after}/` and `media/compare.md` |
 | `finish --target APP [--skip-device "reason"] [--draft "reason"]` | Final check: gate, review and device belong to the code that ships. `--draft` turns what is still unresolved into a draft PR's known issues |
 | `deliver --target APP [--subject "ID: title"] [--no-commit\|--no-push\|--no-pr]` | Commits app source only, pushes, opens the PR (as a draft after `finish --draft`) |
+| `office --target APP [--no-open]` | Opens `.ai/workflow/office.html`, the pixel-art office that shows each agent's desk; every command keeps it current |
 | `status`, `list`, `clean [--ticket ID \| --stale [HOURS]]` | Run housekeeping: one ticket, unfinished idle runs, or everything when nothing is given |
 
 ## Quality gate details

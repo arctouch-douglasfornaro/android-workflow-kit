@@ -1375,3 +1375,60 @@ class TelemetryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def office_data(root: Path) -> tuple[dict, str]:
+    html = (root / ".ai/workflow/office.html").read_text(encoding="utf-8")
+    payload = re.search(r"const DATA = (.*);\nconst SPRITE", html).group(1)
+    return json.loads(payload), html
+
+
+class OfficeTests(unittest.TestCase):
+    def test_every_command_keeps_the_office_page_current(self) -> None:
+        with AndroidProject() as root:
+            main(["start", "--target", str(root), "--id", "O-1", "--title", "Change ProfileScreen", "--type", "chore"])
+            first, _ = office_data(root)
+            implement(root)
+            main(["log", "--target", str(root), "--stage", "Reviewer", "--status", "started",
+                  "--note", "reading the diff </script><b>x</b>"])
+            data, html = office_data(root)
+        desks = {desk["role"]: desk for desk in data["desks"]}
+        self.assertEqual(first["ticket"], "O-1")
+        self.assertEqual(desks["Implementer"]["state"], "done")
+        self.assertEqual(desks["Reviewer"]["state"], "working")
+        self.assertIn("reading the diff", desks["Reviewer"]["note"])
+        self.assertEqual(desks["Planner"]["state"], "skipped")
+        self.assertNotIn("</script><b>", html)
+        self.assertIn('http-equiv="refresh"', html)
+
+    def test_started_is_a_marker_not_an_attempt(self) -> None:
+        with AndroidProject() as root:
+            run(root, {"id": "O-2", "title": "Change ProfileScreen", "type": "chore"})
+            implement(root)
+            main(["log", "--target", str(root), "--stage", "Reviewer", "--status", "started"])
+            started = read_json(run_dir(root) / "stage-metrics.json")["stages"]["T6"]
+            approve_review(root)
+            done = read_json(run_dir(root) / "stage-metrics.json")["stages"]["T6"]
+        self.assertEqual(started["attempts"], 0)
+        self.assertIsNone(started["wall_time_seconds"])
+        self.assertEqual(done["attempts"], 1)
+        self.assertIsNotNone(done["wall_time_seconds"])
+
+    def test_office_command_and_a_finished_run_stops_refreshing(self) -> None:
+        import contextlib
+        import io
+
+        with AndroidProject() as root:
+            run(root, {"id": "O-3", "title": "Change ProfileScreen", "type": "chore"})
+            implement(root)
+            approve_review(root)
+            finish_verified(root)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = main(["office", "--target", str(root), "--no-open"])
+            data, html = office_data(root)
+        self.assertEqual(code, 0)
+        self.assertTrue(json.loads(out.getvalue())["office"].endswith(".ai/workflow/office.html"))
+        self.assertEqual(data["status"], "completed")
+        self.assertNotIn('http-equiv="refresh"', html)
+        self.assertEqual({desk["role"]: desk["state"] for desk in data["desks"]}["Reviewer"], "done")

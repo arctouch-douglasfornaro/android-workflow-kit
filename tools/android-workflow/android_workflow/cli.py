@@ -2119,13 +2119,16 @@ def log_stage(
     state["stages"][stage]["status"] = status
     if note:
         state["stages"][stage]["note"] = note
-    if seconds is None and state.get("updated_at"):
+    if status == "started":
+        # A marker for the office page: the agent's time is measured from here to its `completed`.
+        seconds = None
+    elif seconds is None and state.get("updated_at"):
         seconds = time.time() - int(state["updated_at"])
     if wait_seconds and seconds is not None:
         seconds = max(seconds - wait_seconds, 0)
     record_stage_metrics(
         metrics, stage, status, seconds=seconds, tokens=tokens,
-        attempts=0 if status in {"running", "awaiting_host"} else 1,
+        attempts=0 if status in {"running", "awaiting_host", "started"} else 1,
     )
     if wait_seconds:
         entry = metrics["stages"][stage]
@@ -2298,7 +2301,7 @@ def execute_pipeline(target: Path, state: dict[str, Any], spec: dict[str, Any]) 
     started = stage_start(state, "T2")
     change_set = locate_change_set(target, spec, repo_map)
     write_json(agent_dir / "change-set-map.json", change_set)
-    append_stage_log(agent_dir, "T2", "completed", "cli", f"{len(change_set['candidate_files'])} candidatos")
+    append_stage_log(agent_dir, "T2", "completed", "cli", f"{len(change_set['candidate_files'])} candidate file(s)")
     stage_end(state, metrics, "T2", started)
 
     started = stage_start(state, "T3")
@@ -2434,7 +2437,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--stage", required=True,
         help="role name: Planner, Implementer, Quality gate, Reviewer, Device, Delivery",
     )
-    log_parser.add_argument("--status", required=True)
+    log_parser.add_argument("--status", required=True, help="`started` when an agent begins, `completed` when it ends")
     log_parser.add_argument("--note", default="")
     log_parser.add_argument("--actor", default="host")
     log_parser.add_argument("--file", action="append", default=[], dest="files")
@@ -2491,6 +2494,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--stale", nargs="?", type=float, const=24.0, metavar="HOURS",
         help="remove unfinished runs (awaiting_host/paused/running) idle for HOURS (default 24)",
     )
+    office_parser = subparsers.add_parser("office", help="open the page that shows the agents at work")
+    office_parser.add_argument("--target", required=True, type=Path)
+    office_parser.add_argument("--no-open", action="store_true", help="only print the page's path")
     evidence_parser = subparsers.add_parser("evidence")
     evidence_parser.add_argument("action", choices=("capture", "ingest", "compare", "list"))
     evidence_parser.add_argument("--target", required=True, type=Path)
@@ -2573,6 +2579,15 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
         return {"runs": runs, "current": current}, 0
     if args.command == "clean":
         return clean_runs(target, ticket_id=args.ticket, stale_hours=args.stale), 0
+    if args.command == "office":
+        import webbrowser
+
+        from android_workflow.office import render
+
+        path = render(target)
+        if not args.no_open:
+            webbrowser.open(path.as_uri())
+        return {"office": str(path)}, 0
     if args.command == "evidence":
         from android_workflow.evidence import dispatch_evidence
 
@@ -2585,10 +2600,22 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
     raise ValueError(f"unknown command: {args.command}")
 
 
+def refresh_office(target: Path) -> None:
+    """Keep the office page in step with the run; a page problem never fails a workflow command."""
+    from android_workflow.office import render
+
+    try:
+        if (target / ".ai" / "workflow").is_dir():
+            render(target)
+    except Exception:  # noqa: BLE001 - the page is a convenience, never a gate
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
         result, code = _dispatch(args)
+        refresh_office(args.target.resolve())
         print(json.dumps(role_view(result), indent=2, ensure_ascii=False))
         return code
     except (OSError, ValueError, json.JSONDecodeError) as error:
