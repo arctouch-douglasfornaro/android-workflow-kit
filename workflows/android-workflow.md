@@ -7,11 +7,7 @@ project, plan, **write the code**, test, review, verify on device and open the P
 `python3 ~/.ai/bin/android-workflow` detects, locates, gates, logs, and refuses `finish`
 without a source diff.
 
-This is a sibling of [`feature-workflow.md`](feature-workflow.md). Use this command when
-the caller types `/android-workflow`. Use `/feature-workflow` when they want the profile,
-snapshot, isolated reviewer, and ship helper already in this kit.
-
-Index: [`../ANDROID.md`](../ANDROID.md). Higher-priority host security and approval rules win.
+Higher-priority host security and approval rules win.
 
 ## Invocation
 
@@ -120,8 +116,8 @@ Do not delete tests, suppress lint, swallow exceptions, or invent business rules
 - `plan.md`: Objective, Steps, Out of scope, Verification
 - `implementation-notes.md`: Decisions, Trade-offs, Out of scope, Assumptions
 - `device-report.md`: Status, Device, Scenarios, Evidence, Not verified
-- `pr-description.md`: TARGET's PR/MR template when one exists (see
-  [`../agents/pr-author.md`](../agents/pr-author.md) for where to look). Copy that
+- `pr-description.md`: TARGET's PR/MR template when one exists
+  (`.github/`, `.gitlab/` or `docs/` template files). Copy that
   file's headings, order, checkboxes, and HTML comments. Fill only those sections.
   2–3 lines of prose total. Do not add Summary, Why, Verification, Risks, or
   Reviewer notes unless they are already in the template. No template: 2–3

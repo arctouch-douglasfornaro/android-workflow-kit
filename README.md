@@ -12,14 +12,12 @@ The repository mirrors `~/.ai`, which is where every host reads it from.
 
 | Path | What it is |
 | --- | --- |
-| `ANDROID.md` | Entry point and execution defaults shared by every host. |
-| `workflows/` | Canonical workflow docs: `android-workflow` (host-driven T0–T9), `feature-workflow` (phased pipeline), setup, help and clean. |
+| `workflows/android-workflow.md` | Canonical workflow doc: stages, artifacts, stops and delivery rules. |
 | `skills/` | Agent Skills (`SKILL.md` folders): `android-workflow`, Android/Compose skills, delivery and review skills, coding-discipline skills and lateral-thinking techniques. |
-| `agents/` | Role prompts for `feature-workflow` subagents (designer, implementer, reviewer, device-pass, ship-agent…). |
+| `agents/` | `cavecrew-*` subagents used by the `cavecrew` skill. |
 | `skills/android-workflow/agents/` | Role prompts for the `aw-*` subagents rendered by `install-host`. |
 | `tools/android-workflow/` | The Python package behind the `android-workflow` CLI, with tests and default config. |
-| `bin/` | Launchers and helpers: `android-workflow`, `feature_setup.py`, `feature_workspace.py`, `feature_ship.py`, `android_probe.py`… |
-| `templates/` | `project-profile.md` template written into target repos. |
+| `bin/` | `android-workflow` launcher plus the helpers the CLI calls: `feature_setup.py` (project profile), `feature_workspace.py` (ticket branch/worktree) and `android_probe.py`. |
 
 ## Install
 
@@ -52,11 +50,10 @@ done
 
 ```text
 /android-workflow APP-123 Show empty state on profile
-/feature-workflow APP-123 Show empty state on profile
 ```
 
 Codex: `$android-workflow`. See `tools/android-workflow/README.md` for the CLI
-reference and `workflows/` for the full stage contracts.
+reference and `workflows/android-workflow.md` for the full stage contracts.
 
 ## Tests
 
