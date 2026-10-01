@@ -1407,7 +1407,7 @@ if __name__ == "__main__":
 
 def office_data(root: Path) -> tuple[dict, str]:
     html = (root / ".ai/workflow/office.html").read_text(encoding="utf-8")
-    payload = re.search(r"const DATA = (.*);\nconst SPRITE", html).group(1)
+    payload = re.search(r"const DATA = (.*);\n", html).group(1)
     return json.loads(payload), html
 
 
@@ -1427,7 +1427,7 @@ class OfficeTests(unittest.TestCase):
         self.assertIn("reading the diff", desks["Reviewer"]["note"])
         self.assertEqual(desks["Planner"]["state"], "skipped")
         self.assertNotIn("</script><b>", html)
-        self.assertIn('http-equiv="refresh"', html)
+        self.assertNotEqual(first["status"], "completed")  # live: the page keeps refreshing
 
     def test_started_is_a_marker_not_an_attempt(self) -> None:
         with AndroidProject() as root:
@@ -1458,5 +1458,23 @@ class OfficeTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertTrue(json.loads(out.getvalue())["office"].endswith(".ai/workflow/office.html"))
         self.assertEqual(data["status"], "completed")
-        self.assertNotIn('http-equiv="refresh"', html)
         self.assertEqual({desk["role"]: desk["state"] for desk in data["desks"]}["Reviewer"], "done")
+
+    def test_each_desk_opens_what_that_agent_wrote(self) -> None:
+        with AndroidProject() as root:
+            run(root, {"id": "O-4", "title": "Change ProfileScreen", "type": "bug", "reproduction": "open profile"})
+            (run_dir(root) / "plan.md").write_text("# Objective\n\nShow the empty state.\n", encoding="utf-8")
+            implement(root)
+            approve_review(root)
+            (root / ".ai/project-profile.md").write_text("# Project profile\n\n## Code patterns\n", encoding="utf-8")
+            main(["office", "--target", str(root), "--no-open"])
+            data, _ = office_data(root)
+        files = {role: {item["name"]: item for item in items} for role, items in data["artifacts"].items()}
+        self.assertIn("Show the empty state.", files["Planner"]["plan.md"]["content"])
+        self.assertEqual(files["Planner"]["plan.md"]["src"], "O-4/plan.md")
+        self.assertIn("ticket-spec.json", files["Planner"])
+        self.assertIn("Empty state helper.", files["Implementer"]["implementation-notes.md"]["content"])
+        self.assertIn("approved", files["Reviewer"]["review.json"]["content"])
+        self.assertIn("project-profile.md", files["Setup"])
+        self.assertIn("stage-log.md", files["Orchestrator"])
+        self.assertTrue(any(item["src"] == "O-4/stage-log.md" for item in data["files"]))

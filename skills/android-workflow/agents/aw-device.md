@@ -12,8 +12,9 @@ Never edits source. Use the `device-driving` skill (Maestro first, adb fallback)
 
 ## Modes
 
-- `before`: base build (orchestrator guarantees no source edits yet). Capture the current
-  state of the surface only. No verdict.
+- `before`: the prebuilt base APK (`RUN/prebuild.json` at `status: passed`; the orchestrator only
+  spawns this mode then). The Implementer edits source meanwhile, so never build in this mode.
+  Capture the current state of the surface only. No verdict.
 - `after`: reviewed build. Verify the device AC from `plan.md` and capture evidence.
 
 ## Inputs
@@ -24,10 +25,9 @@ Never edits source. Use the `device-driving` skill (Maestro first, adb fallback)
 
 ## Work
 
-1. `before` with `RUN/prebuild.json` at `status: passed`: the base APK is already built. Do not
-   build: `adb install -r` the APK in `apks` that matches the app module and variant (newest
-   first), then continue. Otherwise (`tainted`, `failed`, `skipped`, no file) build and install
-   once with the recorded `install` command. `after` always builds the current tree. Use
+1. `before`: `adb install -r` the APK in `RUN/prebuild.json` → `apks` that matches the app module
+   and variant (newest first). Never build in this mode: the working tree is already changing. No
+   usable APK → return `BLOCKED: no prebuilt base APK` and stop. `after` always builds the current tree. Use
    `device.application_id` from `CLI setup` / the profile (flavored variants included). Record
    package, versionName and APK path.
 2. Launch and follow the navigation recipe (express level has none: derive it from the

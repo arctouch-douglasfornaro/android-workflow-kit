@@ -128,10 +128,11 @@ CLI status|list --target T                          CLI clean --target T [--tick
    batch the questions to the user and STOP until answered.
 6. **Device before** (only if `device_required` and `visual`, device connected, not `--no-device`):
    `CLI prebuild --target TARGET --wait`. `passed` → spawn `aw-device` mode `before` (it installs
-   the prebuilt APK, no build) and start the Implementer without waiting for the capture: the
-   capture touches only the emulator and `RUN/media`. Any other status (`tainted`, `failed`,
-   `skipped`) → `aw-device` `before` builds and captures itself, and the Implementer waits for it.
-   No device → skip before, note it.
+   the prebuilt APK, no build) in the background and start the Implementer **in the same turn**,
+   without waiting for the capture: the capture touches only the emulator and `RUN/media`. Any
+   other status (`skipped` because the source already changed, `failed`, `tainted`) or no device →
+   no real base exists to capture: skip `before`, say why in one line, and start the Implementer
+   at once. The Implementer never waits for a `before` capture.
 7. **Implementer:** spawn `aw-implementer` with the level. It writes the code and the unit tests
    that prove it. Keep its agent id for fix rounds.
 8. **Quality gate:** `CLI gate --target TARGET`. It runs the project's formatter (fixing first when
@@ -162,7 +163,7 @@ CLI status|list --target T                          CLI clean --target T [--tick
     ready for review.
 
 Overlaps that cannot race on the working tree are safe: Planner with the base build, Implementer
-with the `before` capture. Anything that edits source waits for the base build.
+with the `before` capture. Only the base build itself blocks source edits, and only while it runs.
 
 ## Run files
 
