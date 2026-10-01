@@ -1,3 +1,11 @@
+---
+name: device-driving
+description: >-
+  Maestro-first playbook for driving a connected Android device or emulator: install and run
+  flows to navigate, interact, assert and capture screenshots/video; adb for logcat and as a
+  fallback. Used by the android-workflow Device agent (aw-device).
+---
+
 # Device driving — Maestro-first playbook
 
 **Maestro is the required driver** for reaching a screen, interacting, asserting state, and capturing screenshots/video on a connected device. Whenever a device is connected you install Maestro if it is missing (§9) and drive every navigation / interaction / capture step through a Maestro flow — selectors by **text / resource-id**, never raw coordinates.
@@ -138,16 +146,16 @@ Only what is not already stated where you would hit it — the `am start` / non-
 
 ## 8.5. Keep device sessions token-cheap
 
-Device-driving agents are the most expensive part of `feature-workflow` runs in both time and tokens — on one measured run the three separate device agents this replaced (`feature-navigator` + `manual-tester` + `visual-evidence`) were ~62% of total agent time and ~65% of total tokens, almost entirely because every `uiautomator dump`, `screencap`, and `logcat -d` call injects a large blob back into context, and that happens dozens of times per run. None of these are needed at full size most of the time — trim before it becomes a habit, not after the context is already bloated:
+The device session is the most expensive part of a workflow run in both time and tokens — on one measured run device work was ~62% of total agent time and ~65% of total tokens, almost entirely because every `uiautomator dump`, `screencap`, and `logcat -d` call injects a large blob back into context, and that happens dozens of times per run. None of these are needed at full size most of the time — trim before it becomes a habit, not after the context is already bloated:
 
-- **Reuse recorded bounds instead of re-dumping.** If `07-device.md`'s recipe section already has a node's `bounds="[x1,y1][x2,y2]"` for a tap target you need again, tap it directly — don't re-run `uiautomator dump` to rediscover coordinates you (or a prior phase) already found. Only re-dump when the UI has genuinely changed (a new screen, a different app state) or the recorded bounds fail.
+- **Reuse recorded bounds instead of re-dumping.** If the Maestro flow or `device-report.md` already has a node's `bounds="[x1,y1][x2,y2]"` for a tap target you need again, tap it directly — don't re-run `uiautomator dump` to rediscover coordinates you (or the `before` capture) already found. Only re-dump when the UI has genuinely changed (a new screen, a different app state) or the recorded bounds fail.
 - **Filter `uiautomator dump` at the source, splitting it into lines first** — the §2 pipeline, not a bare `grep`. Unsplit, the dump is one line and every filter returns the whole tree: measured, 11k tokens versus 14 for the same lookup.
-- **Prefer a small state check over a full screenshot for intermediate verification.** `adb shell dumpsys activity activities | grep -iE "topResumedActivity|mResumedActivity"` (a few lines) confirms "did navigation land where expected" just as well as a screenshot + visual inspection, for a fraction of the tokens. Reserve actual `screencap` calls for moments that are genuinely evidence-worthy (the final state recorded in `07-device.md`), not every intermediate tap.
+- **Prefer a small state check over a full screenshot for intermediate verification.** `adb shell dumpsys activity activities | grep -iE "topResumedActivity|mResumedActivity"` (a few lines) confirms "did navigation land where expected" just as well as a screenshot + visual inspection, for a fraction of the tokens. Reserve actual `screencap` calls for moments that are genuinely evidence-worthy (the final state recorded in `device-report.md`), not every intermediate tap.
   **But only when the hop crosses an activity.** `topResumedActivity` is blind to anything that happens *inside* one — a Compose destination, a bottom sheet, a dialog, a server-driven modal all leave it unchanged, so it will happily report success for a navigation that never occurred. For an in-activity hop the cheap check is the §2 pipeline reduced to text (`… | tr '<' '\n' | grep -oE 'text="[^"]+"'`), which is still two orders of magnitude smaller than a screenshot; a Maestro `assertVisible` on the expected string is cheaper still, since it costs nothing beyond the run's one-line output.
   Cheapest first, for the same question: `assertVisible` in the flow → filtered text dump → `dumpsys` (cross-activity only) → screenshot (evidence only).
 - **Scope `logcat` reads.** Always `adb logcat -c` before the action, then read with a targeted filter (`grep -iE "exception|fatal|<feature-keyword>"`) and a `tail -N` cap — never read an unscoped, unfiltered log back into context.
 - **Batch related adb calls into one Bash invocation** (e.g. a tap, a short sleep, then the next tap, chained with `&&`/`;` in one command) rather than one tool call per micro-step — fewer round trips means less repeated context overhead across a long device session.
-- **One continuous recording beats many discrete screenshots** when a flow needs to be shown or verified across several steps — see the single `device-pass` session in [`feature-workflow/device.md`](../../workflows/feature-workflow/device.md).
+- **One continuous recording beats many discrete screenshots** when a flow needs to be shown or verified across several steps — record it inside the Maestro flow (`startRecording` / `stopRecording`).
 
 ---
 
@@ -164,10 +172,10 @@ If neither resolves, install it once (official installer, no separate download s
 curl -Ls "https://get.maestro.mobile.dev" | bash                # installs to ~/.maestro/bin
 ~/.maestro/bin/maestro --version                                 # confirm it landed
 ```
-**Fallback rule (the only time you drive with adb instead).** Installing Maestro is mandatory whenever a device is connected — a device being present but Maestro simply "not tried" is not acceptable. The single permitted reason to drive the UI with the [`adb-fallback.md`](./adb-fallback.md) primitives instead is that Maestro **genuinely cannot run here**: the install truly fails (no network, sandboxed CI, permissions) or a required capability has no Maestro equivalent. In that case record `Tool used: adb (Maestro unavailable — <reason>)` with the specific failure, and drive the rest with adb. This is an escape hatch for a real blocker, not a shortcut. Do the check/install **once per run** — `device-pass` owns recipe, manual AC and evidence in one session, so it probes once and reuses the result (installed path, or the recorded unavailability reason) for the whole pass. (`logcat` on adb per §6 is **not** covered by this rule — it always stays adb regardless of Maestro.)
+**Fallback rule (the only time you drive with adb instead).** Installing Maestro is mandatory whenever a device is connected — a device being present but Maestro simply "not tried" is not acceptable. The single permitted reason to drive the UI with the [`adb-fallback.md`](./adb-fallback.md) primitives instead is that Maestro **genuinely cannot run here**: the install truly fails (no network, sandboxed CI, permissions) or a required capability has no Maestro equivalent. In that case record `Tool used: adb (Maestro unavailable — <reason>)` with the specific failure, and drive the rest with adb. This is an escape hatch for a real blocker, not a shortcut. Do the check/install **once per run** — `aw-device` owns recipe, AC and evidence in one session, so it probes once and reuses the result (installed path, or the recorded unavailability reason) for the whole pass. (`logcat` on adb per §6 is **not** covered by this rule — it always stays adb regardless of Maestro.)
 
 - CLI: `~/.maestro/bin/maestro` (or wherever the setup check above resolves it — no version pinned, whatever the installer lands is fine). No Maestro MCP — agents shell out via `Bash`.
-- Flows: reusable ones live in **`.maestro/`** (committed; see `.maestro/README.md` + `.maestro/_template.yaml`); one-off flows can live in the run folder `.ai/workflow/<feature-id>/`.
+- Flows: reusable ones live in **`.maestro/`** (committed; see `.maestro/README.md` + `.maestro/_template.yaml`); one-off flows can live in the run folder `.ai/workflow/<ticket-id>/`.
 
 **Run:**
 ```bash
@@ -195,7 +203,7 @@ appId: <debug-package>        # from the project profile
   `takeScreenshot/<name>.png`, `startRecording/<name>.mp4`, `logs/maestro.log`, `logs/device-logcat.txt`, `commands.json`, `manifest.json`. Looking for `<name>.png` next to the flow file finds nothing — that is the layout, not a failed capture.
 - To collect them somewhere you choose, pass **`--test-output-dir <dir>`**; the same `<timestamp>/<flow>/…` tree is created inside `<dir>` rather than under `~/.maestro/tests/`.
 - **Never add `--flatten-debug-output`.** Combined with `--test-output-dir` it produces **no artifacts anywhere** — every step still prints `COMPLETED`, the output dir is never created, and nothing lands under `~/.maestro/tests/` either (reproduced twice on 2.8.0). A green run with no files is this flag, not the device.
-- Whichever path they came from, copy the captured media into `.ai/workflow/<feature-id>/media/` — that is the canonical home for evidence (see the workflow's § Device-based verification).
+- Whichever path they came from, bring the captured media into `.ai/workflow/<ticket-id>/media/{before,after}/` with `android-workflow evidence ingest` — that is the canonical home for evidence.
 
 **Caveats (verified on this repo/device):**
 - **`openLink: "https://…"` opens the system browser**, not the app (App Links aren't verified for the debug build). To deep-link into an in-app screen, use adb with the package forced (§1) or `launchApp` + in-app taps — don't rely on Maestro `openLink` for app navigation.

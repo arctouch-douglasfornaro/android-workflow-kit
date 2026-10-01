@@ -22,10 +22,9 @@ The repository mirrors `~/.ai`, which is where every host reads it from.
 | Path | What it is |
 | --- | --- |
 | `skills/android-workflow/SKILL.md` | The workflow: stages, agents, levels, stops and delivery rules (single source of truth). |
-| `skills/` | Agent Skills (`SKILL.md` folders): `android-workflow`, Android/Compose skills, delivery and review skills, coding-discipline skills and lateral-thinking techniques. |
-| `agents/` | `cavecrew-*` subagents used by the `cavecrew` skill. |
-| `skills/android-workflow/agents/` | Role prompts for the `aw-*` subagents rendered by `install-host`. |
-| `tools/android-workflow/` | The Python package behind the `android-workflow` CLI, with tests and default config. |
+| `skills/android-workflow/agents/` | The six `aw-*` agents: setup, planner, implementer, reviewer, device, delivery. |
+| `skills/device-driving/` | How the Device agent drives the phone or emulator (Maestro first, adb fallback). |
+| `tools/android-workflow/` | The Python package behind the `android-workflow` CLI, with its tests. |
 | `bin/` | `android-workflow` launcher plus the helpers the CLI calls: `feature_setup.py` (project profile), `feature_workspace.py` (ticket branch/worktree) and `android_probe.py`. |
 
 ## Install
@@ -45,15 +44,6 @@ python3 ~/.ai/bin/android-workflow install-host --target /path/app  # project-le
 
 Codex needs `[features] multi_agent_v2 = true` to spawn the agents. Re-run
 `install-host` after editing a role file.
-
-Other skills are plain `SKILL.md` folders; link the ones you want into your host:
-
-```bash
-for host in ~/.claude ~/.codex ~/.cursor ~/.gemini ~/.config/opencode; do
-  mkdir -p "$host/skills/compose-android"
-  ln -sf ~/.ai/skills/compose-android/SKILL.md "$host/skills/compose-android/SKILL.md"
-done
-```
 
 ## Use
 
