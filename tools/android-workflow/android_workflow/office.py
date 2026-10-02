@@ -503,9 +503,9 @@ html, body { margin: 0; background: var(--bg); color: var(--ink); font-family: v
 button { font: inherit; color: inherit; }
 a { color: var(--info); }
 code { font-family: ui-monospace, Menlo, monospace; }
-.app { display: grid; grid-template-columns: minmax(0, 1fr) 400px; min-height: 100vh; }
-@media (max-width: 1000px) { .app { grid-template-columns: 1fr; } }
-.stage { display: flex; flex-direction: column; min-width: 0; }
+.app { display: grid; grid-template-columns: minmax(0, 1fr) 400px; height: 100vh; overflow: hidden; }
+@media (max-width: 1000px) { .app { grid-template-columns: 1fr; height: auto; overflow: visible; } }
+.stage { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .topbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; padding: 14px 18px;
   border-bottom: 1px solid var(--line); background: var(--panel); }
 .brand { font-family: var(--pixel); font-size: 12px; letter-spacing: .5px; }
@@ -523,9 +523,10 @@ code { font-family: ui-monospace, Menlo, monospace; }
 .chip.escalated, .chip.failed, .chip.blocked, .chip.changes_requested, .chip.fail, .chip.needs { color: #fff; background: #c53b3b; border-color: transparent; }
 .chip.paused, .chip.waiting, .chip.draft, .chip.waived { color: #1a1300; background: #e2a92b; border-color: transparent; }
 .chip.skipped, .chip.not_run, .chip.idle, .chip.not { color: var(--muted); }
-.room-wrap { flex: 1; display: flex; align-items: center; justify-content: center; padding: 12px;
+.room-wrap { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 12px;
   background: radial-gradient(ellipse at 50% 40%, #232637 0%, #15161f 70%); min-height: 380px; }
-.room { width: 100%; max-width: 1100px; height: auto; display: block; }
+.room { width: 100%; height: 100%; max-width: 1100px; display: block; }
+@media (max-width: 1000px) { .room { height: auto; } }
 @media (max-width: 700px) { .room-wrap { min-height: 0; padding: 4px; } .hint { padding-top: 6px; } }
 .room text { font-family: var(--pixel); }
 .spot { cursor: pointer; outline: none; }
@@ -542,8 +543,8 @@ code { font-family: ui-monospace, Menlo, monospace; }
 .lamp-on { animation: blink .7s steps(2) infinite; }
 @keyframes blink { 50% { opacity: .25; } }
 .hint { text-align: center; color: var(--muted); font-size: 12px; padding: 0 12px 14px; }
-aside.side { background: var(--panel); border-left: 1px solid var(--line); display: flex; flex-direction: column; min-width: 0; max-height: 100vh; position: sticky; top: 0; }
-@media (max-width: 1000px) { aside.side { border-left: 0; border-top: 1px solid var(--line); max-height: none; position: static; } }
+aside.side { background: var(--panel); border-left: 1px solid var(--line); display: flex; flex-direction: column; min-width: 0; min-height: 0; height: 100vh; }
+@media (max-width: 1000px) { aside.side { border-left: 0; border-top: 1px solid var(--line); height: auto; } }
 .section { padding: 16px 18px; border-bottom: 1px solid var(--line); }
 .section h2 { margin: 0 0 10px; font-size: 11px; letter-spacing: 1px; text-transform: uppercase; color: var(--muted); font-weight: 700; }
 .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
@@ -568,7 +569,7 @@ aside.side { background: var(--panel); border-left: 1px solid var(--line); displ
   border: 2px solid var(--panel-2); background: #666; }
 .dot.working { background: var(--warn); } .dot.done { background: var(--ok); } .dot.failed { background: var(--bad); }
 .dot.waiting { background: #e2a92b; } .dot.skipped { background: #444; }
-.feed { flex: 1; overflow: auto; padding: 4px 10px 16px; min-height: 160px; }
+.feed { flex: 1; overflow: auto; padding: 4px 10px 16px; min-height: 120px; }
 .msg { display: flex; gap: 10px; padding: 10px 8px; border-radius: 10px; cursor: pointer; }
 .msg:hover, .msg:focus-visible { background: var(--panel-2); outline: none; }
 .msg .body { min-width: 0; flex: 1; }
@@ -578,13 +579,6 @@ aside.side { background: var(--panel); border-left: 1px solid var(--line); displ
 .msg .text { margin-top: 4px; color: #d6d9e6; font-size: 13px; line-height: 1.45; overflow-wrap: anywhere; }
 .msg .chip { padding: 1px 8px; font-size: 11px; }
 .empty { color: var(--muted); font-size: 13px; padding: 8px; }
-.run { display: flex; align-items: center; gap: 10px; padding: 8px; border-radius: 10px; text-decoration: none; color: var(--ink); }
-.run:hover, .run:focus-visible { background: var(--panel-2); outline: none; }
-.run.on { background: var(--panel-2); border: 1px solid var(--line); }
-.run .meta { min-width: 0; flex: 1; }
-.run .meta div:first-child { font-weight: 600; font-size: 13px; }
-.run .meta div:last-child { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.run .chip { padding: 1px 8px; font-size: 11px; }
 .foot { color: var(--muted); font-size: 11px; padding: 10px 18px; border-top: 1px solid var(--line); }
 .scrim { position: fixed; inset: 0; background: rgba(5, 6, 12, .55); opacity: 0; pointer-events: none; transition: opacity .15s; z-index: 9; }
 .scrim.open { opacity: 1; pointer-events: auto; }
@@ -668,7 +662,6 @@ figcaption { color: var(--muted); font-size: 11px; margin-top: 4px; }
   <aside class="side">
     <div class="section" id="summary"></div>
     <div class="section"><h2>Workflow files</h2><div class="files" id="files"></div></div>
-    <div class="section" id="runsSection" hidden><h2>Tickets in this app</h2><div id="runs"></div></div>
     <div class="section" style="padding-bottom:4px;border-bottom:0"><h2>Activity</h2></div>
     <div class="feed" id="feed"></div>
     <div class="foot" id="foot"></div>
@@ -1344,15 +1337,9 @@ function renderHistory() {
   const runs = DATA.history || [];
   if (runs.length > 1 || (runs.length && !DATA.is_current)) {
     const picker = document.getElementById("runPicker");
-    picker.innerHTML = runs.map(r => `<option value="${esc(r.href)}" ${r.ticket === DATA.ticket ? "selected" : ""}>${esc(r.ticket)}${r.current ? " (current)" : ""} · ${esc(r.status)}${r.updated ? " · " + esc(r.updated) : ""}</option>`).join("");
+    picker.innerHTML = runs.map(r => `<option value="${esc(r.href)}" ${r.ticket === DATA.ticket ? "selected" : ""}>${esc(r.ticket)}${r.current ? " (current)" : ""} · ${esc(r.status)}${r.pr ? (r.draft ? " · draft PR" : " · PR") : ""}${r.updated ? " · " + esc(r.updated) : ""}</option>`).join("");
     picker.onchange = () => { location.href = picker.value; };
     document.getElementById("pickerWrap").hidden = false;
-  }
-  if (runs.length > 1) {
-    document.getElementById("runs").innerHTML = runs.map(r => `<a class="run ${r.ticket === DATA.ticket ? "on" : ""}" href="${esc(r.href)}">
-      <div class="meta"><div>${esc(r.ticket)}${r.current ? ' <span class="muted">· current</span>' : ""}</div><div>${esc(r.title || "")}${r.updated ? " · " + esc(r.updated) : ""}</div></div>
-      ${r.pr ? `<span class="chip ${r.draft ? "draft" : "passed"}" title="${esc(r.pr)}">${r.draft ? "draft PR" : "PR"}</span>` : ""}${chip(r.status)}</a>`).join("");
-    document.getElementById("runsSection").hidden = false;
   }
   const current = runs.find(r => r.current);
   if (DATA.ticket && !DATA.is_current) {
