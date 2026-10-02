@@ -412,6 +412,20 @@ details { margin-top: 14px; } summary { cursor: pointer; color: var(--muted); fo
 .pair figure { margin: 0; }
 .pair img, .pair video { width: 100%; max-height: 460px; object-fit: contain; background: #000; border-radius: 8px; border: 1px solid var(--line); }
 figcaption { color: var(--muted); font-size: 11px; margin-top: 4px; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; margin-bottom: 14px; }
+.seg button { border: 0; background: var(--panel-2); padding: 7px 12px; cursor: pointer; font-size: 12px; color: var(--muted); }
+.seg button.on { background: var(--accent); color: #1a1300; font-weight: 600; }
+.compare { --pos: 50%; position: relative; height: min(520px, 68vh); background: #000; border-radius: 10px;
+  border: 1px solid var(--line); overflow: hidden; touch-action: pan-y; user-select: none; cursor: ew-resize; margin-bottom: 6px; }
+.compare img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; pointer-events: none; }
+.compare .c-before { clip-path: inset(0 calc(100% - var(--pos)) 0 0); }
+.compare .c-line { position: absolute; top: 0; bottom: 0; left: var(--pos); width: 2px; margin-left: -1px; background: var(--accent); pointer-events: none; }
+.compare .c-knob { position: absolute; top: 50%; left: var(--pos); width: 30px; height: 30px; margin: -15px 0 0 -15px; border-radius: 50%;
+  background: var(--accent); color: #1a1300; display: grid; place-items: center; font-size: 13px; font-weight: 700; pointer-events: none; box-shadow: 0 2px 8px rgba(0,0,0,.5); }
+.compare input { position: absolute; inset: auto 0 0 0; width: 100%; opacity: 0; height: 100%; margin: 0; cursor: ew-resize; }
+.compare:focus-within .c-knob { outline: 3px solid #fff; outline-offset: 2px; }
+.compare .c-tag { position: absolute; top: 8px; padding: 2px 8px; border-radius: 6px; background: rgba(0,0,0,.65); font-size: 11px; pointer-events: none; }
+.compare .c-tag.l { left: 8px; } .compare .c-tag.r { right: 8px; }
 .muted { color: var(--muted); }
 </style>
 </head>
@@ -779,17 +793,47 @@ function renderArtifact(a) {
   }
   return `<pre>${esc(a.content)}</pre>`;
 }
+let mediaMode = "side";
+try { mediaMode = localStorage.getItem("office.mediaMode") || "side"; } catch (e) { /* storage blocked: keep the default */ }
+function compareView(name, before, after) {
+  return `<div class="compare" data-name="${esc(name)}"><img class="c-after" src="${esc(after.src)}" alt="${esc(name)} after"><img class="c-before" src="${esc(before.src)}" alt="${esc(name)} before">
+    <div class="c-line"></div><div class="c-knob">⇆</div><span class="c-tag l">before</span><span class="c-tag r">after</span>
+    <input type="range" min="0" max="100" value="50" step="1" aria-label="Drag to compare before and after: ${esc(name)}"></div><figcaption>${esc(name)} · drag, tap or use the arrow keys</figcaption>`;
+}
+function bindCompare() {
+  document.querySelectorAll(".compare").forEach(box => {
+    const input = box.querySelector("input");
+    const set = v => { const pos = Math.max(0, Math.min(100, v)); box.style.setProperty("--pos", pos + "%"); input.value = pos; };
+    input.addEventListener("input", () => set(Number(input.value)));
+    const fromPointer = e => { const r = box.getBoundingClientRect(); set((e.clientX - r.left) / r.width * 100); };
+    box.addEventListener("pointerdown", e => { box.setPointerCapture(e.pointerId); fromPointer(e); input.focus({ preventScroll: true }); });
+    box.addEventListener("pointermove", e => { if (box.hasPointerCapture(e.pointerId)) fromPointer(e); });
+  });
+  document.querySelectorAll(".seg button").forEach(b => b.onclick = () => {
+    mediaMode = b.dataset.mode;
+    try { localStorage.setItem("office.mediaMode", mediaMode); } catch (e) { /* storage blocked */ }
+    document.getElementById("dbody").innerHTML = mediaView();
+    bindCompare();
+  });
+}
 function mediaView() {
   const m = DATA.media || { before: [], after: [] };
   const names = [...new Set([...m.before, ...m.after].map(x => x.name))];
   if (!names.length) return `<p class="muted">No screenshots or videos yet. The Device agent captures <b>before</b> while the Implementer works and <b>after</b> once the change is reviewed.</p>`;
+  const pairOf = name => [m.before.find(x => x.name === name), m.after.find(x => x.name === name)];
+  const comparable = names.filter(n => { const [b, a] = pairOf(n); return b && a && b.kind === "image" && a.kind === "image"; });
+  const toggle = comparable.length ? `<div class="seg" role="group" aria-label="Comparison mode"><button data-mode="side" class="${mediaMode !== "slider" ? "on" : ""}" aria-pressed="${mediaMode !== "slider"}">Side by side</button><button data-mode="slider" class="${mediaMode === "slider" ? "on" : ""}" aria-pressed="${mediaMode === "slider"}">Slider</button></div>` : "";
   const cell = (phase, name) => {
     const it = m[phase].find(x => x.name === name);
     if (!it) return `<figure><div class="empty">no ${phase}</div></figure>`;
     const media = it.kind === "video" ? `<video src="${esc(it.src)}" controls muted playsinline></video>` : `<a href="${esc(it.src)}" target="_blank"><img src="${esc(it.src)}" alt="${esc(name)} ${phase}"></a>`;
     return `<figure>${media}<figcaption>${phase} · ${esc(name)}</figcaption></figure>`;
   };
-  return names.map(n => `<div class="pair">${cell("before", n)}${cell("after", n)}</div>`).join("");
+  return toggle + names.map(n => {
+    const [b, a] = pairOf(n);
+    if (mediaMode === "slider" && comparable.includes(n)) return `<div style="margin-bottom:18px">${compareView(n, b, a)}</div>`;
+    return `<div class="pair">${cell("before", n)}${cell("after", n)}</div>`;
+  }).join("");
 }
 function tabsFor(role) {
   const tabs = ((DATA.artifacts || {})[role] || []).map(a => ({ id: a.name, label: a.label, a }));
@@ -809,6 +853,7 @@ function openDrawer(role, tabId) {
   document.getElementById("tabs").innerHTML = tabs.map(t => `<button class="tab ${t === active ? "on" : ""}" role="tab" aria-selected="${t === active}" data-tab="${esc(t.id)}">${esc(t.label)}</button>`).join("");
   document.getElementById("dbody").innerHTML = active ? (active.render ? active.render() : renderArtifact(active.a)) : `<p class="muted">This agent has not written anything yet.</p>`;
   document.getElementById("dbody").scrollTop = 0;
+  bindCompare();
   const a = active && active.a;
   document.getElementById("dfoot").innerHTML = (a ? `<a class="btn" href="${esc(a.src)}" target="_blank">Open file ↗</a><button class="btn" id="copy">Copy path</button><span>${esc(a.name)} · ${fmtB(a.size)}${a.truncated ? " · preview truncated" : ""}</span>` : "") + (live() ? `<span class="paused">Live updates paused while this panel is open</span>` : "");
   const copy = document.getElementById("copy");

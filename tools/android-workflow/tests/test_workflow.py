@@ -1504,3 +1504,16 @@ class OfficeTests(unittest.TestCase):
         self.assertIn("First plan.", plan["content"])
         self.assertEqual({item["ticket"]: item["href"] for item in past["history"]}["H-2"], "../office.html")
         self.assertNotIn("office.html", [item["rel"] for item in past["files"]])
+
+    def test_before_and_after_pairs_reach_the_page_for_the_slider(self) -> None:
+        with AndroidProject() as root:
+            run(root, {"id": "S-9", "title": "Change ProfileScreen", "type": "chore"})
+            shot = root / "shot.png"
+            shot.write_bytes(EvidenceTests.PNG)
+            for phase in ("before", "after"):
+                main(["evidence", "ingest", "--target", str(root), "--phase", phase, "--name", "profile", "--file", str(shot)])
+            data, html = office_data(root)
+        self.assertEqual([item["name"] for item in data["media"]["before"]], ["profile"])
+        self.assertEqual(data["media"]["after"][0]["kind"], "image")
+        self.assertEqual(data["media"]["after"][0]["src"], "S-9/media/after/profile.png")
+        self.assertIn("function compareView", html)
