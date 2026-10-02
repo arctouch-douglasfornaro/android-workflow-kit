@@ -236,7 +236,7 @@ def _write(path: Path, data: dict[str, Any]) -> None:
     payload = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp")
-    temporary.write_text(PAGE.replace("__DATA__", payload), encoding="utf-8")
+    temporary.write_text(PAGE.replace("__SIM__", SIM_JS).replace("__DATA__", payload), encoding="utf-8")
     temporary.replace(path)
 
 
@@ -259,6 +259,92 @@ def render(target: Path) -> Path:
             _write(page, collect(target, item["ticket_id"], run))
     return main
 
+
+SIM_JS = r"""/* Pure office model: plan, furniture, points of interest, walkable cells and paths. No DOM. */
+const SIM = (() => {
+  const W = 17, D = 10, CELL = 0.5;
+  const COLS = Math.round(W / CELL), ROWS = Math.round(D / CELL);
+  // Desks: [x, y, width]; the agent sits on a chair just behind the desk (smaller y), facing the viewer.
+  const LAYOUT = { Orchestrator: [5.6, 1.4, 2.4], Setup: [1.0, 3.9, 2], Planner: [4.4, 3.9, 2], Implementer: [7.8, 3.9, 2],
+    "Quality gate": [0.8, 7.4, 2], Reviewer: [3.2, 7.6, 2], Device: [6.1, 7.6, 2], Delivery: [9.0, 7.6, 2] };
+  const AGENTS = ["Orchestrator", "Setup", "Planner", "Implementer", "Reviewer", "Device", "Delivery"];
+  const FURNITURE = [];
+  const add = item => { FURNITURE.push(item); return item; };
+  for (const [role, [x, y, w]] of Object.entries(LAYOUT)) {
+    if (role === "Quality gate") { add({ id: "gate", kind: "machine", role, x: x + 0.3, y: y - 0.2, w: 1.1, d: 0.9, h: 54 }); continue; }
+    add({ id: `desk:${role}`, kind: "desk", role, x, y, w, d: 0.9, h: 17 });
+    add({ id: `chair:${role}`, kind: "chair", role, x: x + w / 2 - 0.25, y: y - 0.82, w: 0.5, d: 0.52, h: 28, walkable: true });
+  }
+  add({ id: "plant:1", kind: "plant", x: 0.3, y: 0.3, w: 0.45, d: 0.45, h: 40 });
+  add({ id: "plant:2", kind: "plant", x: 11.05, y: 0.3, w: 0.45, d: 0.45, h: 40 });
+  add({ id: "plant:3", kind: "plant", x: 0.3, y: 9.25, w: 0.45, d: 0.45, h: 40 });
+  add({ id: "plant:4", kind: "plant", x: 16.35, y: 9.25, w: 0.45, d: 0.45, h: 40 });
+  add({ id: "cooler", kind: "cooler", x: 12.1, y: 2.2, w: 0.5, d: 0.5, h: 44 });
+  add({ id: "counter", kind: "counter", x: 13.1, y: 0.05, w: 2.6, d: 0.65, h: 22 });
+  add({ id: "fridge", kind: "fridge", x: 16.0, y: 0.1, w: 0.85, d: 0.8, h: 54 });
+  add({ id: "table", kind: "table", x: 14.2, y: 3.4, w: 1.2, d: 1.0, h: 16 });
+  for (const [id, x, y] of [["N", 14.55, 2.75], ["S", 14.55, 4.55], ["W", 13.65, 3.65], ["E", 15.5, 3.65]]) {
+    add({ id: `stool:${id}`, kind: "stool", x, y, w: 0.45, d: 0.45, h: 10, walkable: true });
+  }
+  add({ id: "sofa", kind: "sofa", x: 13.4, y: 6.3, w: 2.6, d: 0.75, h: 22 });
+  // Where agents go when idle. `at` is where they stand to arrive; `pose` is where they are drawn.
+  const p = (x, y, face, pose) => ({ x, y, face, pose: pose || { x, y } });
+  const POIS = {
+    coffee: [p(13.6, 1.15, "-y"), p(14.4, 1.15, "-y")],
+    copa: [p(14.77, 2.97, "+y"), p(14.77, 4.77, "-y"), p(13.87, 3.87, "+x"), p(15.72, 3.87, "-x")],
+    sofa: [p(14.1, 7.4, "+y", { x: 14.1, y: 6.85 }), p(15.3, 7.4, "+y", { x: 15.3, y: 6.85 })],
+    chat: [[p(12.5, 4.4, "+y"), p(12.5, 5.4, "-y")], [p(12.5, 7.6, "+y"), p(12.5, 8.6, "-y")], [p(6.1, 6.1, "+x"), p(7.1, 6.1, "-x")]],
+    window: [p(2.3, 0.75, "-y"), p(9.9, 0.75, "-y")],
+    cooler: [p(12.35, 3.1, "-y")],
+  };
+  const SEATS = {};
+  for (const role of AGENTS) {
+    const [x, y, w] = LAYOUT[role];
+    SEATS[role] = p(x + w / 2, y - 0.55, "+y");
+  }
+  // Walkable cells: inside the room and not covered by solid furniture (chairs and stools can be sat on).
+  const blocked = new Uint8Array(COLS * ROWS);
+  for (let c = 0; c < COLS; c++) for (let r = 0; r < ROWS; r++) {
+    const x0 = c * CELL, y0 = r * CELL;
+    for (const f of FURNITURE) {
+      if (f.walkable) continue;
+      const ox = Math.min(x0 + CELL, f.x + f.w) - Math.max(x0, f.x), oy = Math.min(y0 + CELL, f.y + f.d) - Math.max(y0, f.y);
+      if (ox > 0.02 && oy > 0.02 && ox * oy > 0.04) { blocked[r * COLS + c] = 1; break; }
+    }
+  }
+  const cellOf = (x, y) => [Math.min(COLS - 1, Math.max(0, Math.floor(x / CELL))), Math.min(ROWS - 1, Math.max(0, Math.floor(y / CELL)))];
+  const centre = (c, r) => ({ x: (c + 0.5) * CELL, y: (r + 0.5) * CELL });
+  const walkable = (x, y) => { const [c, r] = cellOf(x, y); return x >= 0 && y >= 0 && x < W && y < D && !blocked[r * COLS + c]; };
+  // Shortest walk between two points over the cell grid (4 directions, the isometric axes). Deterministic.
+  function path(from, to) {
+    const [sc, sr] = cellOf(from.x, from.y), [gc, gr] = cellOf(to.x, to.y);
+    const start = sr * COLS + sc, goal = gr * COLS + gc;
+    if (start === goal) return [{ x: from.x, y: from.y }, { x: to.x, y: to.y }];
+    const prev = new Int32Array(COLS * ROWS).fill(-1), queue = [start];
+    prev[start] = start;
+    for (let i = 0; i < queue.length && prev[goal] < 0; i++) {
+      const cur = queue[i], c = cur % COLS, r = (cur - c) / COLS;
+      for (const [dc, dr] of [[1, 0], [0, 1], [-1, 0], [0, -1]]) {
+        const nc = c + dc, nr = r + dr, n = nr * COLS + nc;
+        if (nc < 0 || nr < 0 || nc >= COLS || nr >= ROWS || prev[n] >= 0) continue;
+        if (blocked[n] && n !== goal) continue;
+        prev[n] = cur; queue.push(n);
+      }
+    }
+    if (prev[goal] < 0) return null;
+    const cells = [];
+    for (let n = goal; n !== start; n = prev[n]) cells.push(n);
+    cells.reverse();
+    const out = [{ x: from.x, y: from.y }];
+    for (const n of cells.slice(0, -1)) { const c = n % COLS; out.push(centre(c, (n - c) / COLS)); }
+    out.push({ x: to.x, y: to.y });
+    return out;
+  }
+  const pathLength = pts => pts.slice(1).reduce((sum, q, i) => sum + Math.abs(q.x - pts[i].x) + Math.abs(q.y - pts[i].y), 0);
+  return { W, D, CELL, COLS, ROWS, LAYOUT, AGENTS, FURNITURE, POIS, SEATS, blocked, cellOf, walkable, path, pathLength };
+})();
+if (typeof module !== "undefined") module.exports = { SIM };
+"""
 
 PAGE = r"""<!doctype html>
 <html lang="en">
@@ -461,6 +547,7 @@ figcaption { color: var(--muted); font-size: 11px; margin-top: 4px; }
 </aside>
 <script>
 const DATA = __DATA__;
+__SIM__
 const ROLE_OF_STAGE = { T0: "Setup", T1: "Planner", T2: "Planner", T3: "Planner", T4: "Implementer",
   T5: "Quality gate", T6: "Reviewer", T7: "Device", T8: "Delivery", T9: "Orchestrator" };
 const ROLE_ALIAS = { Triage: "Planner", Localizer: "Planner", Telemetry: "Orchestrator", Bootstrap: "Orchestrator" };
@@ -490,7 +577,7 @@ const desks = () => DATA.ticket ? [bossDesk(), ...(DATA.desks || [])] : [];
 const deskOf = role => desks().find(d => d.role === role) || { role, colour: role === "Orchestrator" ? "#d4a72c" : "#888", state: "idle" };
 
 /* ---------- isometric room ---------- */
-const TW = 56, TH = 28, W = 12, D = 10, WALL = 112, PAD = 26;
+const TW = 56, TH = 28, W = SIM.W, D = SIM.D, WALL = 112, PAD = 26;
 const OX = D * TW / 2 + PAD, OY = WALL + PAD + 10;
 const VW = (W + D) * TW / 2 + PAD * 2, VH = (W + D) * TH / 2 + WALL + PAD * 2 + 20;
 const iso = (x, y, z = 0) => [OX + (x - y) * TW / 2, OY + (x + y) * TH / 2 - z];
@@ -506,16 +593,22 @@ function box(x, y, z, w, d, h, color, extra = "") {
   const front = [iso(x, y + d, z), iso(x + w, y + d, z), iso(x + w, y + d, z + h), iso(x, y + d, z + h)];
   return `<g ${extra}>${poly(front, shade(color, .72))}${poly(right, shade(color, .86))}${poly(top, color)}</g>`;
 }
+const tile = (x, y, fill, stroke) => `<polygon points="${pts([iso(x, y), iso(x + 1, y), iso(x + 1, y + 1), iso(x, y + 1)])}" fill="${fill}" stroke="${stroke}" stroke-width=".6"/>`;
 function floorTiles() {
   let out = "";
   for (let x = 0; x < W; x++) for (let y = 0; y < D; y++) {
-    out += `<polygon points="${pts([iso(x, y), iso(x + 1, y), iso(x + 1, y + 1), iso(x, y + 1)])}" fill="${(x + y) % 2 ? "#c9b896" : "#d6c7a5"}" stroke="#b9a885" stroke-width=".6"/>`;
+    if (x < 12) out += tile(x, y, (x + y) % 2 ? "#c9b896" : "#d6c7a5", "#b9a885");          // office
+    else if (x === 12) out += tile(x, y, y % 2 ? "#a77b52" : "#b0845a", "#8e6642");        // corridor planks
+    else out += tile(x, y, (x + y) % 2 ? "#cfe3e6" : "#eef6f7", "#b5cdd1");                // copa tiles
   }
-  return out + poly([iso(5.0, 0.5), iso(9.2, 0.5), iso(9.2, 2.6), iso(5.0, 2.6)], "#7a4e9c", 'opacity=".5"');
+  out += poly([iso(5.0, 0.5), iso(9.2, 0.5), iso(9.2, 2.6), iso(5.0, 2.6)], "#7a4e9c", 'opacity=".5"');
+  out += poly([iso(13.4, 7.25), iso(16.2, 7.25), iso(16.2, 8.6), iso(13.4, 8.6)], "#d98b5f", 'opacity=".55"');
+  return out;
 }
 function walls() {
   const H = WALL;
   let out = poly([iso(0, 0), iso(W, 0), iso(W, 0, H), iso(0, 0, H)], "#8fa9c8");
+  out += poly([iso(12, 0), iso(W, 0), iso(W, 0, H), iso(12, 0, H)], "#9cc5b9");
   out += poly([iso(0, 0), iso(0, D), iso(0, D, H), iso(0, 0, H)], "#7591b4");
   out += poly([iso(0, 0, H), iso(W, 0, H), iso(W, -0.25, H), iso(0, -0.25, H)], "#5b6f8c");
   out += poly([iso(0, 0, H), iso(0, D, H), iso(-0.25, D, H), iso(-0.25, 0, H)], "#4f6280");
@@ -529,21 +622,16 @@ function walls() {
   out += poly([iso(3.5, 0, 94), iso(5.5, 0, 94), iso(5.5, 0, 58), iso(3.5, 0, 58)], "#2f3d33");
   out += poly([iso(3.6, 0, 92), iso(5.4, 0, 92), iso(5.4, 0, 60), iso(3.6, 0, 60)], "#36513f");
   const [bx, by] = iso(4.5, 0, 74);
-  // text sheared onto the back wall (slope TH/TW = 0.5)
   out += `<g transform="matrix(1 0.5 0 1 ${bx} ${by})"><text x="0" y="0" font-size="7.5" fill="#e8f1df" text-anchor="middle">${esc((DATA.ticket || "NO RUN").slice(0, 10))}</text></g>`;
+  // copa sign and menu board over the counter
+  out += poly([iso(13.3, 0, 96), iso(15.5, 0, 96), iso(15.5, 0, 74), iso(13.3, 0, 74)], "#5b3a29");
+  const [sx, sy] = iso(14.4, 0, 82);
+  out += `<g transform="matrix(1 0.5 0 1 ${sx} ${sy})"><text x="0" y="0" font-size="6.5" fill="#ffe7b0" text-anchor="middle">COFFEE</text></g>`;
   out += poly([iso(0, 2.2, 88), iso(0, 3.6, 88), iso(0, 3.6, 48), iso(0, 2.2, 48)], "#ffcf5a");
   out += poly([iso(0, 2.45, 80), iso(0, 3.35, 80), iso(0, 3.35, 58), iso(0, 2.45, 58)], "#3d8bfd");
   const [cx, cy] = iso(0, 6, 76);
   out += `<g transform="matrix(1 -0.5 0 1 ${cx} ${cy})"><ellipse cx="0" cy="0" rx="10" ry="10" fill="#f4f1de" stroke="#222" stroke-width="1.5"/><path d="M0 0 V-6 M0 0 H4" stroke="#222" stroke-width="1.4"/></g>`;
   return out;
-}
-function plant(x, y) {
-  const [px, py] = iso(x + 0.22, y + 0.22, 14);
-  return box(x, y, 0, 0.45, 0.45, 14, "#b5643a") + `<ellipse cx="${px}" cy="${py - 10}" rx="13" ry="12" fill="#3f9b4b" stroke="rgba(0,0,0,.3)"/><ellipse cx="${px - 5}" cy="${py - 16}" rx="7" ry="7" fill="#57b864"/>`;
-}
-function cooler(x, y) {
-  const [px, py] = iso(x + 0.25, y + 0.25, 26);
-  return box(x, y, 0, 0.5, 0.5, 26, "#e8e8ee") + `<ellipse cx="${px}" cy="${py - 9}" rx="8" ry="10" fill="#8fd3ff" stroke="rgba(0,0,0,.3)"/>`;
 }
 const SPRITE = ["....hhhh....", "...hhhhhhh..", "..hhhhhhhhh.", "..hhsssssh..", "...ssesses..", "...ssssss...", "....smms....",
   ".....ss.....", "..cccccccc..", ".cccccccccc.", ".cccccccccc.", ".cccccccccc.", "..cccccccc.."];
@@ -592,66 +680,154 @@ const EXTRAS = {
   Delivery: (tx, ty, w) => box(tx + w - 0.8, ty + 0.2, 17, 0.55, 0.45, 9, "#c8a46a") + box(tx + w - 0.8, ty + 0.2, 26, 0.55, 0.45, 1, "#a8844a"),
   Orchestrator: (tx, ty, w) => box(tx + w - 0.6, ty + 0.3, 17, 0.25, 0.25, 7, "#f4f1de") + box(tx + 0.95, ty + 0.35, 17, 0.5, 0.3, 1.2, "#2c3e50"),
 };
-function station(desk, tx, ty, wide) {
-  const parts = [], working = desk.state === "working", skipped = desk.state === "skipped", dim = skipped ? 'opacity=".42"' : "";
-  const ring = [iso(tx - 0.2, ty - 1.05), iso(tx + wide + 0.2, ty - 1.05), iso(tx + wide + 0.2, ty + 1.2), iso(tx - 0.2, ty + 1.2)];
-  parts.push({ d: -50, s: `<polygon class="ring" data-ring="${esc(desk.role)}" points="${pts(ring)}"/>` });
-  if (desk.kind === "machine") {
+// One drawing per furniture kind, from the SIM plan (the single source of positions).
+function drawFurniture(f, ctx) {
+  const desk = f.role ? deskOf(f.role) : null, working = desk && desk.state === "working";
+  const dim = desk && desk.state === "skipped" ? 'opacity=".42"' : "";
+  if (f.kind === "desk") {
+    const { x: tx, y: ty, w: wide } = f, screen = ctx.screenFor(f.role);
+    let d = box(tx, ty, 0, wide, 0.9, 17, f.role === "Orchestrator" ? "#6d3f22" : "#9a6a3f", dim);
+    d += box(tx + 0.2, ty + 0.25, 17, 0.62, 0.14, 15, "#23262f", dim);
+    d += poly([iso(tx + 0.26, ty + 0.39, 30), iso(tx + 0.76, ty + 0.39, 30), iso(tx + 0.76, ty + 0.39, 19), iso(tx + 0.26, ty + 0.39, 19)], screen.fill, screen.cls);
+    if (screen.lines) for (let i = 0; i < 3; i++) {
+      const end = tx + 0.51 + (i % 2) * 0.15;
+      d += poly([iso(tx + 0.31, ty + 0.39, 27 - i * 3), iso(end, ty + 0.39, 27 - i * 3), iso(end, ty + 0.39, 26 - i * 3), iso(tx + 0.31, ty + 0.39, 26 - i * 3)], screen.lines);
+    }
+    if (EXTRAS[f.role] && !dim) d += EXTRAS[f.role](tx, ty, wide, working);
+    return d;
+  }
+  if (f.kind === "chair") return box(f.x, f.y + 0.07, 0, 0.5, 0.45, 10, "#454a5c", dim) + box(f.x, f.y, 10, 0.5, 0.08, 18, "#3a3e4e", dim);
+  if (f.kind === "machine") {
     const lamp = desk.state === "done" ? "#4fd07d" : desk.state === "failed" ? "#ff6262" : working ? "#ffc94d" : "#555";
-    let m = box(tx + 0.3, ty - 0.2, 0, 1.1, 0.9, 54, "#9aa4b2", dim);
-    m += poly([iso(tx + 0.42, ty + 0.7, 46), iso(tx + 1.28, ty + 0.7, 46), iso(tx + 1.28, ty + 0.7, 30), iso(tx + 0.42, ty + 0.7, 30)], working ? "#1d4a5e" : "#13212b", working ? 'class="screen-on"' : "");
-    m += poly([iso(tx + 0.5, ty + 0.7, 24), iso(tx + 0.66, ty + 0.7, 24), iso(tx + 0.66, ty + 0.7, 18), iso(tx + 0.5, ty + 0.7, 18)], lamp, working ? 'class="lamp-on"' : "");
-    for (let i = 0; i < 3; i++) m += poly([iso(tx + 0.8, ty + 0.7, 24 - i * 4), iso(tx + 1.25, ty + 0.7, 24 - i * 4), iso(tx + 1.25, ty + 0.7, 22.6 - i * 4), iso(tx + 0.8, ty + 0.7, 22.6 - i * 4)], "#5d6673");
-    parts.push({ d: tx + ty + 1.5, s: m });
-    const [hx, hy] = iso(tx + 0.85, ty + 0.25, 54);
-    let over = tag(hx, hy - 8, desk) + statusMark(hx + desk.role.length * 3 + 17, hy - 14, desk);
-    if (desk.state === "failed" && desk.note) over += bubble(hx, hy - 24, desk.note, true);
-    if (working && desk.note) over += bubble(hx, hy - 24, desk.note);
-    parts.push({ d: 99, s: over });
-    return { parts, hit: [hx, hy + 30] };
+    const { x, y } = f, fy = y + 0.9;
+    let m = box(x, y, 0, 1.1, 0.9, 54, "#9aa4b2", dim);
+    m += poly([iso(x + 0.12, fy, 46), iso(x + 0.98, fy, 46), iso(x + 0.98, fy, 30), iso(x + 0.12, fy, 30)], working ? "#1d4a5e" : "#13212b", working ? 'class="screen-on"' : "");
+    m += poly([iso(x + 0.2, fy, 24), iso(x + 0.36, fy, 24), iso(x + 0.36, fy, 18), iso(x + 0.2, fy, 18)], lamp, working ? 'class="lamp-on"' : "");
+    for (let i = 0; i < 3; i++) m += poly([iso(x + 0.5, fy, 24 - i * 4), iso(x + 0.95, fy, 24 - i * 4), iso(x + 0.95, fy, 22.6 - i * 4), iso(x + 0.5, fy, 22.6 - i * 4)], "#5d6673");
+    return m;
   }
-  parts.push({ d: tx + ty - 0.3, s: box(tx + wide / 2 - 0.25, ty - 0.75, 0, 0.5, 0.45, 10, "#454a5c", dim) + box(tx + wide / 2 - 0.25, ty - 0.82, 10, 0.5, 0.08, 18, "#3a3e4e", dim) });
-  const [ax, ay] = iso(tx + wide / 2 + 0.05, ty - 0.35, 12);
-  let top = ay - 30;
-  if (!skipped) {
-    const p = person(desk, ax, ay + 2);
-    top = p.top;
-    parts.push({ d: tx + ty + 0.1, s: `<g class="${working ? "typing" : ""}">${p.svg}</g>` });
+  if (f.kind === "plant") {
+    const [px, py] = iso(f.x + 0.22, f.y + 0.22, 14);
+    return box(f.x, f.y, 0, 0.45, 0.45, 14, "#b5643a") + `<ellipse cx="${px}" cy="${py - 10}" rx="13" ry="12" fill="#3f9b4b" stroke="rgba(0,0,0,.3)"/><ellipse cx="${px - 5}" cy="${py - 16}" rx="7" ry="7" fill="#57b864"/>`;
   }
-  let d = box(tx, ty, 0, wide, 0.9, 17, desk.role === "Orchestrator" ? "#6d3f22" : "#9a6a3f", dim);
-  d += box(tx + 0.2, ty + 0.25, 17, 0.62, 0.14, 15, "#23262f", dim);
-  d += poly([iso(tx + 0.26, ty + 0.39, 30), iso(tx + 0.76, ty + 0.39, 30), iso(tx + 0.76, ty + 0.39, 19), iso(tx + 0.26, ty + 0.39, 19)], working ? "#7fe0ff" : "#2c3b47", working ? 'class="screen-on"' : "");
-  if (working) for (let i = 0; i < 3; i++) {
-    const end = tx + 0.51 + (i % 2) * 0.15;
-    d += poly([iso(tx + 0.31, ty + 0.39, 27 - i * 3), iso(end, ty + 0.39, 27 - i * 3), iso(end, ty + 0.39, 26 - i * 3), iso(tx + 0.31, ty + 0.39, 26 - i * 3)], "#0f3a4a");
+  if (f.kind === "cooler") {
+    const [px, py] = iso(f.x + 0.25, f.y + 0.25, 26);
+    return box(f.x, f.y, 0, 0.5, 0.5, 26, "#e8e8ee") + `<ellipse cx="${px}" cy="${py - 9}" rx="8" ry="10" fill="#8fd3ff" stroke="rgba(0,0,0,.3)"/>`;
   }
-  if (EXTRAS[desk.role] && !skipped) d += EXTRAS[desk.role](tx, ty, wide, working);
-  parts.push({ d: tx + ty + wide + 0.9, s: d });
-  const above = Math.min(top, ay - 30) - 6;
-  const floating = ["idle", "waiting"].includes(desk.state);
+  if (f.kind === "counter") {
+    let c = box(f.x, f.y, 0, f.w, f.d, 22, "#7b5a43") + box(f.x - 0.02, f.y - 0.02, 22, f.w + 0.04, f.d + 0.04, 2, "#e9e4da");
+    c += box(f.x + 0.3, f.y + 0.12, 24, 0.55, 0.42, 20, "#2d2f36") + poly([iso(f.x + 0.38, f.y + 0.54, 38), iso(f.x + 0.78, f.y + 0.54, 38), iso(f.x + 0.78, f.y + 0.54, 31), iso(f.x + 0.38, f.y + 0.54, 31)], "#ff9f43");
+    c += box(f.x + 1.15, f.y + 0.2, 24, 0.16, 0.16, 5, "#fff") + box(f.x + 1.4, f.y + 0.2, 24, 0.16, 0.16, 5, "#fff") + box(f.x + 1.9, f.y + 0.12, 24, 0.5, 0.4, 7, "#c0392b");
+    return c;
+  }
+  if (f.kind === "fridge") return box(f.x, f.y, 0, f.w, f.d, 54, "#dfe6ee") + poly([iso(f.x + 0.1, f.y + f.d, 46), iso(f.x + 0.14, f.y + f.d, 46), iso(f.x + 0.14, f.y + f.d, 32), iso(f.x + 0.1, f.y + f.d, 32)], "#8a96a3");
+  if (f.kind === "table") return box(f.x + 0.5, f.y + 0.4, 0, 0.2, 0.2, 14, "#5c4033") + box(f.x, f.y, 14, f.w, f.d, 3, "#c98d5a") + box(f.x + 0.3, f.y + 0.35, 17, 0.14, 0.14, 4, "#fff");
+  if (f.kind === "stool") return box(f.x + 0.16, f.y + 0.16, 0, 0.12, 0.12, 8, "#555") + box(f.x, f.y, 8, f.w, f.d, 3, "#e67e22");
+  if (f.kind === "sofa") return box(f.x, f.y + 0.2, 0, f.w, 0.55, 10, "#3f6fb5") + box(f.x, f.y, 0, f.w, 0.22, 22, "#355f9c") + box(f.x - 0.15, f.y, 0, 0.15, 0.75, 15, "#355f9c") + box(f.x + f.w, f.y, 0, 0.15, 0.75, 15, "#355f9c");
+  return "";
+}
+// Painter's order for an isometric scene: a dependency sort on footprints, so a walking agent can be
+// in front of one desk and behind the next. Items whose screen boxes do not overlap need no order.
+function screenBox(it) {
+  const h = it.h || 40;
+  return { x0: iso(it.x, it.y + it.d)[0], x1: iso(it.x + it.w, it.y)[0], y0: iso(it.x, it.y, h)[1], y1: iso(it.x + it.w, it.y + it.d)[1] };
+}
+function behind(a, b) {
+  const e = 1e-3;
+  const ax = a.x + a.w <= b.x + e, ay = a.y + a.d <= b.y + e, bx = b.x + b.w <= a.x + e, by = b.y + b.d <= a.y + e;
+  if ((ax || ay) && !(bx || by)) return true;
+  if ((bx || by) && !(ax || ay)) return false;
+  if (!(ax || ay || bx || by)) return (a.prio || 0) < (b.prio || 0) || ((a.prio || 0) === (b.prio || 0) && a.x + a.y < b.x + b.y);
+  return a.x + a.w / 2 + a.y + a.d / 2 < b.x + b.w / 2 + b.y + b.d / 2;
+}
+function depthSort(items) {
+  const n = items.length, boxes = items.map(screenBox), after = items.map(() => []), indeg = new Array(n).fill(0);
+  for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
+    const a = boxes[i], b = boxes[j];
+    if (a.x1 <= b.x0 || b.x1 <= a.x0 || a.y1 <= b.y0 || b.y1 <= a.y0) continue;
+    const [first, second] = behind(items[i], items[j]) ? [i, j] : [j, i];
+    after[first].push(second); indeg[second]++;
+  }
+  const key = i => items[i].x + items[i].w + items[i].y + items[i].d, done = new Array(n).fill(false), out = [];
+  while (out.length < n) {
+    let pick = -1;
+    for (let i = 0; i < n; i++) if (!done[i] && indeg[i] === 0 && (pick < 0 || key(i) < key(pick))) pick = i;
+    if (pick < 0) for (let i = 0; i < n; i++) if (!done[i] && (pick < 0 || key(i) < key(pick))) pick = i;  // cycle: break it
+    done[pick] = true; out.push(items[pick]);
+    for (const j of after[pick]) indeg[j]--;
+  }
+  return out;
+}
+// Where every agent is at time `now` (seconds). For now everyone sits at their desk.
+function placements(now) {
+  const out = {};
+  for (const role of SIM.AGENTS) out[role] = { role, mode: "desk", x: SIM.SEATS[role].x, y: SIM.SEATS[role].y, face: "+y" };
+  return out;
+}
+let PLACED = {};
+function screenFor(role) {
+  const pl = PLACED[role], desk = deskOf(role);
+  if (desk.state === "working" && pl && pl.mode === "desk") return { fill: "#7fe0ff", cls: 'class="screen-on"', lines: "#0f3a4a" };
+  if (pl && pl.mode === "game") return { fill: "#2ecc71", cls: 'class="screen-on"', lines: "#f1c40f" };
+  return { fill: "#2c3b47", cls: "", lines: null };
+}
+function agentItem(desk, pl) {
+  const [ax, ay] = iso(pl.x + 0.05, pl.y + 0.2, 12);
+  const p = person(desk, ax, ay + 2);
+  const typing = desk.state === "working" && pl.mode === "desk";
+  return { id: `agent:${desk.role}`, x: pl.x - 0.2, y: pl.y - 0.2, w: 0.4, d: 0.4, h: 50, prio: 1,
+    svg: `<g class="${typing ? "typing" : ""}">${p.svg}</g>`, anchor: [ax, ay], top: p.top, desk, pl };
+}
+function overlayFor(desk, anchor, top) {
+  const [ax, ay] = anchor, working = desk.state === "working";
+  const above = Math.min(top, ay - 30) - 6, floating = ["idle", "waiting"].includes(desk.state);
   let over = tag(ax, above, desk) + (floating ? statusMark(ax, above - 20, desk) : statusMark(ax + desk.role.length * 3 + 17, above - 6, desk));
   if (working && desk.note) over += bubble(ax, above - 16, desk.note);
   if (desk.state === "failed" && desk.note) over += bubble(ax, above - 16, desk.note, true);
-  parts.push({ d: 99, s: over });
-  return { parts, hit: [ax, ay] };
+  return over;
 }
-const LAYOUT = { Orchestrator: [5.6, 1.4, 2.4], Setup: [1.0, 3.9, 2], Planner: [4.4, 3.9, 2], Implementer: [7.8, 3.9, 2],
-  "Quality gate": [0.8, 7.4, 2], Reviewer: [3.2, 7.6, 2], Device: [6.1, 7.6, 2], Delivery: [9.0, 7.6, 2] };
 function renderRoom() {
   const svg = document.getElementById("room");
   svg.setAttribute("viewBox", `0 0 ${VW} ${VH}`);
-  const layers = [{ d: -100, s: walls() + floorTiles() }, { d: 0.8, s: plant(0.3, 0.3) }, { d: 11.6, s: plant(11.3, 0.3) },
-    { d: 13.6, s: cooler(11.2, 2.4) }, { d: 21, s: plant(11.3, 9.3) }];
-  const hits = [];
-  for (const desk of desks()) {
-    const [tx, ty, wide] = LAYOUT[desk.role];
-    const st = station(desk, tx, ty, wide);
-    layers.push(...st.parts);
-    const [hx, hy] = st.hit;
-    hits.push(`<g class="spot" data-role="${esc(desk.role)}" tabindex="0" role="button" aria-label="${esc(desk.role)}: ${esc(STATE_LABEL[desk.state] || desk.state)}. Open details."><rect class="hit" x="${(hx - 64).toFixed(1)}" y="${(hy - 96).toFixed(1)}" width="128" height="132" rx="10"/></g>`);
+  PLACED = placements(Date.now() / 1000);
+  const items = [], overlays = [], hits = [], rings = [];
+  const present = new Set(desks().map(d => d.role));
+  for (const f of SIM.FURNITURE) {
+    if (f.role && !present.has(f.role)) continue;
+    items.push({ ...f, prio: f.kind === "chair" || f.kind === "stool" ? 0 : 2, svg: drawFurniture(f, { screenFor }) });
+    if (f.kind === "desk" || f.kind === "machine") {
+      const ring = [iso(f.x - 0.2, f.y - 1.05), iso(f.x + f.w + 0.2, f.y - 1.05), iso(f.x + f.w + 0.2, f.y + f.d + 0.3), iso(f.x - 0.2, f.y + f.d + 0.3)];
+      rings.push(`<polygon class="ring" data-ring="${esc(f.role)}" points="${pts(ring)}"/>`);
+    }
   }
-  layers.sort((a, b) => a.d - b.d);
-  svg.innerHTML = layers.map(l => l.s).join("") + hits.join("");
+  for (const desk of desks()) {
+    if (desk.kind === "machine") {
+      const f = SIM.FURNITURE.find(x => x.id === "gate"), [hx, hy] = iso(f.x + 0.55, f.y + 0.45, 54);
+      let over = tag(hx, hy - 8, desk) + statusMark(hx + desk.role.length * 3 + 17, hy - 14, desk);
+      if (desk.note && (desk.state === "failed" || desk.state === "working")) over += bubble(hx, hy - 24, desk.note, desk.state === "failed");
+      overlays.push(over);
+      hits.push(hitArea(desk, hx, hy + 30));
+      continue;
+    }
+    const pl = PLACED[desk.role];
+    if (!pl || desk.state === "skipped") {
+      const seat = SIM.SEATS[desk.role], [sx, sy] = iso(seat.x, seat.y, 12);
+      hits.push(hitArea(desk, sx, sy));
+      overlays.push(overlayFor(desk, [sx, sy], sy - 30));
+      continue;
+    }
+    const it = agentItem(desk, pl);
+    items.push(it);
+    overlays.push(overlayFor(desk, it.anchor, it.top));
+    hits.push(hitArea(desk, it.anchor[0], it.anchor[1]));
+  }
+  svg.innerHTML = walls() + floorTiles() + rings.join("") + depthSort(items).map(i => i.svg).join("") + overlays.join("") + hits.join("");
+  bindSpots(svg);
+}
+function hitArea(desk, hx, hy) {
+  return `<g class="spot" data-role="${esc(desk.role)}" tabindex="0" role="button" aria-label="${esc(desk.role)}: ${esc(STATE_LABEL[desk.state] || desk.state)}. Open details."><rect class="hit" x="${(hx - 64).toFixed(1)}" y="${(hy - 96).toFixed(1)}" width="128" height="132" rx="10"/></g>`;
+}
+function bindSpots(svg) {
   svg.querySelectorAll(".spot").forEach(el => {
     const ring = svg.querySelector(`.ring[data-ring="${CSS.escape(el.dataset.role)}"]`);
     const on = () => ring && ring.classList.add("hover"), off = () => ring && ring.classList.remove("hover");
