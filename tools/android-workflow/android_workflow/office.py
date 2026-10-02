@@ -332,7 +332,10 @@ const SIM = (() => {
     add({ id: `stool:${id}`, kind: "stool", x, y, w: 0.45, d: 0.45, h: 10, walkable: true });
   }
   add({ id: "tv", kind: "tv", x: 13.7, y: 5.95, w: 2.0, d: 0.5, h: 46 });
-  add({ id: "sofa", kind: "sofa", x: 13.4, y: 7.6, w: 2.6, d: 0.75, h: 22 });
+  add({ id: "sofa-arm-l", kind: "sofa-arm", x: 13.25, y: 7.6, w: 0.15, d: 0.75, h: 15 });
+  add({ id: "sofa-seat", kind: "sofa-seat", x: 13.4, y: 7.6, w: 2.6, d: 0.53, h: 10 });
+  add({ id: "sofa-back", kind: "sofa-back", x: 13.4, y: 8.13, w: 2.6, d: 0.22, h: 24 });
+  add({ id: "sofa-arm-r", kind: "sofa-arm", x: 16.0, y: 7.6, w: 0.15, d: 0.75, h: 15 });
   // Where agents go when idle. `at` is where they stand to arrive; `pose` is where they are drawn.
   const p = (x, y, face, pose) => ({ x, y, face, pose: pose || { x, y } });
   const POIS = {
@@ -804,7 +807,7 @@ const EXTRAS = {
 const floorShadow = (f, spread = 0.22) => poly([iso(f.x + 0.06, f.y + 0.06), iso(f.x + f.w + spread, f.y + 0.06), iso(f.x + f.w + spread, f.y + f.d + spread), iso(f.x + 0.06, f.y + f.d + spread)], "rgba(25,20,35,.16)", 'stroke="none"');
 // One drawing per furniture kind, from the SIM plan (the single source of positions).
 function drawFurniture(f, ctx) {
-  const shadowed = ["desk", "machine", "counter", "fridge", "table", "sofa", "plant", "cooler", "tv"].includes(f.kind);
+  const shadowed = ["desk", "machine", "counter", "fridge", "table", "sofa-seat", "plant", "cooler", "tv"].includes(f.kind);
   return (shadowed ? floorShadow(f) : "") + drawFurnitureBody(f, ctx);
 }
 function drawFurnitureBody(f, ctx) {
@@ -817,8 +820,8 @@ function drawFurnitureBody(f, ctx) {
     // A screen in use lights the monitor's edges and the desk around it.
     const mx = tx + wide / 2 - 0.27, my = ty + 0.06;
     if (screen.lines) {
-      const [gx, gy] = iso(mx + 0.27, my + 0.06, 24);
-      d += `<ellipse cx="${gx.toFixed(1)}" cy="${gy.toFixed(1)}" rx="24" ry="13" fill="${screen.fill}" opacity=".22" ${screen.cls}/>`;
+      const [gx, gy] = iso(mx + 0.27, my + 0.42, 17);  // light spilling on the desktop, in front of the monitor
+      d += `<ellipse cx="${gx.toFixed(1)}" cy="${gy.toFixed(1)}" rx="15" ry="6" fill="${screen.fill}" opacity=".2" ${screen.cls}/>`;
     }
     d += box(mx + 0.2, my + 0.04, 17, 0.14, 0.08, 4, "#2b2e38", dim);
     d += box(mx, my, 21, 0.54, 0.12, 12, "#2b2e38", dim);
@@ -854,10 +857,9 @@ function drawFurnitureBody(f, ctx) {
   if (f.kind === "fridge") return box(f.x, f.y, 0, f.w, f.d, 54, "#dfe6ee") + poly([iso(f.x + 0.1, f.y + f.d, 46), iso(f.x + 0.14, f.y + f.d, 46), iso(f.x + 0.14, f.y + f.d, 32), iso(f.x + 0.1, f.y + f.d, 32)], "#8a96a3");
   if (f.kind === "table") return box(f.x + 0.5, f.y + 0.4, 0, 0.2, 0.2, 14, "#5c4033") + box(f.x, f.y, 14, f.w, f.d, 3, "#c98d5a") + box(f.x + 0.3, f.y + 0.35, 17, 0.14, 0.14, 4, "#fff");
   if (f.kind === "stool") return box(f.x + 0.16, f.y + 0.16, 0, 0.12, 0.12, 8, "#555") + box(f.x, f.y, 8, f.w, f.d, 3, "#e67e22");
-  if (f.kind === "sofa") {  // faces the TV (-y): seat at the front, backrest at the back
-    return box(f.x - 0.15, f.y, 0, 0.15, 0.75, 15, "#355f9c") + box(f.x, f.y, 0, f.w, 0.55, 10, "#3f6fb5")
-      + box(f.x, f.y + 0.53, 0, f.w, 0.22, 24, "#355f9c") + box(f.x + f.w, f.y, 0, 0.15, 0.75, 15, "#355f9c");
-  }
+  if (f.kind === "sofa-seat") return box(f.x, f.y, 0, f.w, f.d, 10, "#3f6fb5") + box(f.x + 0.05, f.y + 0.05, 10, f.w / 2 - 0.08, f.d - 0.1, 2.5, "#4a7cc4") + box(f.x + f.w / 2 + 0.03, f.y + 0.05, 10, f.w / 2 - 0.08, f.d - 0.1, 2.5, "#4a7cc4");
+  if (f.kind === "sofa-back") return box(f.x, f.y, 0, f.w, f.d, 24, "#355f9c");
+  if (f.kind === "sofa-arm") return box(f.x, f.y, 0, f.w, f.d, 15, "#2f5590");
   if (f.kind === "tv") {  // low stand, console and a TV whose screen faces the room (+y)
     const playing = Object.values(PLACED).some(pl => pl && pl.mode === "sofa");
     let tv = box(f.x, f.y, 0, f.w, f.d, 12, "#5d4037") + box(f.x + 0.15, f.y + 0.1, 12, 0.45, 0.3, 4, "#1c1c22");
@@ -915,93 +917,109 @@ function placements(now) {
   for (const role of SIM.AGENTS) out[role] = { role, ...SIM.stateAt(seed, role, now, work) };
   return out;
 }
-/* ---------- characters: Habbo-style people seen three-quarters ---------- */
-// Drawn facing the room's diagonals like Habbo: south-west (+y) is the base drawing, south-east (+x)
-// mirrors it, and north-east (-y) / north-west (-x) are the back views. Flat two-tone colours, dark outline.
+/* ---------- characters: cute Habbo-style people seen three-quarters ---------- */
+// Base drawing faces south-west (+y, toward the front of the room); south-east (+x) mirrors it.
+// North-east (-y) and north-west (-x) are the back views. Rounded limbs with an outline, big head.
 const STYLE = {  // per agent: accessory and hair, so each one is recognisable anywhere in the room
   Orchestrator: { acc: "tie", hair: "short" }, Setup: { acc: "beanie", hair: "short" }, Planner: { acc: "glasses", hair: "side" },
   Implementer: { acc: "headphones", hair: "messy" }, Reviewer: { acc: "glasses", hair: "long" }, Device: { acc: "bun", hair: "bun" },
   Delivery: { acc: "cap", hair: "short" },
 };
-const OL = "#24242c", OW = 0.9;  // outline colour and width
-const LIGHT_PANTS = "#3d5875", SHOE = "#1d1f24";
+const OL = "#2a2733", OW = 1, PANTS = "#3f5a78", SHOE = "#2b2b33";
 function palette(desk) {
   const [hair, skin] = LOOK[desk.role] || ["#3b2a20", "#f2c39b"];
-  return { hair, hairD: shade(hair, .72), skin, skinD: shade(skin, .84), shirt: desk.colour, shirtD: shade(desk.colour, .74),
-    pants: LIGHT_PANTS, pantsD: shade(LIGHT_PANTS, .78) };
+  return { hair, hairD: shade(hair, .75), skin, skinD: shade(skin, .86), shirt: desk.colour, shirtD: shade(desk.colour, .76),
+    pants: PANTS, pantsD: shade(PANTS, .78) };
 }
-const el = (cx, cy, rx, ry, fill, extra = "") => `<ellipse cx="${cx}" cy="${cy}" rx="${rx}" ry="${ry}" fill="${fill}" stroke="${OL}" stroke-width="${OW}" ${extra}/>`;
-const pth = (d, fill, extra = "") => `<path d="${d}" fill="${fill}" stroke="${OL}" stroke-width="${OW}" stroke-linejoin="round" ${extra}/>`;
-function habHead(desk, pal, back, cx, cy) {
+const n1 = v => (+v).toFixed(1);
+const oval = (cx, cy, rx, ry, fill, extra = "") => `<ellipse cx="${n1(cx)}" cy="${n1(cy)}" rx="${rx}" ry="${ry}" fill="${fill}" stroke="${OL}" stroke-width="${OW}" ${extra}/>`;
+const shape = (d, fill, extra = "") => `<path d="${d}" fill="${fill}" stroke="${OL}" stroke-width="${OW}" stroke-linejoin="round" ${extra}/>`;
+// A rounded limb: an outline stroke under a coloured stroke, both with round caps.
+function limb(points, width, colour) {
+  const d = "M" + points.map(([x, y]) => `${n1(x)} ${n1(y)}`).join(" L");
+  return `<path d="${d}" fill="none" stroke="${OL}" stroke-width="${width + 2 * OW}" stroke-linecap="round" stroke-linejoin="round"/><path d="${d}" fill="none" stroke="${colour}" stroke-width="${width}" stroke-linecap="round" stroke-linejoin="round"/>`;
+}
+function chibiHead(desk, pal, back, cx, cy) {
   const st = STYLE[desk.role] || {};
   let h = "";
-  if (st.acc === "bun") h += el(cx + 5.2, cy - 6.6, 3.1, 3, pal.hair);  // behind the head
-  h += el(cx, cy, 7.8, 7.3, pal.skin);
-  if (back) {  // seen from behind: hair over the back of the head, the left ear peeking out
-    h += el(cx - 6.2, cy + 1.2, 1.6, 2.2, pal.skinD);
-    h += pth(`M${cx - 7.8} ${cy + 1} C${cx - 8.4} ${cy - 9.5} ${cx + 8.4} ${cy - 9.5} ${cx + 7.8} ${cy + 1.5} C${cx + 6.5} ${cy + 6.5} ${cx - 5.5} ${cy + 7} ${cx - 7.8} ${cy + 1} Z`, pal.hair);
-    if (st.hair === "long") h += pth(`M${cx - 6} ${cy + 4} L${cx - 6.5} ${cy + 11} L${cx + 6.5} ${cy + 11} L${cx + 6.5} ${cy + 3} Z`, pal.hairD);
-  } else {  // three-quarters toward south-west: face on the left, ear on the right
-    h += pth(`M${cx + 2.5} ${cy - 6} C${cx + 8.8} ${cy - 4} ${cx + 8.8} ${cy + 4} ${cx + 2.8} ${cy + 6.9} C${cx + 5.6} ${cy + 2} ${cx + 5.6} ${cy - 2} ${cx + 2.5} ${cy - 6} Z`, pal.skinD, 'stroke="none"');
-    h += el(cx + 4.8, cy + 1, 1.5, 2.1, pal.skinD);
-    const fringe = {
-      side: `M${cx - 8} ${cy - 0.5} C${cx - 8.2} ${cy - 10} ${cx + 8.5} ${cy - 10.5} ${cx + 8} ${cy + 0.5} L${cx + 7.6} ${cy + 3} C${cx + 6} ${cy + 1} ${cx + 5.4} ${cy - 1} ${cx + 4.6} ${cy - 3} C${cx + 1} ${cy - 5.2} ${cx - 4} ${cy - 3.2} ${cx - 8} ${cy - 0.5} Z`,
-      messy: `M${cx - 8.2} ${cy} L${cx - 7} ${cy - 8} L${cx - 4} ${cy - 6} L${cx - 2} ${cy - 10.5} L${cx + 1} ${cy - 7.5} L${cx + 4} ${cy - 10} L${cx + 8.3} ${cy + 1} L${cx + 7.6} ${cy + 3} C${cx + 6} ${cy} ${cx + 5} ${cy - 2} ${cx + 4} ${cy - 3.5} C${cx} ${cy - 4.5} ${cx - 4} ${cy - 3} ${cx - 8.2} ${cy} Z`,
-      long: `M${cx - 8} ${cy - 0.5} C${cx - 8.4} ${cy - 10.5} ${cx + 8.6} ${cy - 10.5} ${cx + 8.2} ${cy + 1} L${cx + 7.8} ${cy + 11} L${cx + 4.5} ${cy + 10} C${cx + 5.5} ${cy + 3} ${cx + 5} ${cy - 1} ${cx + 4.2} ${cy - 3.2} C${cx} ${cy - 4.8} ${cx - 4} ${cy - 3} ${cx - 8} ${cy - 0.5} Z`,
-    }[st.hair] || `M${cx - 8} ${cy - 1} C${cx - 8.2} ${cy - 10} ${cx + 8.4} ${cy - 10.2} ${cx + 8} ${cy} L${cx + 7.4} ${cy + 2.6} C${cx + 6.2} ${cy + 0.5} ${cx + 5.4} ${cy - 1.5} ${cx + 4.4} ${cy - 3.4} C${cx + 1} ${cy - 5} ${cx - 4} ${cy - 3.6} ${cx - 8} ${cy - 1} Z`;
-    h += pth(fringe, pal.hair);
-    h += `<ellipse cx="${cx - 4.6}" cy="${cy + 0.6}" rx="1" ry="1.45" fill="#16161a"/><ellipse cx="${cx - 1.1}" cy="${cy + 0.6}" rx="1" ry="1.45" fill="#16161a"/>`;
-    h += `<path d="M${cx - 5.2} ${cy + 4} Q${cx - 3.6} ${cy + 5} ${cx - 2} ${cy + 4}" stroke="${OL}" stroke-width=".8" fill="none" stroke-linecap="round"/>`;
-    h += `<ellipse cx="${cx - 6.2}" cy="${cy + 2.7}" rx="1.1" ry=".65" fill="#e77" opacity=".45"/>`;
-    if (st.acc === "glasses") h += `<g fill="none" stroke="${OL}" stroke-width=".8"><circle cx="${cx - 4.6}" cy="${cy + 0.6}" r="2"/><circle cx="${cx - 1.1}" cy="${cy + 0.6}" r="2"/><path d="M${cx - 2.6} ${cy + 0.5} h-.1 M${cx + 0.9} ${cy + 0.5} L${cx + 4.4} ${cy}"/></g>`;
+  if (st.hair === "bun") h += oval(cx + (back ? -3 : 4), cy - 9.6, 3.6, 3.4, pal.hair);
+  if (st.hair === "long") h += shape(`M${cx - (back ? 9 : -3)} ${cy - 2} L${cx - (back ? 9.6 : -2)} ${cy + 13} Q${cx} ${cy + 15} ${cx + (back ? 9.6 : 9.8)} ${cy + 12} L${cx + 9.6} ${cy - 2} Z`, pal.hairD);
+  h += oval(cx, cy, 9.6, 9, pal.skin);
+  if (back) {  // seen from behind: the back of the head is hair, an ear peeks out on the left
+    h += oval(cx - 8.6, cy + 1.6, 1.8, 2.4, pal.skinD);
+    h += shape(`M${cx - 9.7} ${cy + 1.5} C${cx - 10.4} ${cy - 12.5} ${cx + 10.4} ${cy - 12.5} ${cx + 9.7} ${cy + 1.5} C${cx + 9} ${cy + 7.8} ${cx - 7.6} ${cy + 8.4} ${cx - 9.7} ${cy + 1.5} Z`, pal.hair);
+    h += `<path d="M${cx - 4} ${cy - 6} q4 -3 8 -1" stroke="${shade(pal.hair, 1.3)}" stroke-width="1.2" fill="none" stroke-linecap="round" opacity=".7"/>`;
+  } else {
+    h += `<path d="M${cx + 4} ${cy - 7.6} C${cx + 10.6} ${cy - 4} ${cx + 10.6} ${cy + 4.6} ${cx + 3.6} ${cy + 8.6} C${cx + 7} ${cy + 3} ${cx + 7} ${cy - 3} ${cx + 4} ${cy - 7.6} Z" fill="${pal.skinD}" opacity=".7"/>`;
+    h += oval(cx + 8.2, cy + 1.2, 1.8, 2.4, pal.skinD);
+    const hair = {
+      side: `M${cx - 9.8} ${cy - 0.5} C${cx - 10.4} ${cy - 13} ${cx + 10.6} ${cy - 13.5} ${cx + 9.8} ${cy + 1} L${cx + 9.3} ${cy + 4.5} C${cx + 7.8} ${cy + 2.4} ${cx + 7} ${cy - 0.6} ${cx + 6.3} ${cy - 3} C${cx + 3} ${cy - 5.4} ${cx - 1} ${cy - 3.8} ${cx - 4.2} ${cy - 5.8} C${cx - 6} ${cy - 3.4} ${cx - 8} ${cy - 1.8} ${cx - 9.8} ${cy - 0.5} Z`,
+      messy: `M${cx - 10} ${cy} L${cx - 9} ${cy - 9} L${cx - 5.8} ${cy - 7.4} L${cx - 3.6} ${cy - 12.6} L${cx - 0.2} ${cy - 9.2} L${cx + 3.2} ${cy - 12.4} L${cx + 5.4} ${cy - 8.6} L${cx + 9.4} ${cy - 8} L${cx + 10.2} ${cy + 1.5} L${cx + 9.4} ${cy + 4.5} C${cx + 7.8} ${cy + 2} ${cx + 7} ${cy - 1} ${cx + 6.2} ${cy - 3.2} C${cx + 2} ${cy - 6} ${cx - 4} ${cy - 4.6} ${cx - 10} ${cy} Z`,
+    }[st.hair] || `M${cx - 9.8} ${cy - 1} C${cx - 10.4} ${cy - 13} ${cx + 10.6} ${cy - 13.2} ${cx + 9.8} ${cy + 0.6} L${cx + 9.3} ${cy + 4.4} C${cx + 7.8} ${cy + 2.2} ${cx + 7} ${cy - 0.8} ${cx + 6.2} ${cy - 3.2} C${cx + 2.4} ${cy - 6.6} ${cx - 4} ${cy - 5.4} ${cx - 9.8} ${cy - 1} Z`;
+    h += shape(hair, pal.hair);
+    h += `<path d="M${cx - 2} ${cy - 9} q4 -2.4 8 0" stroke="${shade(pal.hair, 1.35)}" stroke-width="1.2" fill="none" stroke-linecap="round" opacity=".75"/>`;
+    for (const ex of [cx - 6, cx - 1.4]) {
+      h += `<ellipse cx="${n1(ex)}" cy="${n1(cy + 1)}" rx="1.55" ry="2.15" fill="#1f1d26"/><circle cx="${n1(ex + 0.5)}" cy="${n1(cy + 0.2)}" r=".6" fill="#fff"/>`;
+    }
+    h += `<path d="M${n1(cx - 5.2)} ${n1(cy + 5.2)} Q${n1(cx - 3.7)} ${n1(cy + 6.6)} ${n1(cx - 2.2)} ${n1(cy + 5.2)}" stroke="${OL}" stroke-width=".9" fill="none" stroke-linecap="round"/>`;
+    h += `<ellipse cx="${n1(cx - 8)}" cy="${n1(cy + 4)}" rx="1.5" ry=".9" fill="#ff8a8a" opacity=".55"/><ellipse cx="${n1(cx + 0.8)}" cy="${n1(cy + 4.2)}" rx="1.4" ry=".85" fill="#ff8a8a" opacity=".5"/>`;
+    if (st.acc === "glasses") h += `<g fill="none" stroke="${OL}" stroke-width=".9"><circle cx="${n1(cx - 6)}" cy="${n1(cy + 1)}" r="2.6"/><circle cx="${n1(cx - 1.4)}" cy="${n1(cy + 1)}" r="2.6"/><path d="M${n1(cx - 3.4)} ${n1(cy + 0.8)} h-.1 M${n1(cx + 1.2)} ${n1(cy + 0.6)} L${n1(cx + 7)} ${n1(cy - 0.2)}"/></g>`;
   }
-  if (st.acc === "beanie") h += pth(`M${cx - 8} ${cy - 2} C${cx - 7.6} ${cy - 12.5} ${cx + 7.6} ${cy - 12.5} ${cx + 8} ${cy - 2} Z`, "#d35400") + `<rect x="${cx - 8.2}" y="${cy - 3.4}" width="16.4" height="2.8" rx="1.3" fill="#a04000" stroke="${OL}" stroke-width="${OW}"/>`;
-  if (st.acc === "cap") h += pth(`M${cx - 7.8} ${cy - 2.5} C${cx - 7.6} ${cy - 11.5} ${cx + 7.6} ${cy - 11.5} ${cx + 7.8} ${cy - 2.5} Z`, "#16a085")
-    + (back ? "" : pth(`M${cx - 7.6} ${cy - 3} L${cx - 13} ${cy - 1.5} L${cx - 12} ${cy} L${cx - 6.5} ${cy - 1.2} Z`, "#117a65"));
-  if (st.acc === "headphones") h += `<path d="M${cx - 7.6} ${cy} C${cx - 8} ${cy - 12.5} ${cx + 8} ${cy - 12.5} ${cx + 7.6} ${cy}" fill="none" stroke="${OL}" stroke-width="2"/>` + el(back ? cx - 6.6 : cx + 5.6, cy + 0.5, 2, 2.8, "#2d3436");
+  if (st.acc === "beanie") h += shape(`M${cx - 10} ${cy - 2.4} C${cx - 9.8} ${cy - 15.5} ${cx + 9.8} ${cy - 15.5} ${cx + 10} ${cy - 2.4} Z`, "#e67e22")
+    + `<rect x="${n1(cx - 10.2)}" y="${n1(cy - 4)}" width="20.4" height="3.4" rx="1.6" fill="#ca6c1b" stroke="${OL}" stroke-width="${OW}"/>` + oval(cx, cy - 14.4, 2.2, 2.2, "#f5f0e6");
+  if (st.acc === "cap") h += shape(`M${cx - 9.9} ${cy - 2.6} C${cx - 9.8} ${cy - 14.6} ${cx + 9.8} ${cy - 14.6} ${cx + 9.9} ${cy - 2} Z`, "#1abc9c")
+    + (back ? "" : `<ellipse cx="${n1(cx - 10.5)}" cy="${n1(cy - 2.6)}" rx="6.4" ry="2.2" fill="#16a085" stroke="${OL}" stroke-width="${OW}" transform="rotate(-14 ${n1(cx - 10.5)} ${n1(cy - 2.6)})"/>`);
+  if (st.acc === "headphones") h += `<path d="M${n1(cx - 9.6)} ${n1(cy - 1)} C${n1(cx - 10.4)} ${n1(cy - 15.5)} ${n1(cx + 10.4)} ${n1(cy - 15.5)} ${n1(cx + 9.6)} ${n1(cy)}" fill="none" stroke="${OL}" stroke-width="2.6"/>` + oval(back ? cx - 8.8 : cx + 8.6, cy + 1, 2.6, 3.4, "#34495e");
   return h;
 }
-function habTorso(desk, pal, back, y) {
+function chibiTorso(desk, pal, back, top, bottom) {
   const st = STYLE[desk.role] || {};
-  // front (or back) face on the left, the shaded side on the right: a box turned toward the viewer
-  let t = pth(`M${-7.4} ${y + 2} Q${-7.4} ${y} ${-5} ${y} L${3.4} ${y} L${3.4} ${y + 12.5} L${-7.4} ${y + 12.5} Z`, back ? pal.shirtD : pal.shirt);
-  t += pth(`M${3.4} ${y} L${5.4} ${y} Q${7} ${y} ${7} ${y + 2} L${7} ${y + 11.5} L${3.4} ${y + 12.5} Z`, back ? pal.shirt : pal.shirtD);
-  if (!back) t += `<path d="M${-4.4} ${y + 0.4} L${-2} ${y + 3} L${0.4} ${y + 0.4}" fill="none" stroke="${OL}" stroke-width=".8"/>`;
-  if (!back && st.acc === "tie") t += pth(`M${-2} ${y + 2.8} L${-3.3} ${y + 5} L${-2} ${y + 11} L${-0.7} ${y + 5} Z`, "#c0392b");
+  const front = back ? pal.shirtD : pal.shirt, side = back ? pal.shirt : pal.shirtD;
+  let t = shape(`M-6.6 ${top + 3.4} Q-6.6 ${top} -3.4 ${top} L3 ${top} L3 ${bottom} L-6.6 ${bottom} Z`, front);
+  t += shape(`M3 ${top} L4.2 ${top} Q6.4 ${top} 6.4 ${top + 3} L6.4 ${bottom - 0.8} L3 ${bottom} Z`, side);
+  t += `<rect x="-6.6" y="${bottom - 2}" width="13" height="2" fill="${pal.pantsD}" stroke="${OL}" stroke-width=".8"/>`;
+  if (!back) t += `<path d="M-4.6 ${top + 0.3} L-2 ${top + 3} L0.6 ${top + 0.3}" fill="${shade(pal.shirt, 1.2)}" stroke="${OL}" stroke-width=".8"/>`;
+  if (!back && st.acc === "tie") t += shape(`M-2 ${top + 2.8} L-3.2 ${top + 5} L-2 ${top + 11} L-0.8 ${top + 5} Z`, "#c0392b");
   return t;
 }
-const habArm = (pal, x, y, swing, cls, far) => `<g class="arm ${cls}" transform="rotate(${swing} ${x} ${y + 1.5})"><rect x="${x - 1.8}" y="${y}" width="3.6" height="10.5" rx="1.8" fill="${far ? pal.shirtD : pal.shirt}" stroke="${OL}" stroke-width="${OW}"/>${el(x, y + 11, 1.9, 1.9, far ? pal.skinD : pal.skin)}</g>`;
-function habLegs(pal, pose, step, back) {
-  if (pose === "sit") {  // thighs forward toward the face, shins down
-    const leg = (dx, dy, fill) => pth(`M${-1.5 + dx} ${-14 + dy} L${-8 + dx} ${-11 + dy} L${-8.4 + dx} ${-3 + dy} L${-5.2 + dx} ${-3 + dy} L${-5 + dx} ${-8.5 + dy} L${2 + dx} ${-10.5 + dy} Z`, fill)
-      + el(-9 + dx, -2.4 + dy, 3, 1.5, SHOE);
-    return leg(4, -1.6, pal.pantsD) + leg(0, 0, pal.pants);
-  }
-  const a = pose === "walk" ? (step ? 1 : -1) : 0;
-  const leg = (x, dx, dy, fill) => `<rect x="${x + dx - 2}" y="${-15 + dy}" width="4" height="${14}" rx="1.9" fill="${fill}" stroke="${OL}" stroke-width="${OW}"/>` + el(x + dx - (back ? -1.2 : 1.2), -1 + dy, 2.9, 1.5, SHOE);
-  return leg(2.4, -2 * a, -1.2 * a - 0.6, pal.pantsD) + leg(-2.4, 2 * a, 1.2 * a, pal.pants);
-}
-// A person with the feet (or the seat, when sitting) at (fx, fy).
+// pose: stand | stepA | stepB | sit | desk | type. Feet (or the seat, when sitting) at (fx, fy).
+// At a desk (desk, type) the legs are under the desktop, so they are not drawn.
 function figure(desk, fx, fy, face, pose, s = 1.12) {
   const pal = palette(desk), back = face === "-x" || face === "-y", flip = face === "+x" || face === "-x" ? -1 : 1;
-  const walking = pose === "stepA" || pose === "stepB", sitting = pose === "sit";
-  const swing = walking ? (pose === "stepA" ? 22 : -22) : 0, y = sitting ? -25 : -29;
-  let g = `<ellipse cx="0" cy="0" rx="10" ry="3.8" fill="url(#g-shadow)"/>`;
-  g += habLegs(pal, sitting ? "sit" : walking ? "walk" : "stand", pose === "stepA", back);
-  g += habArm(pal, 6.4, y + 1.5, -swing, "r", true);
-  g += habTorso(desk, pal, back, y);
-  g += habArm(pal, -7.6, y + 1.5, sitting ? 18 : swing, "l", false);
-  g += habHead(desk, pal, back, -0.8, y - 7.2);
-  const hand = [fx + flip * (-7.6 - (sitting ? 3 : 0)) * s, fy + (y + 12) * s];
-  return { svg: `<g transform="translate(${fx.toFixed(1)} ${fy.toFixed(1)}) scale(${(flip * s).toFixed(2)} ${s})">${g}</g>`, top: fy + (y - 17) * s, hand };
-}
-// Seated at a desk, facing the front of the room; the desk in front hides the legs. Arms type when working.
-function person(desk, ax, ay, s = 1.12) {
-  const pal = palette(desk), y = -25;
-  let g = habLegs(pal, "sit", false, false);
-  g += habArm(pal, 6.4, y + 1.5, 30, "r", true) + habTorso(desk, pal, false, y) + habArm(pal, -7.6, y + 1.5, 34, "l", false);
-  g += habHead(desk, pal, false, -0.8, y - 7.2);
-  return { svg: `<g transform="translate(${ax.toFixed(1)} ${(ay + 9).toFixed(1)}) scale(${s})">${g}</g>`, top: ay + 9 + (y - 17) * s };
+  const atDesk = pose === "desk" || pose === "type", sitting = pose === "sit" || atDesk, walking = pose === "stepA" || pose === "stepB";
+  const lift = sitting ? 11 : 0, a = walking ? (pose === "stepA" ? 1 : -1) : 0;
+  const top = -26 + lift, bottom = -11 + lift, hy = -35 + lift;
+  const shoe = (x, y, dir) => oval(x + dir * 1.2, y, 3.3, 1.9, SHOE);
+  let g = sitting ? "" : `<ellipse cx="0" cy="0" rx="10.5" ry="3.9" fill="url(#g-shadow)"/>`;
+  const legsStanding = () => limb([[2.4, bottom - 1], [2.6 + 2 * a, -2.6 - a]], 4.6, pal.pantsD) + shoe(2.6 + 2 * a, -1.8 - a, back ? 1 : -1)
+    + limb([[-2.4, bottom - 1], [-2.6 - 2.2 * a, -1.6 + a]], 4.6, pal.pants) + shoe(-2.6 - 2.2 * a, -1 + a, back ? 1 : -1);
+  const thighsFront = () => limb([[2.4, bottom - 1.5], [-3.6, bottom + 2], [-3.9, bottom + 8.6]], 4.6, pal.pantsD) + shoe(-4.2, bottom + 9.4, -1)
+    + limb([[-1.8, bottom - 1], [-7.6, bottom + 2.6], [-7.9, bottom + 9.4]], 4.6, pal.pants) + shoe(-8.4, bottom + 10.2, -1);
+  const thighsBack = () => limb([[-2, bottom - 1.5], [4.4, bottom - 4.2], [4.8, bottom + 2.6]], 4.6, pal.pantsD)
+    + limb([[2.2, bottom - 1.5], [7.8, bottom - 3.4], [8.2, bottom + 3.4]], 4.6, pal.pants) + shoe(8.6, bottom + 4, 1);
+  const armNear = () => {
+    if (pose === "type") return limb([[-5.6, top + 2.6], [-9.6, top + 8.2]], 3.8, pal.shirt) + oval(-10.2, top + 9, 2.1, 2.1, pal.skin, 'class="arm l"');
+    const hx = -7.6 - 2.4 * a * (back ? -1 : 1), hy2 = top + 11 - Math.abs(a);
+    return limb([[-6, top + 2.6], [hx, hy2]], 3.8, back ? pal.shirtD : pal.shirt) + oval(hx, hy2 + 0.6, 2.1, 2.1, pal.skin);
+  };
+  const armFar = () => {
+    if (pose === "type") return limb([[4.6, top + 2.6], [-1.6, top + 8.6]], 3.8, pal.shirtD) + oval(-2.2, top + 9.4, 2.1, 2.1, pal.skinD, 'class="arm r"');
+    const hx = 6.2 + 2.2 * a * (back ? -1 : 1), hy2 = top + 10.6 - Math.abs(a);
+    return limb([[5, top + 2.6], [hx, hy2]], 3.8, back ? pal.shirt : pal.shirtD) + oval(hx, hy2 + 0.6, 2.1, 2.1, pal.skinD);
+  };
+  if (back) {
+    g += sitting ? (atDesk ? "" : thighsBack()) : legsStanding();
+    g += armFar() + chibiTorso(desk, pal, true, top, bottom) + armNear();
+  } else {
+    if (!sitting) g += legsStanding();
+    g += (pose === "type" ? "" : armFar()) + chibiTorso(desk, pal, false, top, bottom);
+    if (sitting && !atDesk) g += thighsFront();
+    g += (pose === "type" ? armFar() : "") + armNear();
+  }
+  g += chibiHead(desk, pal, back, -0.6, hy);
+  const near = pose === "type" ? [-10.2, top + 9] : [-7.6, top + 11];
+  const hand = [fx + flip * near[0] * s, fy + near[1] * s];
+  return { svg: `<g transform="translate(${n1(fx)} ${n1(fy)}) scale(${(flip * s).toFixed(2)} ${s})">${g}</g>`, top: fy + (hy - 14) * s, hand };
 }
 
 // Small pictograms for what an idle agent is doing (drawn, so they look the same in every browser).
@@ -1023,8 +1041,8 @@ function screenFor(role) {
 function agentItem(desk, pl) {
   const base = { id: `agent:${desk.role}`, x: pl.x - 0.2, y: pl.y - 0.2, w: 0.4, d: 0.4, h: 50, prio: 3, desk, pl };
   if (pl.mode === "desk" || pl.mode === "game") {
-    const [ax, ay] = iso(pl.x + 0.05, pl.y + 0.2, 12);
-    const p = person(desk, ax, ay), typing = desk.state === "working" && pl.mode === "desk" && pl.working;
+    const [ax, ay] = iso(pl.x, pl.y, 10), typing = desk.state === "working" && pl.mode === "desk" && pl.working;
+    const p = figure(desk, ax, ay, pl.face || "+y", typing || pl.mode === "game" ? "type" : "desk");
     return { ...base, svg: `<g class="${typing ? "typing" : ""}">${p.svg}</g>`, anchor: [ax, ay], top: p.top };
   }
   const seated = pl.mode === "copa" || pl.mode === "sofa";
