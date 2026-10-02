@@ -9,6 +9,7 @@ While the run is going the page reloads itself, except while a details panel is 
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -74,13 +75,10 @@ def _timeline(run: Path, limit: int = 60) -> list[dict[str, str]]:
     return rows[-limit:]
 
 
-def _link(path: Path, root: Path) -> dict[str, Any]:
-    """A file as the page sees it: `src` relative to the page (or a file URI outside it)."""
+def _link(path: Path, page_dir: Path) -> dict[str, Any]:
+    """A file as the page sees it: `src` is relative to the folder the page is written in."""
     resolved = path.resolve()
-    try:
-        relative = resolved.relative_to(root.resolve()).as_posix()
-    except ValueError:
-        relative = resolved.as_uri()
+    relative = Path(os.path.relpath(resolved, page_dir.resolve())).as_posix()
     return {"name": path.name, "src": relative, "uri": resolved.as_uri(), "size": path.stat().st_size}
 
 
@@ -141,16 +139,38 @@ def _desk_state(stage: str, entry: dict[str, Any], route: list[str], gate: dict[
     return "idle"
 
 
-def collect(target: Path) -> dict[str, Any]:
+def _history(target: Path, page_dir: Path) -> list[dict[str, Any]]:
+    """Every run of the app, newest first, with a link to its own office page."""
     root = workflow_root(target)
-    ticket = current_ticket_id(target)
+    runs = []
+    for item in list_runs(target):
+        run = Path(item["path"])
+        state = _json(run / "run-state.json")
+        pr = (_json(run / "delivery.json").get("pr") or {})
+        page = root / OFFICE_NAME if item["current"] else run / OFFICE_NAME
+        updated = state.get("updated_at") or state.get("created_at")
+        runs.append({
+            "ticket": item["ticket_id"], "title": item["title"] or "", "status": item["status"] or "unknown",
+            "current": item["current"], "href": Path(os.path.relpath(page, page_dir.resolve())).as_posix(),
+            "updated": datetime.fromtimestamp(updated, timezone.utc).strftime("%Y-%m-%d %H:%M") if updated else None,
+            "updated_at": updated or 0, "pr": pr.get("url") or pr.get("compare_url"),
+            "draft": bool((state.get("draft") or {}).get("issues")),
+        })
+    return sorted(runs, key=lambda run: (not run["current"], -run["updated_at"]))
+
+
+def collect(target: Path, ticket: str | None = None, page_dir: Path | None = None) -> dict[str, Any]:
+    """The page data for one run (the current one by default), with links relative to `page_dir`."""
+    root = workflow_root(target)
+    current = current_ticket_id(target)
+    ticket = ticket or current
+    page_dir = (page_dir or root).resolve()
     data: dict[str, Any] = {
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
         "ticket": ticket,
-        "runs": [
-            {"ticket": item["ticket_id"], "title": item["title"], "status": item["status"], "current": item["current"]}
-            for item in list_runs(target)
-        ],
+        "is_current": ticket == current,
+        "history": _history(target, page_dir),
+        "live": False,
     }
     if not ticket:
         data.update({"status": "idle", "desks": [], "timeline": [], "media": {"before": [], "after": []},
@@ -200,26 +220,44 @@ def collect(target: Path) -> dict[str, Any]:
         "totals": totals,
         "desks": desks,
         "timeline": _timeline(run),
-        "media": _media(run, root),
-        "artifacts": _artifacts(run, root),
-        "logs": [_link(path, root) for path in sorted(run.glob("gate-run*.log"))],
-        "files": [_link(path, root) for path in sorted(run.rglob("*"))
-                  if path.is_file() and "media" not in path.relative_to(run).parts],
+        "media": _media(run, page_dir),
+        "artifacts": _artifacts(run, page_dir),
+        "logs": [_link(path, page_dir) for path in sorted(run.glob("gate-run*.log"))],
+        "files": [{**_link(path, page_dir), "rel": path.relative_to(run).as_posix()} for path in sorted(run.rglob("*"))
+                  if path.is_file() and "media" not in path.relative_to(run).parts
+                  and path.name not in {OFFICE_NAME, f"{Path(OFFICE_NAME).stem}.tmp"}],
+        # Only the run that is going right now keeps refreshing; a past run's page is a snapshot.
+        "live": ticket == current and (state.get("status") or "idle") not in {"completed", "idle"},
     })
     return data
 
 
-def render(target: Path) -> Path:
-    """Write the office page for TARGET's current run and return its path."""
-    data = collect(target)
+def _write(path: Path, data: dict[str, Any]) -> None:
     payload = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
-    html = PAGE.replace("__DATA__", payload)
-    path = office_path(target)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp")
-    temporary.write_text(html, encoding="utf-8")
+    temporary.write_text(PAGE.replace("__DATA__", payload), encoding="utf-8")
     temporary.replace(path)
-    return path
+
+
+def _stale(page: Path, run: Path) -> bool:
+    if not page.exists():
+        return True
+    built = page.stat().st_mtime
+    return any(item.stat().st_mtime > built for item in run.iterdir() if item.is_file() and item != page)
+
+
+def render(target: Path) -> Path:
+    """Write the office page for TARGET's current run, plus one page per run for the history."""
+    current = current_ticket_id(target)
+    main = office_path(target)
+    _write(main, collect(target, current, main.parent))
+    for item in list_runs(target):
+        run = Path(item["path"])
+        page = run / OFFICE_NAME
+        if item["ticket_id"] == current or _stale(page, run):
+            _write(page, collect(target, item["ticket_id"], run))
+    return main
 
 
 PAGE = r"""<!doctype html>
@@ -250,6 +288,11 @@ code { font-family: ui-monospace, Menlo, monospace; }
 .brand { font-family: var(--pixel); font-size: 12px; letter-spacing: .5px; }
 .ticket-title { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
 .grow { flex: 1; min-width: 0; }
+.picker { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+.picker select { background: var(--panel-2); color: var(--ink); border: 1px solid var(--line); border-radius: 8px;
+  padding: 6px 8px; font: inherit; font-size: 13px; max-width: 260px; }
+.pastbar { padding: 10px 18px; background: rgba(108, 183, 255, .12); border-bottom: 1px solid #3b6ea5; font-size: 13px; }
+.pastbar a { font-weight: 600; }
 .chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px;
   background: var(--panel-2); border: 1px solid var(--line); font-size: 12px; white-space: nowrap; }
 .chip.running, .chip.awaiting_host, .chip.working, .chip.started { color: #0b1020; background: var(--warn); border-color: transparent; }
@@ -312,6 +355,13 @@ aside.side { background: var(--panel); border-left: 1px solid var(--line); displ
 .msg .text { margin-top: 4px; color: #d6d9e6; font-size: 13px; line-height: 1.45; overflow-wrap: anywhere; }
 .msg .chip { padding: 1px 8px; font-size: 11px; }
 .empty { color: var(--muted); font-size: 13px; padding: 8px; }
+.run { display: flex; align-items: center; gap: 10px; padding: 8px; border-radius: 10px; text-decoration: none; color: var(--ink); }
+.run:hover, .run:focus-visible { background: var(--panel-2); outline: none; }
+.run.on { background: var(--panel-2); border: 1px solid var(--line); }
+.run .meta { min-width: 0; flex: 1; }
+.run .meta div:first-child { font-weight: 600; font-size: 13px; }
+.run .meta div:last-child { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.run .chip { padding: 1px 8px; font-size: 11px; }
 .foot { color: var(--muted); font-size: 11px; padding: 10px 18px; border-top: 1px solid var(--line); }
 .scrim { position: fixed; inset: 0; background: rgba(5, 6, 12, .55); opacity: 0; pointer-events: none; transition: opacity .15s; z-index: 9; }
 .scrim.open { opacity: 1; pointer-events: auto; }
@@ -371,14 +421,17 @@ figcaption { color: var(--muted); font-size: 11px; margin-top: 4px; }
     <div class="topbar">
       <div class="brand">AGENT OFFICE</div>
       <div class="grow"><b id="ticket"></b> <span class="ticket-title" id="ticketTitle"></span></div>
+      <label class="picker" id="pickerWrap" hidden><span>Ticket</span><select id="runPicker" aria-label="Open another run"></select></label>
       <span id="statusChip"></span>
     </div>
+    <div class="pastbar" id="pastbar" hidden></div>
     <div class="room-wrap"><svg class="room" id="room" role="img" aria-label="The agents at their desks"></svg></div>
     <div class="hint">Click a desk, a file card or a message to read what that agent produced.</div>
   </section>
   <aside class="side">
     <div class="section" id="summary"></div>
     <div class="section"><h2>Workflow files</h2><div class="files" id="files"></div></div>
+    <div class="section" id="runsSection" hidden><h2>Tickets in this app</h2><div id="runs"></div></div>
     <div class="section" style="padding-bottom:4px;border-bottom:0"><h2>Activity</h2></div>
     <div class="feed" id="feed"></div>
     <div class="foot" id="foot"></div>
@@ -406,7 +459,7 @@ const esc = t => String(t ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": 
 const fmtS = v => { if (v == null) return "—"; const s = Math.round(v); return s >= 3600 ? `${Math.floor(s / 3600)}h${String(Math.floor(s % 3600 / 60)).padStart(2, "0")}m` : s >= 60 ? `${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s` : `${s}s`; };
 const fmtT = v => v == null ? "—" : v >= 1e6 ? `${(v / 1e6).toFixed(1)}M` : v >= 1000 ? `${(v / 1000).toFixed(1)}k` : String(v);
 const fmtB = v => v == null ? "" : v >= 1e6 ? `${(v / 1e6).toFixed(1)} MB` : v >= 1000 ? `${Math.round(v / 1000)} KB` : `${v} B`;
-const live = () => !["completed", "idle"].includes(DATA.status);
+const live = () => Boolean(DATA.live);
 const chip = (s, label) => `<span class="chip ${esc(String(s).toLowerCase().split(" ")[0])}">${esc(label || s)}</span>`;
 
 function bossDesk() {
@@ -742,7 +795,7 @@ function tabsFor(role) {
   const tabs = ((DATA.artifacts || {})[role] || []).map(a => ({ id: a.name, label: a.label, a }));
   if (role === "Device") tabs.unshift({ id: "media", label: "Before / after", render: mediaView });
   if (role === "Quality gate" && (DATA.logs || []).length) tabs.push({ id: "logs", label: `Gradle logs (${DATA.logs.length})`, render: () => `<p class="muted">Full Gradle output of each gate run; opens in a new tab.</p>${DATA.logs.map(l => `<div class="item"><a href="${esc(l.src)}" target="_blank">${esc(l.name)}</a> <span class="loc">${fmtB(l.size)}</span></div>`).join("")}` });
-  if (role === "Orchestrator") tabs.push({ id: "files", label: `All run files (${(DATA.files || []).length})`, render: () => (DATA.files || []).map(f => `<div class="item"><a href="${esc(f.src)}" target="_blank">${esc(f.src.split("/").slice(1).join("/") || f.name)}</a> <span class="loc">${fmtB(f.size)}</span></div>`).join("") });
+  if (role === "Orchestrator") tabs.push({ id: "files", label: `All run files (${(DATA.files || []).length})`, render: () => (DATA.files || []).map(f => `<div class="item"><a href="${esc(f.src)}" target="_blank">${esc(f.rel || f.name)}</a> <span class="loc">${fmtB(f.size)}</span></div>`).join("") });
   return tabs;
 }
 
@@ -780,6 +833,28 @@ document.getElementById("ticket").textContent = DATA.ticket || "";
 document.getElementById("ticketTitle").textContent = DATA.title || "";
 document.getElementById("statusChip").innerHTML = chip(DATA.status || "idle");
 document.title = DATA.ticket ? `${DATA.ticket} · Agent Office` : "Agent Office";
+function renderHistory() {
+  const runs = DATA.history || [];
+  if (runs.length > 1 || (runs.length && !DATA.is_current)) {
+    const picker = document.getElementById("runPicker");
+    picker.innerHTML = runs.map(r => `<option value="${esc(r.href)}" ${r.ticket === DATA.ticket ? "selected" : ""}>${esc(r.ticket)}${r.current ? " (current)" : ""} · ${esc(r.status)}${r.updated ? " · " + esc(r.updated) : ""}</option>`).join("");
+    picker.onchange = () => { location.href = picker.value; };
+    document.getElementById("pickerWrap").hidden = false;
+  }
+  if (runs.length > 1) {
+    document.getElementById("runs").innerHTML = runs.map(r => `<a class="run ${r.ticket === DATA.ticket ? "on" : ""}" href="${esc(r.href)}">
+      <div class="meta"><div>${esc(r.ticket)}${r.current ? ' <span class="muted">· current</span>' : ""}</div><div>${esc(r.title || "")}${r.updated ? " · " + esc(r.updated) : ""}</div></div>
+      ${r.pr ? `<span class="chip ${r.draft ? "draft" : "passed"}" title="${esc(r.pr)}">${r.draft ? "draft PR" : "PR"}</span>` : ""}${chip(r.status)}</a>`).join("");
+    document.getElementById("runsSection").hidden = false;
+  }
+  const current = runs.find(r => r.current);
+  if (DATA.ticket && !DATA.is_current) {
+    const bar = document.getElementById("pastbar");
+    bar.innerHTML = `You are viewing a past run (${esc(DATA.ticket)}).${current ? ` <a href="${esc(current.href)}">Go to the current run (${esc(current.ticket)}) →</a>` : ""}`;
+    bar.hidden = false;
+  }
+}
+renderHistory();
 renderRoom();
 renderSide();
 const hash = new URLSearchParams(location.hash.slice(1));

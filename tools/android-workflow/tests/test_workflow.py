@@ -1478,3 +1478,29 @@ class OfficeTests(unittest.TestCase):
         self.assertIn("project-profile.md", files["Setup"])
         self.assertIn("stage-log.md", files["Orchestrator"])
         self.assertTrue(any(item["src"] == "O-4/stage-log.md" for item in data["files"]))
+
+    def test_history_lists_every_run_and_each_run_has_its_own_page(self) -> None:
+        with AndroidProject() as root:
+            run(root, {"id": "H-1", "title": "First change", "type": "chore"})
+            (run_dir(root) / "plan.md").write_text("# Objective\n\nFirst plan.\n", encoding="utf-8")
+            run(root, {"id": "H-2", "title": "Second change", "type": "chore"})
+            main(["office", "--target", str(root), "--no-open"])
+            current, _ = office_data(root)
+            html = (root / ".ai/workflow/H-1/office.html").read_text(encoding="utf-8")
+            past = json.loads(re.search(r"const DATA = (.*);\n", html).group(1))
+        history = {item["ticket"]: item for item in current["history"]}
+        self.assertEqual(set(history), {"H-1", "H-2"})
+        self.assertEqual(current["history"][0]["ticket"], "H-2")
+        self.assertTrue(history["H-2"]["current"])
+        self.assertEqual(history["H-1"]["href"], "H-1/office.html")
+        self.assertEqual(history["H-2"]["href"], "office.html")
+        self.assertTrue(current["is_current"])
+        self.assertTrue(current["live"])
+        self.assertEqual(past["ticket"], "H-1")
+        self.assertFalse(past["is_current"])
+        self.assertFalse(past["live"])
+        plan = {item["name"]: item for item in past["artifacts"]["Planner"]}["plan.md"]
+        self.assertEqual(plan["src"], "plan.md")
+        self.assertIn("First plan.", plan["content"])
+        self.assertEqual({item["ticket"]: item["href"] for item in past["history"]}["H-2"], "../office.html")
+        self.assertNotIn("office.html", [item["rel"] for item in past["files"]])
