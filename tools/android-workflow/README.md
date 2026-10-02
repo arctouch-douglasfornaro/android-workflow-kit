@@ -17,6 +17,7 @@ How the workflow runs (stages, agents, levels, stops) is described in one place 
 | `update-spec --target APP --surfaces ui --acceptance "a\|b"` | Planner corrections; the route is recomputed |
 | `prebuild --target APP [--wait\|--status]` | Builds the unmodified app in the background for the `before` capture |
 | `log --target APP --stage Implementer --status started\|completed [--note …] [--file P] [--tokens N] [--slice S2]` | Records when an agent starts and ends (role names); `started` opens the clock the office counts live. `--slice`: one Implementer of a team |
+| `skills --target APP [--add NAME] [--drop NAME]` | Writes `RUN/skills.json`: the Android skills each agent reads and why, picked from the ticket, the likely files, the code already changed and a failing gate. The app's own skills (`.ai/skills`, `.claude/skills`, `.agents/skills`) win over the kit's (`skills/android/`). `start`, `update-spec` and every Implementer `started` refresh it; `--add`/`--drop` are kept |
 | `team --target APP [--check]` | Checks the Tech Lead's `team-plan.json` (one owner per file, at most 3 slices); `--check` writes `team-report.json`: which slice touched what, and what nobody owned |
 | `emulator --target APP [--wait\|--stop\|--status] [--avd NAME] [--headless]` | No device connected: starts an existing AVD in the background (`device.avd`, else the first). `--wait` until booted; `--stop` closes it only if the workflow started it. Never creates an AVD |
 | `gate --target APP` | Formatter, compile, unit tests, detekt, lint, consumer modules, secret scan |
@@ -53,6 +54,7 @@ Optional overrides read by the newer commands (all may be left out):
 | `device.emulator_headless` | `false` (a window you can watch) | `emulator`: `true` starts it with `-no-window` |
 | `device.boot_timeout_seconds` | `300` | `emulator --wait` |
 | `team.max_parallel` | `3` (1–3) | `team`: how many Implementers may work at once |
+| `skills.max` | `4` (1–8) | `skills`: how many skills the Implementer reads |
 
 Set `ANDROID_WORKFLOW_NO_WATCH=1` to keep the office from starting its background watcher (the tests do).
 

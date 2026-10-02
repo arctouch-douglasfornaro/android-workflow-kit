@@ -48,7 +48,7 @@ ROLE_FILES = {
     "Setup": (("../../project-profile.md", "Project profile"), ("../../android-workflow.json", "Project overrides")),
     "Planner": (("plan.md", "Plan"), ("ticket-spec.json", "Ticket"), ("change-set-map.json", "Likely files")),
     "Tech Lead": (("team-plan.json", "Team plan"), ("team-report.json", "Who touched what")),
-    "Implementer": (("implementation-notes.md", "Notes"), ("t4-files.json", "Changed files"),
+    "Implementer": (("implementation-notes.md", "Notes"), ("skills.json", "Skills"), ("t4-files.json", "Changed files"),
                     ("slices/S1.md", "Slice notes")),
     "Implementer 2": (("slices/S2.md", "Slice notes"),),
     "Implementer 3": (("slices/S3.md", "Slice notes"),),
@@ -1551,6 +1551,12 @@ const VIEWS = {
   "run-state.json": s => `<div class="kv"><span>Status</span><span>${chip(s.status || "?")}</span><span>Now</span><span>${esc(ROLE_OF_STAGE[s.current_stage] || s.current_stage || "—")}</span></div><table><thead><tr><th>Stage</th><th>Status</th><th>Note</th></tr></thead><tbody>${Object.entries(s.stages || {}).map(([k, v]) => `<tr><td>${esc(ROLE_OF_STAGE[k] || k)} <span class="muted">${esc(k)}</span></td><td>${chip(v.status || "?")}</td><td>${esc(v.note || v.reason || "")}</td></tr>`).join("")}</tbody></table>`,
   "stage-metrics.json": m => `<table><thead><tr><th>Stage</th><th>Time</th><th>Tokens</th><th>Attempts</th></tr></thead><tbody>${Object.entries(m.stages || {}).map(([k, v]) => `<tr><td>${esc(ROLE_OF_STAGE[k] || k)}</td><td>${fmtS(v.wall_time_seconds)}</td><td>${fmtT(v.tokens)}</td><td>${esc(v.attempts ?? "—")}</td></tr>`).join("")}</tbody></table>` + (m.totals ? `<div class="kv"><span>Total time</span><span>${fmtS(m.totals.wall_time_seconds)}</span><span>Total tokens</span><span>${fmtT(m.totals.tokens)}</span></div>` : ""),
   "t4-files.json": f => list("Files the Implementer changed", f.files),
+  "skills.json": k => {
+    const skill = s => `<div class="item"><b>${esc(s.name)}</b> ${chip(s.source === "project" ? "project" : "kit")}${(s.why || []).length ? `<div class="loc">${esc(s.why.join(" · "))}</div>` : ""}${s.description ? `<div class="loc">${esc(s.description)}</div>` : ""}</div>`;
+    return `<p class="muted">Chosen by the CLI from the ticket and the code, so nobody has to ask; the app's own skills win over the kit's.</p>`
+      + list("Implementer reads", k.implementer, skill) + ((k.device || []).length ? list("Device reads", k.device, skill) : "")
+      + `<details><summary>Signals</summary>${Object.entries(k.signals || {}).map(([t, why]) => `<div class="item"><code>${esc(t)}</code> <span class="loc">${esc((why || []).join(" · "))}</span></div>`).join("")}</details>`;
+  },
   "prebuild.json": p => `<div class="kv"><span>Status</span><span>${chip(p.status || "?")}</span>${p.reason ? `<span>Reason</span><span>${esc(p.reason)}</span>` : ""}</div>` + list("APKs", p.apks),
 };
 function renderArtifact(a) {

@@ -8,7 +8,8 @@ tools: Read, Grep, Glob, Bash, Write
 # Agent: aw-device
 
 android-workflow Device. One session: install, navigate, verify AC on device, capture evidence.
-Never edits source. Use the `device-driving` skill (Maestro first, adb fallback).
+Never edits source. Use the `device-driving` skill (Maestro first, adb fallback), plus the skills
+listed under `device` in `RUN/skills.json` (e.g. `android-screenshots`, `android-cli` when installed).
 
 ## Modes
 

@@ -34,7 +34,10 @@ The only planning role for `/android-workflow`. One pass, short output.
 5. Write the **navigation recipe** for the device agent: launch activity or deep link and the
    taps to reach the changed surface, grounded in code (NavHost routes, intents, test tags).
 6. Test plan: which unit/Compose/Robolectric tests prove each AC and fail without the change.
-7. Parallel work (standard and full levels): can the change split into parts that build and test on
+7. Skills: `RUN/skills.json` already lists the Android skills the CLI picked from the ticket and the
+   likely files. If one clearly does not apply, or a listed project skill is missing for this change,
+   fix it: `CLI skills --target TARGET --drop <name>` / `--add <name>` (names from `considered`).
+8. Parallel work (standard and full levels): can the change split into parts that build and test on
    their own and never edit the same file (different modules, data layer vs UI)? List each part
    with its files, or write `single`. The orchestrator uses a team only for 2+ parts and 4+ files.
 

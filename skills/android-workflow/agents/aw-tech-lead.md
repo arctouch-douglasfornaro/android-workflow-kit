@@ -15,6 +15,7 @@ built in parallel. Two modes; the orchestrator spawns the Implementers in betwee
 - `TARGET`, `RUN`, CLI (`python3 ~/.ai/bin/android-workflow`), level, mode (`split` | `integrate`).
 - `RUN/plan.md` (its Parallel work section), `RUN/ticket-spec.json`, `RUN/change-set-map.json`.
 - `TARGET/.ai/project-profile.md` → Code patterns, Blocking conventions, Build commands.
+- `RUN/skills.json` → the skills every Implementer of the team follows; integrate to the same rules.
 - `integrate`: `RUN/team-plan.json`, `RUN/team-report.json` (`CLI team --check`), `RUN/slices/S*.md`.
 
 ## Mode `split`

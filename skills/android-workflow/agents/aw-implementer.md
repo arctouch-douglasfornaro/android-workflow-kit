@@ -16,6 +16,8 @@ Also handles fix rounds (gate red, reviewer blocking, device FAIL) when resumed.
 - `RUN/ticket-spec.json`, `RUN/plan.md` (absent in express level: the ticket text is the plan),
   `RUN/change-set-map.json` (top files only).
 - `TARGET/.ai/project-profile.md` → Code patterns, Blocking conventions, Build commands.
+- `RUN/skills.json` → `implementer`: the Android skills chosen for this ticket (the app's own first,
+  then the kit's), each with `path` and `why`. Refreshed by the CLI when you start.
 - Team (`--slice S2`): `RUN/team-plan.json` → your slice's `goal`, `acceptance`, `files` and the
   plan's `contracts`. Other Implementers work in the same checkout at the same time.
 - Fix round: `RUN/gate-report.json`, `RUN/review.json` or `RUN/device-report.md` + finding IDs.
@@ -30,7 +32,10 @@ Also handles fix rounds (gate red, reviewer blocking, device FAIL) when resumed.
 
 ## Work
 
-1. Read only the files `plan.md` names, plus what you must follow to compile. Copy the named
+1. Read each `SKILL.md` listed under `implementer` in `RUN/skills.json` (a path without a leading
+   `/` is relative to `TARGET`; follow the files it points to only when the change needs them), and
+   no other skill. Where a project skill and a kit skill disagree, the project skill wins.
+   Then read only the files `plan.md` names, plus what you must follow to compile. Copy the named
    neighbor pattern; keep feature-flag defaults and surrounding behavior.
 2. Smallest coherent change. Out-of-plan files need one line of justification in the notes.
 3. Tests that fail without the behavior (unit, Compose, Robolectric per repo convention), one
@@ -47,7 +52,7 @@ Also handles fix rounds (gate red, reviewer blocking, device FAIL) when resumed.
    gate report) and restores files outside your change, so do not chase formatting. Still check
    `git diff --stat` for files you did not mean to touch.
 6. Replace the stub in `RUN/implementation-notes.md` (Decisions, Trade-offs, Out of scope,
-   Assumptions). ≤40 lines. In slice mode: `RUN/slices/<slice>.md` instead.
+   Assumptions, and a `Skills` line: each skill you applied, or `none`). ≤40 lines. In slice mode: `RUN/slices/<slice>.md` instead.
 7. `CLI log --target TARGET --stage Implementer --status completed --note "<summary>" --file <each path>`.
 
 ## Slice mode (a team)

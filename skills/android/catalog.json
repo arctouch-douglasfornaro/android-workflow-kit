@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "about": "The kit's Android skills: which topics each covers and which agent reads it. `CLI skills` matches the topics against the ticket and the code; a project's own skill on the same topic wins.",
+  "skills": {
+    "compose-android": {"topics": ["compose"], "roles": ["implementer"]},
+    "compose-performance": {"topics": ["compose-performance"], "roles": ["implementer"]},
+    "android-performance": {"topics": ["performance"], "roles": ["implementer"]},
+    "android-navigation": {"topics": ["navigation"], "roles": ["implementer"]},
+    "edge-to-edge": {"topics": ["insets"], "roles": ["implementer"]},
+    "android-screenshots": {"topics": ["screenshots"], "roles": ["implementer", "device"]},
+    "android-cli": {"topics": ["android-cli"], "roles": ["device"]},
+    "ktlint-fixer": {"topics": ["lint-fix"], "roles": ["implementer"]}
+  }
+}

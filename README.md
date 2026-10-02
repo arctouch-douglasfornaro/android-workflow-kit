@@ -27,6 +27,7 @@ The repository mirrors `~/.ai`, which is where every host reads it from.
 | `skills/android-workflow/SKILL.md` | The workflow: stages, agents, levels, stops and delivery rules (single source of truth). |
 | `skills/android-workflow/agents/` | The seven `aw-*` agents: setup, planner, tech lead, implementer, reviewer, device, delivery. |
 | `skills/device-driving/` | How the Device agent drives the phone or emulator (Maestro first, adb fallback). |
+| `skills/android/` | Universal Android skills (Compose, Compose performance, performance, navigation, edge-to-edge, screenshots, Android CLI, ktlint) and `catalog.json`, the topics each one covers. The workflow picks them per ticket. |
 | `tools/android-workflow/` | The Python package behind the `android-workflow` CLI, with its tests. |
 | `bin/` | `android-workflow` launcher plus the helpers the CLI calls: `feature_setup.py` (project profile), `feature_workspace.py` (ticket branch/worktree) and `android_probe.py`. |
 
@@ -99,7 +100,7 @@ command only to change one of them:
 2. **Setup (first run only)** — learns the project's patterns and quality tools and saves them in `.ai/project-profile.md`. Later tickets reuse it.
 3. **Depth** — picks `express`, `standard` or `full` from the ticket (see *Depth* in the table above).
 4. **Planner** — reads the code and writes verifiable acceptance criteria. Meanwhile the emulator boots (when no device is connected) and the unchanged app is built in the background.
-5. **Implementer** — writes the change and the unit tests that prove it. In parallel, if a device is connected, the **before** screenshots are captured.
+5. **Implementer** — reads the Android skills this ticket needs (picked automatically: your app's own skills first, e.g. its Compose or testing rules, then the kit's), writes the change and the unit tests that prove it. In parallel, if a device is connected, the **before** screenshots are captured.
    When the plan has independent parts (different modules, data and UI) the **Tech Lead** splits it into slices, up to
    **3 Implementers** build them at the same time, each owning its own files, and the Tech Lead integrates them before the gate.
 6. **Quality gate** — formatter, compile, unit tests, detekt and lint for the modules touched. Failures go back to the Implementer (up to 2 times).

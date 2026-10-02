@@ -2703,6 +2703,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--stale", nargs="?", type=float, const=24.0, metavar="HOURS",
         help="remove unfinished runs (awaiting_host/paused/running) idle for HOURS (default 24)",
     )
+    skills_parser = subparsers.add_parser("skills", help="pick the Android skills each agent reads (RUN/skills.json)")
+    skills_parser.add_argument("--target", required=True, type=Path)
+    skills_parser.add_argument("--add", action="append", default=[], help="a skill the Planner wants read (repeatable)")
+    skills_parser.add_argument("--drop", action="append", default=[], help="a skill that does not apply (repeatable)")
     team_parser = subparsers.add_parser("team", help="check the Tech Lead's team-plan.json, or who touched what")
     team_parser.add_argument("--target", required=True, type=Path)
     team_parser.add_argument("--check", action="store_true", help="after the Implementers: write team-report.json")
@@ -2738,14 +2742,23 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
             raise ValueError("start requires --ticket or --id and --title")
         if args.overrides:
             configure(target, args.overrides)
-        return run(target, ticket_from_flags(args)), 0
+        result = run(target, ticket_from_flags(args))
+        from android_workflow.skills import refresh as refresh_skills
+
+        refresh_skills(target)  # which Android skills this ticket needs, from the ticket and its likely files
+        return result, 0
     if args.command == "resume":
         return resume(target, args.question_id, args.answer), 0
     if args.command == "log":
-        return log_stage(
+        result = log_stage(
             target, args.stage, args.status, args.note, args.actor, args.files, args.tokens, args.seconds,
             args.wait_seconds, args.slice_id,
-        ), 0
+        )
+        if args.status == "started" and resolve_stage(args.stage)[0] == "T4":
+            from android_workflow.skills import refresh as refresh_skills
+
+            refresh_skills(target)  # an Implementer starts (or a fix round): the code it changed so far counts too
+        return result, 0
     if args.command == "gate":
         mark_gate_started(target)
         import signal
@@ -2817,7 +2830,11 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
         result = run_setup(target, force=args.force, accept=args.accept, source_repo=args.source_repo)
         return result, 0
     if args.command == "update-spec":
-        return update_spec(target, args), 0
+        result = update_spec(target, args)
+        from android_workflow.skills import refresh as refresh_skills
+
+        refresh_skills(target)
+        return result, 0
     if args.command == "list":
         runs = list_runs(target)
         current = next((item["ticket_id"] for item in runs if item["current"]), None)
@@ -2840,6 +2857,10 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
         if not args.no_open:
             webbrowser.open(path.as_uri())
         return {"office": str(path)}, 0
+    if args.command == "skills":
+        from android_workflow.skills import select
+
+        return select(target, add=args.add, drop=args.drop), 0
     if args.command == "team":
         from android_workflow.team import check_plan, team_report
 

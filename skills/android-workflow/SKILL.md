@@ -100,6 +100,7 @@ CLI setup    --target T [--source-repo MAIN]        CLI start    --target T --id
 CLI resume   --target T --question-id Q --answer "…" CLI update-spec --target T --surfaces ui --acceptance "a|b"
 CLI prebuild --target T [--wait|--status]           CLI gate     --target T
 CLI emulator --target T [--wait] [--stop]           CLI team     --target T [--check]
+CLI skills   --target T [--add NAME] [--drop NAME]
 CLI finish   --target T [--skip-device "r"] [--draft "r"] CLI deliver  --target T [--subject "ID: …"] [--no-push|--no-pr]
 CLI log --target T --stage <Role> --status started --note "<what it is about to do>"
 CLI log --target T --stage <Role> --status completed --note "…" [--file P]… [--tokens N] [--wait-seconds S]
@@ -209,7 +210,19 @@ owner per file). Only the base build itself blocks source edits, and only while 
 Everything the run writes lives in `RUN` (gitignored, never committed): `ticket-spec.json`,
 `change-set-map.json`, `plan.md`, `implementation-notes.md`, `gate-report.json`, `review.json`,
 `device-report.md`, `pr-description.md`, `stage-log.md`, `stage-metrics.json` and
-`media/{before,after}/`; a team adds `team-plan.json`, `team-report.json` and `slices/S<n>.md`. The shared cache is `TARGET/.ai/workflow/_cache/`; `current.json`
+`media/{before,after}/`, `skills.json`; a team adds `team-plan.json`, `team-report.json` and
+`slices/S<n>.md`.
+
+## Android skills
+
+Nobody asks for them: `start`, `update-spec` and every Implementer `started` refresh
+`RUN/skills.json`, which names the skills each agent reads and why. The candidates are the app's own
+skills (`TARGET/.ai/skills`, `.claude/skills`, `.agents/skills`) and the kit's
+(`~/.ai/skills/android/`: Compose, Compose performance, performance, navigation, edge-to-edge,
+screenshots, Android CLI, ktlint). The signals are the ticket text and surfaces, the likely files
+and the code already changed, and a failing gate. A project skill on the same topic wins, at most 4
+go to the Implementer (`skills.max` in `.ai/android-workflow.json`), and the Planner can correct the
+list (`CLI skills --add/--drop`). Never copy a project's skills into the kit. The shared cache is `TARGET/.ai/workflow/_cache/`; `current.json`
 points at the active ticket. A new ticket gets a new folder.
 
 ## Chat log and telemetry

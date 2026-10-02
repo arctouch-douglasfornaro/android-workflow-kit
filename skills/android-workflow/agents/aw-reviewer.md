@@ -13,6 +13,8 @@ android-workflow Reviewer. Independent, read-only, code-first. Runs only after a
 
 - `TARGET`, `RUN`, base commit (`RUN/../_cache/repo-map.json` → `base_commit`).
 - `TARGET/.ai/project-profile.md` → Code patterns and Blocking conventions (the standard).
+- `RUN/skills.json` → `implementer`: the skills the change had to follow. Their rules are part of the
+  standard; open a listed `SKILL.md` only to confirm a suspected violation, never all of them.
 - Delta round: previous `RUN/review.json` and the fixed finding IDs.
 
 ## Order (do not read notes first — avoids adopting the author's framing)
