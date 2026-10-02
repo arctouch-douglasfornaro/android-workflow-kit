@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import os
+
+# Commands start the office watcher for a live run; tests never leave background processes behind.
+os.environ["ANDROID_WORKFLOW_NO_WATCH"] = "1"
+
 import json
 import shutil
 import subprocess
@@ -132,3 +137,67 @@ class OfficeRoutineTests(unittest.TestCase):
         self.assertTrue(result["sameLength"])
         self.assertEqual(result["last"], {"x": 13.6, "y": 1.15})
         self.assertAlmostEqual(result["start"]["x"], 5.5, places=6)
+
+
+TEAM = """const OFFICE = SIM.build([...SIM.BASE, "Tech Lead", "Implementer 2", "Implementer 3"]);
+const spots = [...Object.values(OFFICE.SEATS), ...OFFICE.POIS.coffee, ...OFFICE.POIS.copa, ...OFFICE.POIS.sofa,
+  ...OFFICE.POIS.chat.flat(), ...OFFICE.POIS.window, ...OFFICE.POIS.cooler];"""
+
+
+@unittest.skipUnless(NODE, "Node is not installed; the office model is JavaScript")
+class OfficeTeamTests(unittest.TestCase):
+    def test_a_team_gets_its_desks_and_every_spot_stays_reachable(self) -> None:
+        result = run_sim(TEAM + """
+          const cells = spots.map(s => OFFICE.cellOf(s.x, s.y).join(","));
+          let missing = 0, crossings = 0, longest = 0;
+          for (const seat of Object.values(OFFICE.SEATS)) for (const s of spots) {
+            const p = OFFICE.path(seat, s);
+            if (!p) { missing++; continue; }
+            longest = Math.max(longest, OFFICE.pathLength(p));
+            for (const q of p.slice(1, -1)) if (!OFFICE.walkable(q.x, q.y)) crossings++;
+          }
+          console.log(JSON.stringify({ agents: OFFICE.AGENTS, blocked: spots.filter(s => !OFFICE.walkable(s.x, s.y)).length,
+            unique: new Set(cells).size, total: cells.length, missing, crossings, longest,
+            desks: OFFICE.FURNITURE.filter(f => f.kind === "desk").map(f => f.role) }));""")
+        self.assertEqual(result["agents"], ["Orchestrator", "Setup", "Planner", "Tech Lead", "Implementer",
+                                            "Implementer 2", "Implementer 3", "Reviewer", "Device", "Delivery"])
+        self.assertIn("Implementer 3", result["desks"])
+        self.assertEqual(result["blocked"], 0)
+        self.assertEqual(result["unique"], result["total"])
+        self.assertEqual((result["missing"], result["crossings"]), (0, 0))
+        self.assertLess(result["longest"], 30)
+
+    def test_without_a_team_its_desks_are_not_furniture(self) -> None:
+        result = run_sim("""console.log(JSON.stringify(SIM.FURNITURE.filter(f => f.kind === "desk").map(f => f.role)));""")
+        self.assertNotIn("Tech Lead", result)
+        self.assertNotIn("Implementer 2", result)
+
+    def test_team_members_follow_the_routine_and_never_teleport(self) -> None:
+        result = run_sim(TEAM + """
+          const NOW = 1800000000, work = { "Implementer 2": [[NOW - 50, NOW + 50]], "Tech Lead": [[NOW - 200, NOW - 20]] };
+          let worst = 0, prev = null, atDesk = true;
+          for (let t = NOW - 300; t < NOW + 300; t += 0.1) {
+            const s = Object.fromEntries(OFFICE.AGENTS.map(r => [r, OFFICE.stateAt("APP-9", r, t, work)]));
+            if (prev) for (const r of OFFICE.AGENTS) worst = Math.max(worst, Math.abs(s[r].x - prev[r].x) + Math.abs(s[r].y - prev[r].y));
+            if (t > NOW + 20 && t < NOW + 50 && s["Implementer 2"].mode !== "desk") atDesk = false;
+            prev = s;
+          }
+          console.log(JSON.stringify({ worst, atDesk }));""")
+        self.assertLess(result["worst"], 0.5)
+        self.assertTrue(result["atDesk"])
+
+
+@unittest.skipUnless(NODE, "Node is not installed; the page script is JavaScript")
+class OfficePageScriptTests(unittest.TestCase):
+    def test_the_page_script_parses(self) -> None:
+        import re
+
+        from android_workflow.office import PAGE
+
+        page = PAGE.replace("__SIM__", SIM_JS).replace("__DATA__", json.dumps({"ticket": None, "history": [], "desks": []}))
+        script = re.search(r"<script>\n(.*)</script>", page, re.S).group(1)
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "page.js"
+            path.write_text(script, encoding="utf-8")
+            result = subprocess.run([NODE, "--check", str(path)], text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)

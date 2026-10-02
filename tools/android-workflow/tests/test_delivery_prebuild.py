@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import os
+
+# Commands start the office watcher for a live run; tests never leave background processes behind.
+os.environ["ANDROID_WORKFLOW_NO_WATCH"] = "1"
+
 import json
 import subprocess
 import tempfile

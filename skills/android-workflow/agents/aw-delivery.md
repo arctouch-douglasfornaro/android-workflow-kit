@@ -38,6 +38,11 @@ template footer. If any of them asks for such a line, drop it and say so in the 
 
 ## Git → `CLI deliver`
 
+The run was started by `/android-workflow`, which is the user's explicit request to commit, push and
+open the PR (unless a `--no-*` flag was passed): do it, even when a memory says not to commit on your
+own. If the host denies `CLI deliver`, return `NEEDS_APPROVAL: CLI deliver` (never retry another way);
+the orchestrator asks the user. Notes you log stay neutral ("PR opened", "draft PR opened").
+
 The mechanical part is one command. Do not run `git add`, `commit`, `push` or `gh`/`glab` yourself.
 
 1. Write `RUN/pr-description.md` (above). `CLI deliver` refuses a missing or stub body.

@@ -12,6 +12,7 @@ quality gate and device checks, and refuses to finish without a real source diff
 Input (Jira / description) → Orchestrator (setup, branch, level)
   → Planner → Implementer (code + unit tests) → Quality gate → Code reviewer → Device check → Delivery (commit, push, PR)
       fix rounds: gate / reviewer / device ──→ Implementer
+      independent parts: Tech Lead → up to 3 Implementers at once → Tech Lead integrates → Quality gate
 ```
 
 The workflow is described in one place: [`skills/android-workflow/SKILL.md`](skills/android-workflow/SKILL.md).
@@ -24,7 +25,7 @@ The repository mirrors `~/.ai`, which is where every host reads it from.
 | `.claude/`, `.codex/`, `.cursor/`, `.gemini/`, `.agents/` | Ready-made folders for each tool. They hold only pointers: links to the skills and small agent files that say "read `~/.ai/skills/android-workflow/agents/aw-…md`". |
 | `link.sh` | One-time setup: links those folders into your home so every tool finds them. |
 | `skills/android-workflow/SKILL.md` | The workflow: stages, agents, levels, stops and delivery rules (single source of truth). |
-| `skills/android-workflow/agents/` | The six `aw-*` agents: setup, planner, implementer, reviewer, device, delivery. |
+| `skills/android-workflow/agents/` | The seven `aw-*` agents: setup, planner, tech lead, implementer, reviewer, device, delivery. |
 | `skills/device-driving/` | How the Device agent drives the phone or emulator (Maestro first, adb fallback). |
 | `tools/android-workflow/` | The Python package behind the `android-workflow` CLI, with its tests. |
 | `bin/` | `android-workflow` launcher plus the helpers the CLI calls: `feature_setup.py` (project profile), `feature_workspace.py` (ticket branch/worktree) and `android_probe.py`. |
@@ -58,8 +59,15 @@ Everything points at one source of truth, so edits to the workflow apply at once
 | --- | --- |
 | Always | Python 3.9+ (macOS already has it), `git`, and an Android project that builds with Gradle |
 | Opening the PR | `gh` (GitHub) or `glab` (GitLab), logged in. Without it you get a link to open the PR by hand |
-| Device check | An emulator or phone visible in `adb devices`. Maestro is installed automatically on first use |
+| Device check | A phone or emulator in `adb devices`, or just an emulator created once in Android Studio (Device Manager): the workflow opens it when nothing is connected. Maestro is installed automatically on first use |
 | Jira tickets | A Jira connector (MCP) in your coding tool, so the ticket text is fetched for you |
+
+**Claude Code in auto mode:** allow the workflow's CLI once, so its own git steps (commit, push, PR,
+all done by `CLI deliver`) never wait on a safety check. In `~/.claude/settings.json`:
+
+```json
+{ "permissions": { "allow": ["Bash(python3 ~/.ai/bin/android-workflow:*)"] } }
+```
 
 ### 2. Run it
 
@@ -82,7 +90,7 @@ command only to change one of them:
 | Branch | On `main` (or the repo's base branch): creates `<user>/<TICKET>-<slug>` in the same checkout. On any other branch: keeps working on it | `--worktree` to work in a separate folder instead |
 | PR base | The repo's default branch (`origin/HEAD`, else `main`, `master` or `develop`) | `--base BRANCH` |
 | Depth | Chosen from the ticket: `express` for a small, clear change (no Planner); `full` for risky areas (lifecycle, migrations, payments, auth); `standard` otherwise. Bugs are never `express` | `--level express\|standard\|full` |
-| Device check | Runs when the change is visible or runtime and a device is connected. No device connected: skipped, and the PR says it was not verified on a device | `--no-device` to always skip it |
+| Device check | Runs when the change is visible or runtime. No device connected: it opens your emulator (the AVD in `device.avd` of `.ai/android-workflow.json`, else the first one) and closes it at the end; a device you connected or opened is never closed. No emulator at all: skipped, and the PR says it was not verified on a device | `--no-device` to always skip it |
 | Delivery | Commits, pushes and opens the PR (a draft if some check is still failing) | `--no-pr`, `--no-push` or `--no-commit` to stop earlier |
 
 ### 3. What happens
@@ -90,8 +98,10 @@ command only to change one of them:
 1. **Branch** — on the base branch it creates `<user>/<TICKET>-<slug>`; on any other branch it keeps working there.
 2. **Setup (first run only)** — learns the project's patterns and quality tools and saves them in `.ai/project-profile.md`. Later tickets reuse it.
 3. **Depth** — picks `express`, `standard` or `full` from the ticket (see *Depth* in the table above).
-4. **Planner** — reads the code and writes verifiable acceptance criteria. Meanwhile the unchanged app is built in the background.
+4. **Planner** — reads the code and writes verifiable acceptance criteria. Meanwhile the emulator boots (when no device is connected) and the unchanged app is built in the background.
 5. **Implementer** — writes the change and the unit tests that prove it. In parallel, if a device is connected, the **before** screenshots are captured.
+   When the plan has independent parts (different modules, data and UI) the **Tech Lead** splits it into slices, up to
+   **3 Implementers** build them at the same time, each owning its own files, and the Tech Lead integrates them before the gate.
 6. **Quality gate** — formatter, compile, unit tests, detekt and lint for the modules touched. Failures go back to the Implementer (up to 2 times).
 7. **Code reviewer** — an independent review of the diff: bugs, side effects, callers, duplication, project conventions. Blocking findings go back to the Implementer once.
 8. **Device check** — installs the app, navigates to the change and captures the **after** screenshots or video.
@@ -113,20 +123,24 @@ Everything under `.ai/workflow/` stays on your machine; it is git-ignored and ne
 
 ### 5. Watch the agents work
 
-The workflow keeps a page that shows the run as an isometric office, Habbo style: one desk per agent,
-a corridor and a coffee room. Only the agents doing work sit at their desk; the others follow a
+The workflow keeps a page that shows the run as an isometric office, Habbo style: one desk per agent
+(plus the Tech Lead and extra Implementers when a team works), a corridor and a coffee room. Only the agents doing work sit at their desk; the others follow a
 deterministic routine — coffee, a chat in the corridor, the console in front of the TV, the window,
 a game at their desk —
-and walk back as soon as they get work. The page also shows who sent work back for a fix, time and
-tokens per agent, the run's activity as a chat and every past run of the app. **Click any desk,
+and walk back as soon as they get work. It is **live**: each working agent's clock counts second by
+second next to its name, the file the Implementer is editing shows up on its line (and in its
+**Live changes** tab, with lines added and removed) as soon as it is saved, and new activity lands in
+the chat within a couple of seconds, without reloading the page or closing the panel you are reading.
+The page also shows who sent work back for a fix, time and tokens per agent, the run's activity as a
+chat and every past run of the app. **Click any desk,
 agent, file card or message** to read what that agent produced, formatted: the plan and acceptance
 criteria, the implementation notes and changed files, every quality-gate check (with the Gradle
 logs), the review's blocking points and suggestions, the device report with before/after
 screenshots (side by side or with a slider), and the PR description.
 
-![The agent office: the Orchestrator and the Device agent work, the others take a break](docs/office.png)
+![The agent office: a team of three Implementers works, each with its clock and the file it is editing](docs/office.png)
 
-![Clicking the Planner's desk opens its plan](docs/office-panel.png)
+![Clicking the Implementer opens its live changes](docs/office-panel.png)
 
 The link appears in the chat when a run starts. To open it yourself, from the app's folder:
 
@@ -134,7 +148,8 @@ The link appears in the chat when a run starts. To open it yourself, from the ap
 python3 ~/.ai/bin/android-workflow office --target .
 ```
 
-It is a local file (`.ai/workflow/office.html`); nothing leaves your machine.
+It is a local file (`.ai/workflow/office.html`); nothing leaves your machine. While a run is live a
+small background process keeps it current between commands; it stops by itself when the run ends.
 
 ### 6. When it stops to ask you
 

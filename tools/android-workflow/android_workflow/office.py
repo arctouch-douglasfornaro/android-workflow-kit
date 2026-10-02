@@ -3,7 +3,9 @@
 Rewritten after every CLI command into ``TARGET/.ai/workflow/office.html`` from the files the run
 already writes, so it costs no tokens and needs no server. A browser cannot read sibling files from
 a local page, so the readable run files are embedded (size-capped); big Gradle logs are links only.
-While the run is going the page reloads itself, except while a details panel is open.
+While the run is going the page loads ``office-data.js`` every two seconds and updates in place (no
+reload, an open panel stays open); a small watcher (``live.py``) keeps that file current between
+commands, so clocks, file edits and new activity show up as they happen.
 """
 
 from __future__ import annotations
@@ -11,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -18,27 +21,37 @@ from typing import Any
 from android_workflow.paths import current_ticket_id, list_runs, workflow_root
 
 OFFICE_NAME = "office.html"
+DATA_NAME = "office-data.js"
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 VIDEO_SUFFIXES = {".mp4", ".webm"}
 MAX_EMBED_BYTES = 80_000
 
-# (stage, role, kind, shirt colour): desks in the order the work flows.
+# (stage, role, kind, shirt colour): desks in the order the work flows. A team adds the Tech Lead
+# and Implementers 2 and 3 (slices S2, S3; the usual Implementer desk is slice S1).
 DESKS = (
     ("T0", "Setup", "agent", "#8e6bd8"),
     ("T3", "Planner", "agent", "#3d8bfd"),
+    ("T4L", "Tech Lead", "agent", "#c0392b"),
     ("T4", "Implementer", "agent", "#2fb36d"),
+    ("T4:S2", "Implementer 2", "agent", "#1f9e8f"),
+    ("T4:S3", "Implementer 3", "agent", "#7cb342"),
     ("T5", "Quality gate", "machine", "#9aa4b2"),
     ("T6", "Reviewer", "agent", "#e8913a"),
     ("T7", "Device", "agent", "#e2557b"),
     ("T8", "Delivery", "agent", "#18a5a7"),
 )
+TEAM_ROLES = {"T4L", "T4:S2", "T4:S3"}
 # What each desk opens: (path relative to the run folder, label).
 ROLE_FILES = {
     "Orchestrator": (("run-state.json", "Run state"), ("stage-metrics.json", "Time & tokens"),
                      ("stage-log.md", "Stage log")),
     "Setup": (("../../project-profile.md", "Project profile"), ("../../android-workflow.json", "Project overrides")),
     "Planner": (("plan.md", "Plan"), ("ticket-spec.json", "Ticket"), ("change-set-map.json", "Likely files")),
-    "Implementer": (("implementation-notes.md", "Notes"), ("t4-files.json", "Changed files")),
+    "Tech Lead": (("team-plan.json", "Team plan"), ("team-report.json", "Who touched what")),
+    "Implementer": (("implementation-notes.md", "Notes"), ("t4-files.json", "Changed files"),
+                    ("slices/S1.md", "Slice notes")),
+    "Implementer 2": (("slices/S2.md", "Slice notes"),),
+    "Implementer 3": (("slices/S3.md", "Slice notes"),),
     "Quality gate": (("gate-report.json", "Gate report"),),
     "Reviewer": (("review.json", "Review"),),
     "Device": (("device-report.md", "Device report"), ("prebuild.json", "Base build")),
@@ -51,6 +64,28 @@ FAILED = {"escalated", "failed", "blocked"}
 
 def office_path(target: Path) -> Path:
     return workflow_root(target) / OFFICE_NAME
+
+
+def _alive(pid: Any) -> bool:
+    """True unless `pid` names a process that is gone (an unknown pid counts as alive)."""
+    if not isinstance(pid, int) or pid <= 0:
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def run_is_live(run: Path) -> bool:
+    """A run is live until it ends; after `finish`, also while the Delivery agent is still at work."""
+    state = _json(run / "run-state.json")
+    if (state.get("status") or "idle") not in {"completed", "idle"}:
+        return True
+    delivery = (state.get("stages") or {}).get("T8") or {}
+    return isinstance(delivery, dict) and str(delivery.get("status") or "") in WORKING
 
 
 def _json(path: Path) -> dict[str, Any]:
@@ -111,7 +146,7 @@ def _work(run: Path, state: dict[str, Any], desks: list[dict[str, Any]], now: fl
         work.setdefault(role, []).append([start, None if states.get(role) == "working" else last])
     for role, desk_state in states.items():  # working without a `started` row (an older run)
         if desk_state == "working" and not any(end is None for _, end in work.get(role, [])):
-            work.setdefault(role, []).append([now, None])
+            work.setdefault(role, []).append([float(state.get("updated_at") or now), None])
     created = state.get("created_at")
     if created:  # the Orchestrator coordinates for the whole run
         live = (state.get("status") or "") not in {"completed", "idle"}
@@ -123,7 +158,8 @@ def _link(path: Path, page_dir: Path) -> dict[str, Any]:
     """A file as the page sees it: `src` is relative to the folder the page is written in."""
     resolved = path.resolve()
     relative = Path(os.path.relpath(resolved, page_dir.resolve())).as_posix()
-    return {"name": path.name, "src": relative, "uri": resolved.as_uri(), "size": path.stat().st_size}
+    stat = path.stat()
+    return {"name": path.name, "src": relative, "uri": resolved.as_uri(), "size": stat.st_size, "mtime": round(stat.st_mtime, 3)}
 
 
 def _media(run: Path, root: Path) -> dict[str, list[dict[str, Any]]]:
@@ -203,22 +239,42 @@ def _history(target: Path, page_dir: Path) -> list[dict[str, Any]]:
     return sorted(runs, key=lambda run: (not run["current"], -run["updated_at"]))
 
 
-def collect(target: Path, ticket: str | None = None, page_dir: Path | None = None) -> dict[str, Any]:
-    """The page data for one run (the current one by default), with links relative to `page_dir`."""
+def _team(run: Path, stages: dict[str, Any]) -> dict[str, Any] | None:
+    """The engineering team of this run, when the Tech Lead worked or split the plan into slices."""
+    from android_workflow.team import owners, read_plan
+
+    plan = read_plan(run)
+    slices = [item for item in (plan or {}).get("slices") or [] if isinstance(item.get("id"), str)]
+    if len(slices) < 2 and not stages.get("T4L"):
+        return None
+    return {
+        "slices": [{"id": item["id"], "goal": str(item.get("goal") or "")[:200]} for item in slices[:3]],
+        "owners": owners(plan) if len(slices) >= 2 else {},
+    }
+
+
+def collect(target: Path, ticket: str | None = None, page_dir: Path | None = None, live_src: str | None = None,
+            full_scan: bool = False, snapshot: bool = False) -> dict[str, Any]:
+    """The page data for one run (the current one by default), with links relative to `page_dir`.
+
+    `live_src` is the data script the page reloads while the run is live (the main page only).
+    """
     root = workflow_root(target)
     current = current_ticket_id(target)
     ticket = ticket or current
     page_dir = (page_dir or root).resolve()
+    now = time.time()
     data: dict[str, Any] = {
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
         "ticket": ticket,
         "is_current": ticket == current,
         "history": _history(target, page_dir),
         "live": False,
+        "live_src": live_src,
     }
     if not ticket:
         data.update({"status": "idle", "desks": [], "timeline": [], "media": {"before": [], "after": []},
-                     "artifacts": {}, "logs": [], "files": [], "draft": [], "totals": {}})
+                     "artifacts": {}, "logs": [], "files": [], "draft": [], "totals": {}, "changes": []})
         return data
     run = root / ticket
     state = _json(run / "run-state.json")
@@ -228,32 +284,58 @@ def collect(target: Path, ticket: str | None = None, page_dir: Path | None = Non
     review = _json(run / "review.json")
     delivery = _json(run / "delivery.json")
     stages = state.get("stages") or {}
+    measured_stages = metrics.get("stages") or {}
     route = list(spec.get("route") or [])
+    team = _team(run, stages)
+    team_slices = {item["id"] for item in (team or {}).get("slices") or []}
     desks = []
     for stage, role, kind, colour in DESKS:
-        entry = stages.get(stage) or {}
-        measured = (metrics.get("stages") or {}).get(stage) or {}
+        if stage in TEAM_ROLES and (not team or (stage.startswith("T4:") and stage[3:] not in team_slices)):
+            continue
+        if stage.startswith("T4:") or (stage == "T4" and len(team_slices) >= 2):
+            # One Implementer of the team: its slice has its own state, clock and tokens.
+            slice_id = stage[3:] if stage.startswith("T4:") else "S1"
+            entry = (((stages.get("T4") or {}).get("slices") or {}).get(slice_id)) or {}
+            measured = (((measured_stages.get("T4") or {}).get("slices") or {}).get(slice_id)) or {}
+            state_name = _desk_state("T4", entry, route + ["T4"], gate, review)
+        else:
+            entry = stages.get(stage) or {}
+            measured = measured_stages.get(stage) or {}
+            state_name = _desk_state(stage, entry, route + (["T4L"] if team else []), gate, review)
         note = entry.get("note") or entry.get("reason") or ""
+        if stage == "T5" and state_name == "working" and not _alive(entry.get("pid")):
+            # The gate was killed (a host's command timeout): it is not running any more.
+            state_name, note = "failed", "the gate stopped before it finished"
         if stage == "T5" and gate.get("status") and gate["status"] != "not_run":
             note = note or f"gate {gate['status']}"
+        since = measured.get("running_since")
         desks.append({
             "stage": stage, "role": role, "kind": kind, "colour": colour,
-            "state": _desk_state(stage, entry, route, gate, review),
+            "state": state_name,
             "note": str(note)[:200],
             "seconds": measured.get("wall_time_seconds"),
             "tokens": measured.get("tokens"),
+            "running_since": since if state_name == "working" and isinstance(since, (int, float)) else None,
         })
-    totals = dict(metrics.get("totals") or {})
+    final_totals = dict(metrics.get("totals") or {})
+    totals = final_totals
     if not totals:  # mid-run: add up what the stages reported so far
-        reported = [item.get("tokens") for item in (metrics.get("stages") or {}).values()
+        reported = [item.get("tokens") for item in measured_stages.values()
                     if isinstance(item, dict) and isinstance(item.get("tokens"), int)]
         created = state.get("created_at")
         totals = {
-            "wall_time_seconds": max(datetime.now(timezone.utc).timestamp() - created, 0) if created else None,
+            "wall_time_seconds": max(now - created, 0) if created else None,
             "tokens": sum(reported) if reported else None,
         }
     pr = delivery.get("pr") or {}
     draft = state.get("draft") or {}
+    # A run's own page (reached from the history) is a snapshot: only the main page follows the run live.
+    live = ticket == current and run_is_live(run) and not snapshot
+    changes: list[dict[str, Any]] = []
+    if live:
+        from android_workflow.live import live_changes
+
+        changes = live_changes(target, full=full_scan)
     data.update({
         "title": (spec.get("ticket") or {}).get("title") or "",
         "status": state.get("status") or "idle",
@@ -262,27 +344,43 @@ def collect(target: Path, ticket: str | None = None, page_dir: Path | None = Non
         "draft": draft.get("issues") or [],
         "pr": pr.get("url") or pr.get("compare_url"),
         "totals": totals,
+        "totals_final": bool(final_totals),
+        "created_at": state.get("created_at"),
         "desks": desks,
+        "team": team,
+        "changes": changes,
         "timeline": _timeline(run),
         "media": _media(run, page_dir),
         "artifacts": _artifacts(run, page_dir),
         "logs": [_link(path, page_dir) for path in sorted(run.glob("gate-run*.log"))],
         "files": [{**_link(path, page_dir), "rel": path.relative_to(run).as_posix()} for path in sorted(run.rglob("*"))
                   if path.is_file() and "media" not in path.relative_to(run).parts
-                  and path.name not in {OFFICE_NAME, f"{Path(OFFICE_NAME).stem}.tmp"}],
-        "work": _work(run, state, desks, datetime.now(timezone.utc).timestamp()),
-        # Only the run that is going right now keeps refreshing; a past run's page is a snapshot.
-        "live": ticket == current and (state.get("status") or "idle") not in {"completed", "idle"},
+                  and path.name not in {OFFICE_NAME, DATA_NAME, f"{Path(OFFICE_NAME).stem}.tmp"}
+                  and not path.name.endswith(".tmp") and not path.name.startswith(".")],
+        "work": _work(run, state, desks, now),
+        # Only the run that is going right now keeps updating; a past run's page is a snapshot.
+        "live": live,
     })
     return data
 
 
-def _write(path: Path, data: dict[str, Any]) -> None:
-    payload = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
+def _payload(data: dict[str, Any]) -> str:
+    return json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
+
+
+def _atomic_write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(PAGE.replace("__SIM__", SIM_JS).replace("__DATA__", payload), encoding="utf-8")
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(text, encoding="utf-8")
     temporary.replace(path)
+
+
+def _write(path: Path, data: dict[str, Any]) -> None:
+    _atomic_write(path, PAGE.replace("__SIM__", SIM_JS).replace("__DATA__", _payload(data)))
+
+
+def _write_data(path: Path, data: dict[str, Any]) -> None:
+    _atomic_write(path, f"window.officeData && window.officeData({_payload(data)});\n")
 
 
 def _stale(page: Path, run: Path) -> bool:
@@ -296,105 +394,53 @@ def render(target: Path) -> Path:
     """Write the office page for TARGET's current run, plus one page per run for the history."""
     current = current_ticket_id(target)
     main = office_path(target)
-    _write(main, collect(target, current, main.parent))
+    data = collect(target, current, main.parent, live_src=DATA_NAME)
+    _write(main, data)
+    _write_data(main.parent / DATA_NAME, data)
     for item in list_runs(target):
         run = Path(item["path"])
         page = run / OFFICE_NAME
         if item["ticket_id"] == current or _stale(page, run):
-            _write(page, collect(target, item["ticket_id"], run))
+            _write(page, collect(target, item["ticket_id"], run, snapshot=True))
     return main
 
 
-SIM_JS = r"""/* Pure office model: plan, furniture, points of interest, walkable cells and paths. No DOM. */
+def write_live_data(target: Path, last_key: str | None = None, full_scan: bool = False) -> tuple[str, bool]:
+    """The watcher's tick: rewrite the page's data script only when something changed."""
+    main = office_path(target)
+    data = collect(target, current_ticket_id(target), main.parent, live_src=DATA_NAME, full_scan=full_scan)
+    stable = {k: v for k, v in data.items() if k != "generated_at"}
+    if not data.get("totals_final") and isinstance(stable.get("totals"), dict):
+        # Mid-run the total is "now minus the start": it changes every tick but the page counts it itself.
+        stable["totals"] = {**stable["totals"], "wall_time_seconds": None}
+    key = json.dumps(stable, sort_keys=True, ensure_ascii=False)
+    if key != last_key:
+        _write_data(main.parent / DATA_NAME, data)
+    return key, bool(data.get("live"))
+
+
+SIM_JS = r"""/* Pure office model: plan, furniture, points of interest, walkable cells and paths. No DOM.
+   `SIM` is the usual office; `SIM.build(roster)` builds the same office for another set of agents
+   (an engineering team adds the Tech Lead and more Implementers, each with a desk). */
 const SIM = (() => {
   const W = 17, D = 10, CELL = 0.5;
   const COLS = Math.round(W / CELL), ROWS = Math.round(D / CELL);
   // Desks: [x, y, width]; the agent sits on a chair just behind the desk (smaller y), facing the viewer.
-  const LAYOUT = { Orchestrator: [5.6, 1.4, 2.4], Setup: [1.0, 3.9, 2], Planner: [4.4, 3.9, 2], Implementer: [7.8, 3.9, 2],
+  const LAYOUT = { Orchestrator: [5.6, 1.4, 2.4], "Tech Lead": [2.3, 1.4, 2], "Implementer 3": [8.6, 1.4, 1.8],
+    Setup: [1.0, 3.9, 2], Planner: [4.4, 3.9, 2], Implementer: [7.8, 3.9, 2], "Implementer 2": [9.8, 3.9, 1.8],
     "Quality gate": [0.8, 7.4, 2], Reviewer: [3.2, 7.6, 2], Device: [6.1, 7.6, 2], Delivery: [9.0, 7.6, 2] };
-  const AGENTS = ["Orchestrator", "Setup", "Planner", "Implementer", "Reviewer", "Device", "Delivery"];
-  const FURNITURE = [];
-  const add = item => { FURNITURE.push(item); return item; };
-  for (const [role, [x, y, w]] of Object.entries(LAYOUT)) {
-    if (role === "Quality gate") { add({ id: "gate", kind: "machine", role, x: x + 0.3, y: y - 0.2, w: 1.1, d: 0.9, h: 54 }); continue; }
-    add({ id: `desk:${role}`, kind: "desk", role, x, y, w, d: 0.9, h: 17 });
-    add({ id: `chair:${role}`, kind: "chair", role, x: x + w / 2 - 0.25, y: y - 0.82, w: 0.5, d: 0.52, h: 28, walkable: true });
-  }
-  add({ id: "plant:1", kind: "plant", x: 0.3, y: 0.3, w: 0.45, d: 0.45, h: 40 });
-  add({ id: "plant:2", kind: "plant", x: 11.05, y: 0.3, w: 0.45, d: 0.45, h: 40 });
-  add({ id: "plant:3", kind: "plant", x: 0.3, y: 9.25, w: 0.45, d: 0.45, h: 40 });
-  add({ id: "plant:4", kind: "plant", x: 16.35, y: 9.25, w: 0.45, d: 0.45, h: 40 });
-  add({ id: "cooler", kind: "cooler", x: 12.1, y: 2.2, w: 0.5, d: 0.5, h: 44 });
-  add({ id: "counter", kind: "counter", x: 13.1, y: 0.05, w: 2.6, d: 0.65, h: 22 });
-  add({ id: "fridge", kind: "fridge", x: 16.0, y: 0.1, w: 0.85, d: 0.8, h: 54 });
-  add({ id: "table", kind: "table", x: 14.2, y: 3.4, w: 1.2, d: 1.0, h: 16 });
-  for (const [id, x, y] of [["N", 14.55, 2.75], ["S", 14.55, 4.55], ["W", 13.65, 3.65], ["E", 15.5, 3.65]]) {
-    add({ id: `stool:${id}`, kind: "stool", x, y, w: 0.45, d: 0.45, h: 10, walkable: true });
-  }
-  add({ id: "tv", kind: "tv", x: 13.7, y: 5.95, w: 2.0, d: 0.5, h: 46 });
-  add({ id: "sofa-arm-l", kind: "sofa-arm", x: 13.25, y: 7.6, w: 0.15, d: 0.75, h: 15 });
-  add({ id: "sofa-seat", kind: "sofa-seat", x: 13.4, y: 7.6, w: 2.6, d: 0.53, h: 10 });
-  add({ id: "sofa-back", kind: "sofa-back", x: 13.4, y: 8.13, w: 2.6, d: 0.22, h: 24 });
-  add({ id: "sofa-arm-r", kind: "sofa-arm", x: 16.0, y: 7.6, w: 0.15, d: 0.75, h: 15 });
-  // Where agents go when idle. `at` is where they stand to arrive; `pose` is where they are drawn.
+  const BASE = ["Orchestrator", "Setup", "Planner", "Implementer", "Reviewer", "Device", "Delivery"];
+  const ORDER = ["Orchestrator", "Setup", "Planner", "Tech Lead", "Implementer", "Implementer 2", "Implementer 3", "Reviewer", "Device", "Delivery"];
   const p = (x, y, face, pose) => ({ x, y, face, pose: pose || { x, y } });
+  // Where agents go when idle. `at` is where they stand to arrive; `pose` is where they are drawn.
   const POIS = {
     coffee: [p(13.6, 1.15, "-y"), p(14.4, 1.15, "-y")],
     copa: [p(14.77, 2.97, "+y"), p(14.77, 4.77, "-y"), p(13.87, 3.87, "+x"), p(15.72, 3.87, "-x")],
     sofa: [p(14.1, 7.1, "-y", { x: 14.1, y: 7.88 }), p(15.3, 7.1, "-y", { x: 15.3, y: 7.88 })],
     chat: [[p(12.5, 4.4, "+y"), p(12.5, 5.4, "-y")], [p(12.5, 7.6, "+y"), p(12.5, 8.6, "-y")], [p(6.1, 6.1, "+x"), p(7.1, 6.1, "-x")]],
-    window: [p(2.3, 0.75, "-y"), p(9.9, 0.75, "-y")],
+    window: [p(2.3, 0.75, "-y"), p(10.6, 0.75, "-y")],
     cooler: [p(12.35, 3.1, "-y")],
   };
-  const SEATS = {};
-  for (const role of AGENTS) {
-    const [x, y, w] = LAYOUT[role];
-    SEATS[role] = p(x + w / 2, y - 0.55, "+y");
-  }
-  // Walkable cells: inside the room and not covered by solid furniture (chairs and stools can be sat on).
-  const blocked = new Uint8Array(COLS * ROWS);
-  for (let c = 0; c < COLS; c++) for (let r = 0; r < ROWS; r++) {
-    const x0 = c * CELL, y0 = r * CELL;
-    for (const f of FURNITURE) {
-      if (f.walkable) continue;
-      const ox = Math.min(x0 + CELL, f.x + f.w) - Math.max(x0, f.x), oy = Math.min(y0 + CELL, f.y + f.d) - Math.max(y0, f.y);
-      if (ox > 0.02 && oy > 0.02 && ox * oy > 0.04) { blocked[r * COLS + c] = 1; break; }
-    }
-  }
-  const cellOf = (x, y) => [Math.min(COLS - 1, Math.max(0, Math.floor(x / CELL))), Math.min(ROWS - 1, Math.max(0, Math.floor(y / CELL)))];
-  const centre = (c, r) => ({ x: (c + 0.5) * CELL, y: (r + 0.5) * CELL });
-  const walkable = (x, y) => { const [c, r] = cellOf(x, y); return x >= 0 && y >= 0 && x < W && y < D && !blocked[r * COLS + c]; };
-  // Shortest walk between two points over the cell grid (4 directions, the isometric axes). Deterministic.
-  const routes = new Map();
-  function path(from, to) {
-    const [sc, sr] = cellOf(from.x, from.y), [gc, gr] = cellOf(to.x, to.y);
-    const start = sr * COLS + sc, goal = gr * COLS + gc;
-    if (start === goal) return [{ x: from.x, y: from.y }, { x: to.x, y: to.y }];
-    const cached = routes.get(start * 100000 + goal);
-    if (cached !== undefined) return cached && [{ x: from.x, y: from.y }, ...cached, { x: to.x, y: to.y }];
-    const prev = new Int32Array(COLS * ROWS).fill(-1), queue = [start];
-    prev[start] = start;
-    for (let i = 0; i < queue.length && prev[goal] < 0; i++) {
-      const cur = queue[i], c = cur % COLS, r = (cur - c) / COLS;
-      for (const [dc, dr] of [[1, 0], [0, 1], [-1, 0], [0, -1]]) {
-        const nc = c + dc, nr = r + dr, n = nr * COLS + nc;
-        if (nc < 0 || nr < 0 || nc >= COLS || nr >= ROWS || prev[n] >= 0) continue;
-        if (blocked[n] && n !== goal) continue;
-        prev[n] = cur; queue.push(n);
-      }
-    }
-    if (prev[goal] < 0) { routes.set(start * 100000 + goal, null); return null; }
-    const cells = [];
-    for (let n = goal; n !== start; n = prev[n]) cells.push(n);
-    cells.reverse();
-    const middle = cells.slice(0, -1).map(n => { const c = n % COLS; return centre(c, (n - c) / COLS); });
-    if (routes.size > 4000) routes.clear();
-    routes.set(start * 100000 + goal, middle);
-    return [{ x: from.x, y: from.y }, ...middle, { x: to.x, y: to.y }];
-  }
-  const pathLength = pts => pts.slice(1).reduce((sum, q, i) => sum + Math.abs(q.x - pts[i].x) + Math.abs(q.y - pts[i].y), 0);
-
-  /* ---- the routine: deterministic, a pure function of (seed, time, work intervals) ---- */
   const SLOT = 24, SPEED = 2.2;  // seconds per routine slot; tiles walked per second
   const ACTIVITIES = [["coffee", 3], ["copa", 2], ["sofa", 2], ["chat", 3], ["window", 1], ["cooler", 1], ["game", 2], ["desk", 2]];
   const TOTAL = ACTIVITIES.reduce((sum, [, w]) => sum + w, 0);
@@ -404,85 +450,163 @@ const SIM = (() => {
     return h >>> 0;
   }
   const rand = (...parts) => hash(parts.join("|")) / 4294967296;
-  const working = (work, role, t) => (work[role] || []).some(([s, e]) => s <= t && t < (e == null ? Infinity : e));
-  const workedDuring = (work, role, a, b) => (work[role] || []).some(([s, e]) => s < b && a < (e == null ? Infinity : e));
-  const seatSpot = role => ({ ...SEATS[role], activity: "desk" });
-  const planCache = new Map();
-  // Who does what in one slot. Depends only on the seed, the slot and who is idle at its start.
-  function plan(seed, slot, work) {
-    const idle = AGENTS.filter(role => !working(work, role, slot * SLOT));
-    const key = `${seed}|${slot}|${idle.join(",")}`;
-    if (planCache.has(key)) return planCache.get(key);
-    const order = idle.slice().sort((a, b) => hash(`${seed}|${slot}|${a}`) - hash(`${seed}|${slot}|${b}`) || (a < b ? -1 : 1));
-    const free = { coffee: POIS.coffee.slice(), copa: POIS.copa.slice(), sofa: POIS.sofa.slice(), window: POIS.window.slice(),
-      cooler: POIS.cooler.slice(), chat: POIS.chat.slice() };
-    const out = {};
-    let waiting = null;
-    for (const role of order) {
-      let roll = rand(seed, slot, role, "activity") * TOTAL, activity = "desk";
-      for (const [name, weight] of ACTIVITIES) { if (roll < weight) { activity = name; break; } roll -= weight; }
-      if (activity === "chat") {
-        if (waiting && free.chat.length) {
-          const [a, b] = free.chat.shift();
-          out[waiting] = { ...a, activity: "chat", partner: role };
-          out[role] = { ...b, activity: "chat", partner: waiting };
-          waiting = null;
-        } else if (!waiting && free.chat.length) waiting = role;
-        else out[role] = seatSpot(role);
-        continue;
-      }
-      if (activity === "game" || activity === "desk") { out[role] = { ...seatSpot(role), activity }; continue; }
-      out[role] = free[activity].length ? { ...free[activity].shift(), activity } : seatSpot(role);
+
+  function build(roster) {
+    const AGENTS = ORDER.filter(role => (roster || BASE).includes(role));
+    const FURNITURE = [];
+    const add = item => { FURNITURE.push(item); return item; };
+    for (const [role, [x, y, w]] of Object.entries(LAYOUT)) {
+      if (role === "Quality gate") { add({ id: "gate", kind: "machine", role, x: x + 0.3, y: y - 0.2, w: 1.1, d: 0.9, h: 54 }); continue; }
+      if (!AGENTS.includes(role)) continue;
+      add({ id: `desk:${role}`, kind: "desk", role, x, y, w, d: 0.9, h: 17 });
+      add({ id: `chair:${role}`, kind: "chair", role, x: x + w / 2 - 0.25, y: y - 0.82, w: 0.5, d: 0.52, h: 28, walkable: true });
     }
-    if (waiting) out[waiting] = free.coffee.length ? { ...free.coffee.shift(), activity: "coffee" } : seatSpot(waiting);
-    if (planCache.size > 500) planCache.clear();
-    planCache.set(key, out);
-    return out;
-  }
-  // Where an agent stands at the end of slot k: at the desk if it worked at all in that slot.
-  function slotEnd(seed, role, k, work) {
-    if (workedDuring(work, role, k * SLOT, (k + 1) * SLOT)) return seatSpot(role);
-    return plan(seed, k, work)[role] || seatSpot(role);
-  }
-  function along(points, distance) {
-    for (let i = 1; i < points.length; i++) {
-      const a = points[i - 1], b = points[i], len = Math.abs(b.x - a.x) + Math.abs(b.y - a.y);
-      if (distance <= len || i === points.length - 1) {
-        const f = len ? Math.min(1, distance / len) : 1;
-        const face = b.x > a.x ? "+x" : b.x < a.x ? "-x" : b.y > a.y ? "+y" : "-y";
-        return { x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f, face };
-      }
-      distance -= len;
+    add({ id: "plant:1", kind: "plant", x: 0.3, y: 0.3, w: 0.45, d: 0.45, h: 40 });
+    add({ id: "plant:2", kind: "plant", x: 11.05, y: 0.3, w: 0.45, d: 0.45, h: 40 });
+    add({ id: "plant:3", kind: "plant", x: 0.3, y: 9.25, w: 0.45, d: 0.45, h: 40 });
+    add({ id: "plant:4", kind: "plant", x: 16.35, y: 9.25, w: 0.45, d: 0.45, h: 40 });
+    add({ id: "cooler", kind: "cooler", x: 12.1, y: 2.2, w: 0.5, d: 0.5, h: 44 });
+    add({ id: "counter", kind: "counter", x: 13.1, y: 0.05, w: 2.6, d: 0.65, h: 22 });
+    add({ id: "fridge", kind: "fridge", x: 16.0, y: 0.1, w: 0.85, d: 0.8, h: 54 });
+    add({ id: "table", kind: "table", x: 14.2, y: 3.4, w: 1.2, d: 1.0, h: 16 });
+    for (const [id, x, y] of [["N", 14.55, 2.75], ["S", 14.55, 4.55], ["W", 13.65, 3.65], ["E", 15.5, 3.65]]) {
+      add({ id: `stool:${id}`, kind: "stool", x, y, w: 0.45, d: 0.45, h: 10, walkable: true });
     }
-    return { ...points[points.length - 1], face: "+y" };
+    add({ id: "tv", kind: "tv", x: 13.7, y: 5.95, w: 2.0, d: 0.5, h: 46 });
+    add({ id: "sofa-arm-l", kind: "sofa-arm", x: 13.25, y: 7.6, w: 0.15, d: 0.75, h: 15 });
+    add({ id: "sofa-seat", kind: "sofa-seat", x: 13.4, y: 7.6, w: 2.6, d: 0.53, h: 10 });
+    add({ id: "sofa-back", kind: "sofa-back", x: 13.4, y: 8.13, w: 2.6, d: 0.22, h: 24 });
+    add({ id: "sofa-arm-r", kind: "sofa-arm", x: 16.0, y: 7.6, w: 0.15, d: 0.75, h: 15 });
+    const SEATS = {};
+    for (const role of AGENTS) {
+      const [x, y, w] = LAYOUT[role];
+      SEATS[role] = p(x + w / 2, y - 0.55, "+y");
+    }
+    // Walkable cells: inside the room and not covered by solid furniture (chairs and stools can be sat on).
+    const blocked = new Uint8Array(COLS * ROWS);
+    for (let c = 0; c < COLS; c++) for (let r = 0; r < ROWS; r++) {
+      const x0 = c * CELL, y0 = r * CELL;
+      for (const f of FURNITURE) {
+        if (f.walkable) continue;
+        const ox = Math.min(x0 + CELL, f.x + f.w) - Math.max(x0, f.x), oy = Math.min(y0 + CELL, f.y + f.d) - Math.max(y0, f.y);
+        if (ox > 0.02 && oy > 0.02 && ox * oy > 0.04) { blocked[r * COLS + c] = 1; break; }
+      }
+    }
+    const cellOf = (x, y) => [Math.min(COLS - 1, Math.max(0, Math.floor(x / CELL))), Math.min(ROWS - 1, Math.max(0, Math.floor(y / CELL)))];
+    const centre = (c, r) => ({ x: (c + 0.5) * CELL, y: (r + 0.5) * CELL });
+    const walkable = (x, y) => { const [c, r] = cellOf(x, y); return x >= 0 && y >= 0 && x < W && y < D && !blocked[r * COLS + c]; };
+    // Shortest walk between two points over the cell grid (4 directions, the isometric axes). Deterministic.
+    const routes = new Map();
+    function path(from, to) {
+      const [sc, sr] = cellOf(from.x, from.y), [gc, gr] = cellOf(to.x, to.y);
+      const start = sr * COLS + sc, goal = gr * COLS + gc;
+      if (start === goal) return [{ x: from.x, y: from.y }, { x: to.x, y: to.y }];
+      const cached = routes.get(start * 100000 + goal);
+      if (cached !== undefined) return cached && [{ x: from.x, y: from.y }, ...cached, { x: to.x, y: to.y }];
+      const prev = new Int32Array(COLS * ROWS).fill(-1), queue = [start];
+      prev[start] = start;
+      for (let i = 0; i < queue.length && prev[goal] < 0; i++) {
+        const cur = queue[i], c = cur % COLS, r = (cur - c) / COLS;
+        for (const [dc, dr] of [[1, 0], [0, 1], [-1, 0], [0, -1]]) {
+          const nc = c + dc, nr = r + dr, n = nr * COLS + nc;
+          if (nc < 0 || nr < 0 || nc >= COLS || nr >= ROWS || prev[n] >= 0) continue;
+          if (blocked[n] && n !== goal) continue;
+          prev[n] = cur; queue.push(n);
+        }
+      }
+      if (prev[goal] < 0) { routes.set(start * 100000 + goal, null); return null; }
+      const cells = [];
+      for (let n = goal; n !== start; n = prev[n]) cells.push(n);
+      cells.reverse();
+      const middle = cells.slice(0, -1).map(n => { const c = n % COLS; return centre(c, (n - c) / COLS); });
+      if (routes.size > 4000) routes.clear();
+      routes.set(start * 100000 + goal, middle);
+      return [{ x: from.x, y: from.y }, ...middle, { x: to.x, y: to.y }];
+    }
+    const pathLength = pts => pts.slice(1).reduce((sum, q, i) => sum + Math.abs(q.x - pts[i].x) + Math.abs(q.y - pts[i].y), 0);
+
+    /* ---- the routine: deterministic, a pure function of (seed, time, work intervals) ---- */
+    const working = (work, role, t) => (work[role] || []).some(([s, e]) => s <= t && t < (e == null ? Infinity : e));
+    const workedDuring = (work, role, a, b) => (work[role] || []).some(([s, e]) => s < b && a < (e == null ? Infinity : e));
+    const seatSpot = role => ({ ...SEATS[role], activity: "desk" });
+    const planCache = new Map();
+    // Who does what in one slot. Depends only on the seed, the slot and who is idle at its start.
+    function plan(seed, slot, work) {
+      const idle = AGENTS.filter(role => !working(work, role, slot * SLOT));
+      const key = `${seed}|${slot}|${idle.join(",")}`;
+      if (planCache.has(key)) return planCache.get(key);
+      const order = idle.slice().sort((a, b) => hash(`${seed}|${slot}|${a}`) - hash(`${seed}|${slot}|${b}`) || (a < b ? -1 : 1));
+      const free = { coffee: POIS.coffee.slice(), copa: POIS.copa.slice(), sofa: POIS.sofa.slice(), window: POIS.window.slice(),
+        cooler: POIS.cooler.slice(), chat: POIS.chat.slice() };
+      const out = {};
+      let waiting = null;
+      for (const role of order) {
+        let roll = rand(seed, slot, role, "activity") * TOTAL, activity = "desk";
+        for (const [name, weight] of ACTIVITIES) { if (roll < weight) { activity = name; break; } roll -= weight; }
+        if (activity === "chat") {
+          if (waiting && free.chat.length) {
+            const [a, b] = free.chat.shift();
+            out[waiting] = { ...a, activity: "chat", partner: role };
+            out[role] = { ...b, activity: "chat", partner: waiting };
+            waiting = null;
+          } else if (!waiting && free.chat.length) waiting = role;
+          else out[role] = seatSpot(role);
+          continue;
+        }
+        if (activity === "game" || activity === "desk") { out[role] = { ...seatSpot(role), activity }; continue; }
+        out[role] = free[activity].length ? { ...free[activity].shift(), activity } : seatSpot(role);
+      }
+      if (waiting) out[waiting] = free.coffee.length ? { ...free.coffee.shift(), activity: "coffee" } : seatSpot(waiting);
+      if (planCache.size > 500) planCache.clear();
+      planCache.set(key, out);
+      return out;
+    }
+    // Where an agent stands at the end of slot k: at the desk if it worked at all in that slot.
+    function slotEnd(seed, role, k, work) {
+      if (workedDuring(work, role, k * SLOT, (k + 1) * SLOT)) return seatSpot(role);
+      return plan(seed, k, work)[role] || seatSpot(role);
+    }
+    function along(points, distance) {
+      for (let i = 1; i < points.length; i++) {
+        const a = points[i - 1], b = points[i], len = Math.abs(b.x - a.x) + Math.abs(b.y - a.y);
+        if (distance <= len || i === points.length - 1) {
+          const f = len ? Math.min(1, distance / len) : 1;
+          const face = b.x > a.x ? "+x" : b.x < a.x ? "-x" : b.y > a.y ? "+y" : "-y";
+          return { x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f, face };
+        }
+        distance -= len;
+      }
+      return { ...points[points.length - 1], face: "+y" };
+    }
+    // From where the agent is drawn now to where it will be drawn on arrival (`to.pose`), over walkable cells.
+    function walk(from, to, elapsed) {
+      const pose = to.pose || to, route = (path(from, to) || [{ x: from.x, y: from.y }, { x: to.x, y: to.y }]).slice();
+      if (pose.x !== to.x || pose.y !== to.y) route.push({ x: pose.x, y: pose.y });
+      const length = pathLength(route), duration = length / SPEED;
+      if (elapsed >= duration) return null;
+      const at = along(route, elapsed * SPEED);
+      return { mode: "walk", x: at.x, y: at.y, face: at.face, step: Math.floor(elapsed * SPEED * 2) % 2 };
+    }
+    const arrived = spot => ({ mode: spot.activity, x: spot.pose.x, y: spot.pose.y, face: spot.face, partner: spot.partner || null });
+    // Idle logic only: where an idle agent is at time t (used for itself and as the start of a walk to work).
+    function idleState(seed, role, t, work) {
+      const k = Math.floor(t / SLOT), start = k * SLOT;
+      if (workedDuring(work, role, start, t)) return { ...arrived(seatSpot(role)), mode: "desk" };
+      const from = slotEnd(seed, role, k - 1, work), to = plan(seed, k, work)[role] || seatSpot(role);
+      return walk(from.pose || from, to, t - start) || arrived(to);
+    }
+    // The full answer for one agent at time t: working agents walk back and sit at their desk.
+    function stateAt(seed, role, t, work) {
+      const interval = (work[role] || []).find(([s, e]) => s <= t && t < (e == null ? Infinity : e));
+      if (!interval) return { ...idleState(seed, role, t, work), working: false };
+      const begin = interval[0], from = idleState(seed, role, begin, work);
+      const moving = walk({ x: from.x, y: from.y }, seatSpot(role), t - begin);
+      return moving ? { ...moving, working: true } : { ...arrived(seatSpot(role)), mode: "desk", working: true };
+    }
+    return { W, D, CELL, COLS, ROWS, LAYOUT, AGENTS, FURNITURE, POIS, SEATS, blocked, cellOf, walkable, path, pathLength,
+      SLOT, SPEED, hash, plan, stateAt, build, ORDER, BASE };
   }
-  // From where the agent is drawn now to where it will be drawn on arrival (`to.pose`), over walkable cells.
-  function walk(from, to, elapsed) {
-    const pose = to.pose || to, route = (path(from, to) || [{ x: from.x, y: from.y }, { x: to.x, y: to.y }]).slice();
-    if (pose.x !== to.x || pose.y !== to.y) route.push({ x: pose.x, y: pose.y });
-    const length = pathLength(route), duration = length / SPEED;
-    if (elapsed >= duration) return null;
-    const at = along(route, elapsed * SPEED);
-    return { mode: "walk", x: at.x, y: at.y, face: at.face, step: Math.floor(elapsed * SPEED * 2) % 2 };
-  }
-  const arrived = spot => ({ mode: spot.activity, x: spot.pose.x, y: spot.pose.y, face: spot.face, partner: spot.partner || null });
-  // Idle logic only: where an idle agent is at time t (used for itself and as the start of a walk to work).
-  function idleState(seed, role, t, work) {
-    const k = Math.floor(t / SLOT), start = k * SLOT;
-    if (workedDuring(work, role, start, t)) return { ...arrived(seatSpot(role)), mode: "desk" };
-    const from = slotEnd(seed, role, k - 1, work), to = plan(seed, k, work)[role] || seatSpot(role);
-    return walk(from.pose || from, to, t - start) || arrived(to);
-  }
-  // The full answer for one agent at time t: working agents walk back and sit at their desk.
-  function stateAt(seed, role, t, work) {
-    const interval = (work[role] || []).find(([s, e]) => s <= t && t < (e == null ? Infinity : e));
-    if (!interval) return { ...idleState(seed, role, t, work), working: false };
-    const begin = interval[0], from = idleState(seed, role, begin, work);
-    const moving = walk({ x: from.x, y: from.y }, seatSpot(role), t - begin);
-    return moving ? { ...moving, working: true } : { ...arrived(seatSpot(role)), mode: "desk", working: true };
-  }
-  return { W, D, CELL, COLS, ROWS, LAYOUT, AGENTS, FURNITURE, POIS, SEATS, blocked, cellOf, walkable, path, pathLength,
-    SLOT, SPEED, hash, plan, stateAt };
+  return build(BASE);
 })();
 if (typeof module !== "undefined") module.exports = { SIM };
 """
@@ -503,6 +627,7 @@ PAGE = r"""<!doctype html>
   --sans: Inter, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html, body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--sans); font-size: 14px; }
 button { font: inherit; color: inherit; }
 a { color: var(--info); }
@@ -564,6 +689,17 @@ aside.side { background: var(--panel); border-left: 1px solid var(--line); displ
 .filebtn { display: flex; align-items: center; gap: 10px; text-align: left; padding: 10px; border-radius: 10px;
   border: 1px solid var(--line); background: var(--panel-2); cursor: pointer; min-width: 0; }
 .filebtn:hover, .filebtn:focus-visible { border-color: var(--accent); outline: none; }
+.filebtn.fresh { border-color: var(--warn); box-shadow: 0 0 0 1px var(--warn) inset; animation: freshglow 1s ease-in-out infinite; }
+@keyframes freshglow { 50% { box-shadow: 0 0 0 1px rgba(255, 201, 77, .25) inset; } }
+.pulse { animation: pulse .9s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .45; } }
+.livedot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); margin-right: 5px; vertical-align: middle; animation: pulse 1.6s ease-in-out infinite; }
+.change { display: grid; grid-template-columns: 48px minmax(0, 1fr) auto auto; gap: 4px 10px; align-items: center; padding: 7px 0; border-bottom: 1px dashed var(--line); font-size: 13px; }
+.change code { overflow-wrap: anywhere; }
+.change .chip { justify-content: center; }
+.change .plus { color: var(--ok); font-variant-numeric: tabular-nums; } .change .minus { color: var(--bad); font-variant-numeric: tabular-nums; }
+.change .ago { color: var(--muted); font-size: 11px; white-space: nowrap; }
+.change.fresh code { color: var(--warn); }
 .filebtn .who { font-weight: 600; font-size: 13px; }
 .filebtn .what { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .filebtn > div { min-width: 0; }
@@ -680,38 +816,81 @@ figcaption { color: var(--muted); font-size: 11px; margin-top: 4px; }
   <div class="dfoot" id="dfoot"></div>
 </aside>
 <script>
-const DATA = __DATA__;
+let DATA = __DATA__;
 __SIM__
-const ROLE_OF_STAGE = { T0: "Setup", T1: "Planner", T2: "Planner", T3: "Planner", T4: "Implementer",
+const ROLE_OF_STAGE = { T0: "Setup", T1: "Planner", T2: "Planner", T3: "Planner", T4: "Implementer", T4L: "Tech Lead",
   T5: "Quality gate", T6: "Reviewer", T7: "Device", T8: "Delivery", T9: "Orchestrator" };
 const ROLE_ALIAS = { Triage: "Planner", Localizer: "Planner", Telemetry: "Orchestrator", Bootstrap: "Orchestrator" };
 const LOOK = { Orchestrator: ["#2a1d14", "#f1c27d"], Setup: ["#c24d2c", "#e0ac69"], Planner: ["#1d1d1d", "#f6d1b0"],
-  Implementer: ["#6b3e1e", "#c68642"], Reviewer: ["#e7c35a", "#f6d1b0"], Device: ["#3a2a5a", "#8d5524"], Delivery: ["#111", "#ffdbac"] };
+  Implementer: ["#6b3e1e", "#c68642"], Reviewer: ["#e7c35a", "#f6d1b0"], Device: ["#3a2a5a", "#8d5524"], Delivery: ["#111", "#ffdbac"],
+  "Tech Lead": ["#4a2c2a", "#e0ac69"], "Implementer 2": ["#d35400", "#f6d1b0"], "Implementer 3": ["#2c3e50", "#a1665e"] };
 const STATE_LABEL = { working: "working", done: "done", failed: "needs a fix", skipped: "not needed", waiting: "waiting", idle: "idle" };
-const ROLES = ["Orchestrator", "Setup", "Planner", "Implementer", "Quality gate", "Reviewer", "Device", "Delivery"];
+// The roles on this page, in the order the work flows (a team adds the Tech Lead and more Implementers).
+const roles = () => DATA.ticket ? ["Orchestrator", ...(DATA.desks || []).map(d => d.role)] : [];
+const EDITORS = ["Implementer", "Implementer 2", "Implementer 3", "Tech Lead"];
 
 const esc = t => String(t ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const fmtS = v => { if (v == null) return "—"; const s = Math.round(v); return s >= 3600 ? `${Math.floor(s / 3600)}h${String(Math.floor(s % 3600 / 60)).padStart(2, "0")}m` : s >= 60 ? `${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s` : `${s}s`; };
 const fmtT = v => v == null ? "—" : v >= 1e6 ? `${(v / 1e6).toFixed(1)}M` : v >= 1000 ? `${(v / 1000).toFixed(1)}k` : String(v);
 const fmtB = v => v == null ? "" : v >= 1e6 ? `${(v / 1e6).toFixed(1)} MB` : v >= 1000 ? `${Math.round(v / 1000)} KB` : `${v} B`;
 const live = () => Boolean(DATA.live);
+// The run waits for the host while its agents work: show that as running.
+const runStatus = () => DATA.status === "awaiting_host" && (DATA.desks || []).some(d => d.state === "working") ? "running" : (DATA.status || "idle");
+const now = () => Date.now() / 1000;
+// Seconds an agent has worked: what was recorded, plus the open stretch while it is working right now.
+function liveSeconds(desk) {
+  if (!desk) return null;
+  let since = desk.running_since;
+  if (since == null && desk.state === "working" && live()) {
+    const open = ((DATA.work || {})[desk.role] || []).find(([, e]) => e == null);
+    if (open) since = open[0];
+  }
+  if (since == null || !live()) return desk.seconds;
+  return (desk.seconds || 0) + Math.max(0, now() - since);
+}
+const ago = s => s < 5 ? "just now" : s < 60 ? `${Math.floor(s)}s ago` : s < 3600 ? `${Math.floor(s / 60)}m ago` : `${Math.floor(s / 3600)}h ago`;
+// Files the change touches, attributed to the agent who owns them (a team splits files by slice).
+function changesFor(role) {
+  const all = DATA.changes || [], team = DATA.team || null, owners = (team && team.owners) || {};
+  const sliceRole = id => id === "S1" ? "Implementer" : `Implementer ${String(id).slice(1)}`;
+  const present = new Set((DATA.desks || []).map(d => d.role));
+  if (role === "Tech Lead") return all;
+  if (!EDITORS.includes(role)) return [];
+  return all.filter(c => {
+    const owner = owners[c.path] ? sliceRole(owners[c.path]) : (present.has("Tech Lead") && Object.keys(owners).length ? "Tech Lead" : "Implementer");
+    return owner === role;
+  });
+}
+function lastTouch(role) {
+  let t = 0;
+  for (const a of (DATA.artifacts || {})[role] || []) t = Math.max(t, a.mtime || 0);
+  if (role !== "Tech Lead") for (const c of changesFor(role)) t = Math.max(t, c.mtime || 0);
+  return t;
+}
 const chip = (s, label) => `<span class="chip ${esc(String(s).toLowerCase().split(" ")[0])}">${esc(label || s)}</span>`;
 
 function bossDesk() {
   const s = DATA.status || "idle";
   const state = s === "completed" ? "done" : s === "escalated" ? "failed" : s === "paused" ? "waiting" : s === "idle" ? "idle" : "working";
   const current = (DATA.desks || []).find(d => d.stage === DATA.current);
+  const busy = (DATA.desks || []).filter(d => d.state === "working").map(d => d.role);
   const note = s === "paused" ? `Waiting for your answer: ${DATA.question || ""}`
+    : busy.length ? `Coordinating · now ${busy.length > 2 ? `${busy.length} agents` : busy.join(" + ")}`
     : s === "completed" ? (DATA.pr ? ((DATA.draft || []).length ? "Draft PR delivered" : "PR delivered") : "Run finished")
-    : current ? `Coordinating · now ${current.role}` : "";
+    : current ? `Coordinating · next ${current.role}` : "";
+  const running = live() && !DATA.totals_final && DATA.created_at;
   return { stage: "boss", role: "Orchestrator", kind: "agent", colour: "#d4a72c", state, note,
-    seconds: (DATA.totals || {}).wall_time_seconds, tokens: (DATA.totals || {}).tokens };
+    seconds: running ? 0 : (DATA.totals || {}).wall_time_seconds, running_since: running ? DATA.created_at : null,
+    tokens: (DATA.totals || {}).tokens };
 }
 const desks = () => DATA.ticket ? [bossDesk(), ...(DATA.desks || [])] : [];
 const deskOf = role => desks().find(d => d.role === role) || { role, colour: role === "Orchestrator" ? "#d4a72c" : "#888", state: "idle" };
 
 /* ---------- isometric room ---------- */
 const TW = 56, TH = 28, W = SIM.W, D = SIM.D, WALL = 112, PAD = 26;
+// The office for the agents on this page; rebuilt when a team joins (more desks, other walkways).
+const rosterOf = () => roles().filter(r => SIM.ORDER.includes(r));
+let OFFICE = SIM.build(rosterOf()), ROSTER_KEY = rosterOf().join();
 const OX = D * TW / 2 + PAD, OY = WALL + PAD + 10;
 const VW = (W + D) * TW / 2 + PAD * 2, VH = (W + D) * TH / 2 + WALL + PAD * 2 + 20;
 const iso = (x, y, z = 0) => [OX + (x - y) * TW / 2, OY + (x + y) * TH / 2 - z];
@@ -802,6 +981,9 @@ const EXTRAS = {
   Device: (tx, ty, w, on) => box(tx + w - 0.6, ty + 0.3, 17, 0.22, 0.4, 2, "#111") + poly([iso(tx + w - 0.57, ty + 0.34, 19.2), iso(tx + w - 0.41, ty + 0.34, 19.2), iso(tx + w - 0.41, ty + 0.66, 19.2), iso(tx + w - 0.57, ty + 0.66, 19.2)], on ? "#7fe0ff" : "#2c3b47"),
   Delivery: (tx, ty, w) => box(tx + w - 0.8, ty + 0.2, 17, 0.55, 0.45, 9, "#c8a46a") + box(tx + w - 0.8, ty + 0.2, 26, 0.55, 0.45, 1, "#a8844a"),
   Orchestrator: (tx, ty, w) => box(tx + w - 0.6, ty + 0.3, 17, 0.25, 0.25, 7, "#f4f1de") + box(tx + 0.95, ty + 0.35, 17, 0.5, 0.3, 1.2, "#2c3e50"),
+  "Tech Lead": (tx, ty, w) => box(tx + 0.15, ty + 0.3, 17, 0.3, 0.3, 0.8, "#ffe39a") + box(tx + 0.2, ty + 0.5, 17.8, 0.3, 0.3, 0.8, "#9ad0ff") + box(tx + w - 0.6, ty + 0.3, 17, 0.25, 0.25, 7, "#f4f1de"),
+  "Implementer 2": (tx, ty, w) => box(tx + w - 0.55, ty + 0.35, 17, 0.25, 0.25, 7, "#ffd6a5"),
+  "Implementer 3": (tx, ty, w) => box(tx + w - 0.55, ty + 0.35, 17, 0.25, 0.25, 7, "#caffbf"),
 };
 // A soft contact shadow on the floor, offset away from the light (top-left).
 const floorShadow = (f, spread = 0.22) => poly([iso(f.x + 0.06, f.y + 0.06), iso(f.x + f.w + spread, f.y + 0.06), iso(f.x + f.w + spread, f.y + f.d + spread), iso(f.x + 0.06, f.y + f.d + spread)], "rgba(25,20,35,.16)", 'stroke="none"');
@@ -914,7 +1096,7 @@ function depthSort(items) {
 // Where every agent is at time `now` (seconds): the deterministic routine in SIM decides.
 function placements(now) {
   const out = {}, seed = DATA.ticket || "office", work = DATA.work || {};
-  for (const role of SIM.AGENTS) out[role] = { role, ...SIM.stateAt(seed, role, now, work) };
+  for (const role of OFFICE.AGENTS) out[role] = { role, ...OFFICE.stateAt(seed, role, now, work) };
   return out;
 }
 /* ---------- characters: cute Habbo-style people seen three-quarters ---------- */
@@ -923,7 +1105,8 @@ function placements(now) {
 const STYLE = {  // per agent: accessory and hair, so each one is recognisable anywhere in the room
   Orchestrator: { acc: "tie", hair: "short" }, Setup: { acc: "beanie", hair: "short" }, Planner: { acc: "glasses", hair: "side" },
   Implementer: { acc: "headphones", hair: "messy" }, Reviewer: { acc: "glasses", hair: "long" }, Device: { acc: "bun", hair: "bun" },
-  Delivery: { acc: "cap", hair: "short" },
+  Delivery: { acc: "cap", hair: "short" }, "Tech Lead": { acc: "tie", hair: "side" },
+  "Implementer 2": { acc: "headphones", hair: "long" }, "Implementer 3": { acc: "beanie", hair: "messy", tint: "#8e44ad" },
 };
 const OL = "#2a2733", OW = 1, PANTS = "#3f5a78", SHOE = "#2b2b33";
 function palette(desk) {
@@ -965,8 +1148,8 @@ function chibiHead(desk, pal, back, cx, cy) {
     h += `<ellipse cx="${n1(cx - 8)}" cy="${n1(cy + 4)}" rx="1.5" ry=".9" fill="#ff8a8a" opacity=".55"/><ellipse cx="${n1(cx + 0.8)}" cy="${n1(cy + 4.2)}" rx="1.4" ry=".85" fill="#ff8a8a" opacity=".5"/>`;
     if (st.acc === "glasses") h += `<g fill="none" stroke="${OL}" stroke-width=".9"><circle cx="${n1(cx - 6)}" cy="${n1(cy + 1)}" r="2.6"/><circle cx="${n1(cx - 1.4)}" cy="${n1(cy + 1)}" r="2.6"/><path d="M${n1(cx - 3.4)} ${n1(cy + 0.8)} h-.1 M${n1(cx + 1.2)} ${n1(cy + 0.6)} L${n1(cx + 7)} ${n1(cy - 0.2)}"/></g>`;
   }
-  if (st.acc === "beanie") h += shape(`M${cx - 10} ${cy - 2.4} C${cx - 9.8} ${cy - 15.5} ${cx + 9.8} ${cy - 15.5} ${cx + 10} ${cy - 2.4} Z`, "#e67e22")
-    + `<rect x="${n1(cx - 10.2)}" y="${n1(cy - 4)}" width="20.4" height="3.4" rx="1.6" fill="#ca6c1b" stroke="${OL}" stroke-width="${OW}"/>` + oval(cx, cy - 14.4, 2.2, 2.2, "#f5f0e6");
+  if (st.acc === "beanie") h += shape(`M${cx - 10} ${cy - 2.4} C${cx - 9.8} ${cy - 15.5} ${cx + 9.8} ${cy - 15.5} ${cx + 10} ${cy - 2.4} Z`, st.tint || "#e67e22")
+    + `<rect x="${n1(cx - 10.2)}" y="${n1(cy - 4)}" width="20.4" height="3.4" rx="1.6" fill="${shade(st.tint || "#e67e22", .87)}" stroke="${OL}" stroke-width="${OW}"/>` + oval(cx, cy - 14.4, 2.2, 2.2, "#f5f0e6");
   if (st.acc === "cap") h += shape(`M${cx - 9.9} ${cy - 2.6} C${cx - 9.8} ${cy - 14.6} ${cx + 9.8} ${cy - 14.6} ${cx + 9.9} ${cy - 2} Z`, "#1abc9c")
     + (back ? "" : `<ellipse cx="${n1(cx - 10.5)}" cy="${n1(cy - 2.6)}" rx="6.4" ry="2.2" fill="#16a085" stroke="${OL}" stroke-width="${OW}" transform="rotate(-14 ${n1(cx - 10.5)} ${n1(cy - 2.6)})"/>`);
   if (st.acc === "headphones") h += `<path d="M${n1(cx - 9.6)} ${n1(cy - 1)} C${n1(cx - 10.4)} ${n1(cy - 15.5)} ${n1(cx + 10.4)} ${n1(cy - 15.5)} ${n1(cx + 9.6)} ${n1(cy)}" fill="none" stroke="${OL}" stroke-width="2.6"/>` + oval(back ? cx - 8.8 : cx + 8.6, cy + 1, 2.6, 3.4, "#34495e");
@@ -1071,7 +1254,7 @@ function overlayFor(desk, anchor, top, pl, lifted) {
 }
 // Two walkers about to bump into each other each step aside, across the way they are going (drawing only).
 function separateWalkers(placed) {
-  const walkers = SIM.AGENTS.filter(r => placed[r] && placed[r].mode === "walk");
+  const walkers = OFFICE.AGENTS.filter(r => placed[r] && placed[r].mode === "walk");
   for (let i = 0; i < walkers.length; i++) for (let j = i + 1; j < walkers.length; j++) {
     const a = placed[walkers[i]], b = placed[walkers[j]];
     if (Math.abs(a.x - b.x) + Math.abs(a.y - b.y) >= 0.4) continue;
@@ -1083,28 +1266,22 @@ function separateWalkers(placed) {
 }
 // The room is layered: walls, floor, hover rings and desk hit areas are built once; furniture and agents
 // (depth-sorted), overlays and the agents' own hit areas are redrawn only when someone moved.
-let FURNITURE_ITEMS = null, FURNITURE_KEY = "", SCENE_KEY = "", animTimer = null;
+let FURNITURE_ITEMS = null, FURNITURE_KEY = "", SCENE_KEY = "", CLOCKS_KEY = "", animTimer = null;
+// Where each name tag was drawn last, so the clocks and file cards can sit next to it.
+let TAGS = {};
 function renderRoom() {
   const svg = document.getElementById("room");
   svg.setAttribute("viewBox", `0 0 ${VW} ${VH}`);
-  const present = new Set(desks().map(d => d.role)), rings = [], deskHits = [];
-  for (const f of SIM.FURNITURE) {
+  const present = new Set(desks().map(d => d.role)), rings = [];
+  for (const f of OFFICE.FURNITURE) {
     if (!(f.kind === "desk" || f.kind === "machine") || !present.has(f.role)) continue;
     const ring = [iso(f.x - 0.2, f.y - 1.05), iso(f.x + f.w + 0.2, f.y - 1.05), iso(f.x + f.w + 0.2, f.y + f.d + 0.3), iso(f.x - 0.2, f.y + f.d + 0.3)];
     rings.push(`<polygon class="ring" data-ring="${esc(f.role)}" points="${pts(ring)}"/>`);
   }
-  for (const desk of desks()) {
-    if (desk.kind === "machine") {
-      const f = SIM.FURNITURE.find(x => x.id === "gate"), [hx, hy] = iso(f.x + 0.55, f.y + 0.45, 54);
-      deskHits.push(hitArea(desk, hx, hy + 30));
-    } else {
-      const seat = SIM.SEATS[desk.role], [sx, sy] = iso(seat.x, seat.y, 12);
-      deskHits.push(hitArea(desk, sx, sy));
-    }
-  }
-  svg.innerHTML = `<defs id="roomDefs"><radialGradient id="g-shadow"><stop offset="0" stop-color="#000" stop-opacity=".32"/><stop offset="1" stop-color="#000" stop-opacity="0"/></radialGradient><linearGradient id="g-wall" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".16"/><stop offset="1" stop-color="#000" stop-opacity=".12"/></linearGradient></defs><g id="bg">${walls()}${floorTiles()}${rings.join("")}</g><g id="scene"></g><g id="overlay"></g><g id="deskHits">${deskHits.join("")}</g><g id="agentHits"></g>`;
+  const deskHits = deskHitAreas();
+  svg.innerHTML = `<defs id="roomDefs"><radialGradient id="g-shadow"><stop offset="0" stop-color="#000" stop-opacity=".32"/><stop offset="1" stop-color="#000" stop-opacity="0"/></radialGradient><linearGradient id="g-wall" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".16"/><stop offset="1" stop-color="#000" stop-opacity=".12"/></linearGradient></defs><g id="bg">${walls()}${floorTiles()}${rings.join("")}</g><g id="scene"></g><g id="overlay"></g><g id="clocks"></g><g id="deskHits">${deskHits.join("")}</g><g id="agentHits"></g>`;
   bindRoomEvents(svg);
-  FURNITURE_ITEMS = null; SCENE_KEY = "";
+  FURNITURE_ITEMS = null; SCENE_KEY = ""; CLOCKS_KEY = "";
   drawScene();
   clearTimeout(animTimer);
   const tick = () => { if (!document.hidden) drawScene(); animTimer = setTimeout(() => requestAnimationFrame(tick), 80); };
@@ -1113,21 +1290,23 @@ function renderRoom() {
 function drawScene() {
   const svg = document.getElementById("room");
   PLACED = separateWalkers(placements(Date.now() / 1000));
-  const key = SIM.AGENTS.map(r => { const p = PLACED[r]; return p ? `${p.mode}:${p.x.toFixed(2)}:${p.y.toFixed(2)}:${p.face}:${p.step || 0}:${p.working ? 1 : 0}` : ""; }).join("|");
+  const key = OFFICE.AGENTS.map(r => { const p = PLACED[r]; return p ? `${p.mode}:${p.x.toFixed(2)}:${p.y.toFixed(2)}:${p.face}:${p.step || 0}:${p.working ? 1 : 0}` : ""; }).join("|");
   if (key === SCENE_KEY) return;  // nobody moved: keep the DOM as it is
   SCENE_KEY = key;
-  const furnitureKey = SIM.AGENTS.map(r => PLACED[r] ? `${PLACED[r].mode}${PLACED[r].working ? 1 : 0}` : "").join();
+  const furnitureKey = OFFICE.AGENTS.map(r => PLACED[r] ? `${PLACED[r].mode}${PLACED[r].working ? 1 : 0}` : "").join();
   if (!FURNITURE_ITEMS || furnitureKey !== FURNITURE_KEY) {
     const present = new Set(desks().map(d => d.role));
-    FURNITURE_ITEMS = SIM.FURNITURE.filter(f => !f.role || present.has(f.role))
+    FURNITURE_ITEMS = OFFICE.FURNITURE.filter(f => !f.role || present.has(f.role))
       .map(f => ({ ...f, prio: f.kind === "chair" || f.kind === "stool" ? 0 : 2, svg: drawFurniture(f, { screenFor }) }));
     FURNITURE_KEY = furnitureKey;
   }
   const items = [...FURNITURE_ITEMS], overlays = [], agentHits = [], labels = [], placedTags = [];
+  TAGS = {};
   for (const desk of desks()) {
     if (desk.kind === "machine") {
-      const f = SIM.FURNITURE.find(x => x.id === "gate"), [hx, hy] = iso(f.x + 0.55, f.y + 0.45, 54);
+      const f = OFFICE.FURNITURE.find(x => x.id === "gate"), [hx, hy] = iso(f.x + 0.55, f.y + 0.45, 54);
       let over = tag(hx, hy - 8, desk) + statusMark(hx + desk.role.length * 3 + 17, hy - 14, desk);
+      TAGS[desk.role] = { x: hx, y: hy - 8, w: desk.role.length * 6 + 18, at: null };
       if (desk.note && (desk.state === "failed" || desk.state === "working")) over += bubble(hx, hy - 24, desk.note, desk.state === "failed");
       overlays.push(over);
       continue;
@@ -1139,20 +1318,91 @@ function drawScene() {
     labels.push({ desk, it, pl });
     if (pl.mode !== "desk" && pl.mode !== "game") agentHits.push(agentHit(desk, it.anchor[0], it.anchor[1]));
   }
-  // Name tags must not cover each other: the ones further back move up until they are clear.
+  // Labels must not cover each other: a name tag with what sits on its line (clock, file card) and the
+  // speech bubble above it. The ones further back move up until they are clear.
   labels.sort((a, b) => b.it.anchor[1] - a.it.anchor[1]);
+  const gate = TAGS["Quality gate"];
+  if (gate) placedTags.push({ x0: gate.x - gate.w / 2, x1: gate.x + gate.w / 2 + 40, y0: gate.y - 13, y1: gate.y + 1 });
   for (const { desk, it, pl } of labels) {
-    const width = desk.role.length * 6 + 18;
-    let above = Math.min(it.top, it.anchor[1] - 30) - 6;
-    const hits = () => placedTags.some(b => Math.abs(b.x - it.anchor[0]) < (b.w + width) / 2 + 2 && Math.abs(b.y - above) < 14);
-    for (let i = 0; i < 6 && hits(); i++) above -= 14;
-    placedTags.push({ x: it.anchor[0], y: above, w: width });
+    const width = desk.role.length * 6 + 18, x = it.anchor[0];
+    const natural = Math.min(it.top, it.anchor[1] - 30) - 6;
+    let above = natural;
+    const extra = lineWidth(desk, pl), bubbleH = pl.mode === "desk" && desk.note && ["working", "failed"].includes(desk.state) ? 30 : 0;
+    const box = y => ({ x0: x - width / 2, x1: x + width / 2 + extra, y0: y - 13 - bubbleH, y1: y + 1 });
+    const hits = () => { const b = box(above); return placedTags.some(o => b.x0 < o.x1 + 2 && o.x0 < b.x1 + 2 && b.y0 < o.y1 && o.y0 < b.y1); };
+    for (let i = 0; i < 8 && hits(); i++) above -= 14;
+    placedTags.push(box(above));
+    // A tag lifted clear of the others keeps a dotted line down to its agent.
+    if (natural - above > 10) overlays.push(`<path d="M${n1(x)} ${n1(above + 1)} V${n1(natural + 6)}" stroke="rgba(10,12,20,.75)" stroke-width="1.2" stroke-dasharray="2 2"/>`);
+    TAGS[desk.role] = { x, y: above, w: width, at: pl.mode };
     overlays.push(overlayFor(desk, it.anchor, it.top, pl, above));
   }
   svg.querySelector("#scene").innerHTML = depthSort(items).map(i => i.svg).join("");
   svg.querySelector("#overlay").innerHTML = overlays.join("");
   svg.querySelector("#agentHits").innerHTML = agentHits.join("");
+  tickClocks();
 }
+// How far right of the name tag its line goes while the agent works (clock, then the file card).
+function lineWidth(desk, pl) {
+  if (desk.state !== "working" || !live()) return 0;
+  let w = 46;
+  const files = EDITORS.includes(desk.role) && pl && pl.mode === "desk" ? changesFor(desk.role) : [];
+  if (files.length) {
+    const latest = files[0], name = latest.path.split("/").pop();
+    w += (Math.min(name.length, 24) + 16 + (files.length > 1 ? 10 : 0)) * 4.7 + 21;
+  }
+  return w;
+}
+// Once a second: the working agents' clocks next to their name tags, and the file each editor is
+// changing, on its desk. Redrawn on their own layer, so the scene itself is left alone.
+function tickClocks() {
+  const svg = document.getElementById("room");
+  if (!svg || !svg.querySelector("#clocks")) return;
+  const t = now();
+  let out = "";
+  for (const desk of desks()) {
+    const pos = TAGS[desk.role];
+    if (!pos || desk.state !== "working" || !live()) continue;
+    // Right of the name tag (free while an agent works): its clock, then the file it is editing.
+    let x = pos.x + pos.w / 2 + 3;
+    const secs = liveSeconds(desk);
+    if (secs != null) {
+      const text = fmtS(secs), width = text.length * 5.6 + 10;
+      out += `<g><rect x="${n1(x)}" y="${n1(pos.y - 12)}" width="${n1(width)}" height="13" rx="6.5" fill="#ffc94d" stroke="#1a1300" stroke-width=".6"/><text x="${n1(x + width / 2)}" y="${n1(pos.y - 3)}" font-size="5.8" text-anchor="middle" fill="#1a1300">${esc(text)}</text></g>`;
+      x += width + 3;
+    }
+    if (!EDITORS.includes(desk.role) || pos.at !== "desk") continue;
+    const files = changesFor(desk.role);
+    if (!files.length) continue;
+    const latest = files[0], fresh = latest.mtime && t - latest.mtime < 6;
+    const name = latest.path.split("/").pop(), label = name.length > 24 ? name.slice(0, 23) + "…" : name;
+    const delta = latest.status === "??" || latest.status === "A" ? "new" : latest.status === "D" ? "deleted" : `+${latest.added ?? "?"} −${latest.removed ?? "?"}`;
+    const more = files.length > 1 ? ` · ${files.length} files` : "";
+    const text = `${label} ${delta}${more}`, width = text.length * 4.7 + 18, top = pos.y - 12;
+    out += `<g class="${fresh ? "pulse" : ""}"><rect x="${n1(x)}" y="${n1(top)}" width="${n1(width)}" height="13" rx="4" fill="${fresh ? "#fff7d6" : "#f4f1de"}" stroke="#2a2733" stroke-width=".7"/>`
+      + `<path d="M${n1(x + 4)} ${n1(top + 2.5)} h4.6 l2 2 v6 h-6.6 Z" fill="#fff" stroke="#2a2733" stroke-width=".6"/>`
+      + `<text x="${n1(x + 14)}" y="${n1(top + 8.8)}" font-size="4.9" fill="#1a1a22">${esc(text)}</text></g>`;
+  }
+  if (out !== CLOCKS_KEY) { svg.querySelector("#clocks").innerHTML = out; CLOCKS_KEY = out; }
+  document.querySelectorAll("[data-clock]").forEach(el => { const v = fmtS(liveSeconds(deskOf(el.dataset.clock))); if (el.textContent !== v) el.textContent = v; });
+  document.querySelectorAll("[data-ago]").forEach(el => { const v = ago(t - Number(el.dataset.ago)); if (el.textContent !== v) el.textContent = v; });
+  document.querySelectorAll(".filebtn").forEach(b => b.classList.toggle("fresh", live() && t - lastTouch(b.dataset.role) < 10));
+}
+function deskHitAreas() {
+  const hits = [];
+  for (const desk of desks()) {
+    if (desk.kind === "machine") {
+      const f = OFFICE.FURNITURE.find(x => x.id === "gate"), [hx, hy] = iso(f.x + 0.55, f.y + 0.45, 54);
+      hits.push(hitArea(desk, hx, hy + 30));
+    } else if (OFFICE.SEATS[desk.role]) {
+      const seat = OFFICE.SEATS[desk.role], [sx, sy] = iso(seat.x, seat.y, 12);
+      hits.push(hitArea(desk, sx, sy));
+    }
+  }
+  return hits;
+}
+// Only the labels change with a desk's state; keep the elements (and keyboard focus) when nothing did.
+function refreshDeskHits() { setHTML(document.querySelector("#deskHits"), deskHitAreas().join("")); }
 function hitArea(desk, hx, hy) {
   return `<g class="spot" data-role="${esc(desk.role)}" tabindex="0" role="button" aria-label="${esc(desk.role)}: ${esc(STATE_LABEL[desk.state] || desk.state)}. Open details."><rect class="hit" x="${(hx - 64).toFixed(1)}" y="${(hy - 96).toFixed(1)}" width="128" height="132" rx="10"/></g>`;
 }
@@ -1184,31 +1434,39 @@ function renderSide() {
   if (!DATA.ticket) {
     html = `<div class="empty">No run yet. Start <code>/android-workflow</code> in this app and the office comes alive.</div>`;
   } else {
-    html = `<div class="stats"><div class="stat"><span>Status</span><b>${chip(DATA.status || "idle")}</b></div><div class="stat"><span>Time</span><b>${fmtS(t.wall_time_seconds)}</b></div><div class="stat"><span>Tokens</span><b>${fmtT(t.tokens)}</b></div></div>`;
+    html = `<div class="stats"><div class="stat"><span>Status</span><b>${chip(runStatus())}</b></div><div class="stat"><span>Time</span><b data-clock="Orchestrator">${fmtS(liveSeconds(deskOf("Orchestrator")))}</b></div><div class="stat"><span>Tokens</span><b>${fmtT(t.tokens)}</b></div></div>`;
     if (DATA.pr) html += `<div class="alert ${(DATA.draft || []).length ? "warn" : "ok"}"><b>${(DATA.draft || []).length ? "Draft PR" : "Pull request"}:</b> <a href="${esc(DATA.pr)}" target="_blank" rel="noopener">${esc(DATA.pr)}</a></div>`;
     if (DATA.status === "paused") html += `<div class="alert warn"><b>Waiting for you in the chat.</b><br>${esc(DATA.question || "")}</div>`;
     if ((DATA.draft || []).length) html += `<div class="alert bad"><b>Still open:</b><ul>${DATA.draft.map(i => `<li>${esc(i)}</li>`).join("")}</ul></div>`;
   }
-  document.getElementById("summary").innerHTML = html;
-  document.getElementById("files").innerHTML = DATA.ticket ? ROLES.map(role => {
+  setHTML(document.getElementById("summary"), html);
+  setHTML(document.getElementById("files"), DATA.ticket ? roles().map(role => {
     const desk = deskOf(role), files = (DATA.artifacts || {})[role] || [];
     const media = (DATA.media.before || []).length + (DATA.media.after || []).length;
     const bits = files.map(f => f.label);
     if (role === "Device" && media) bits.unshift(`${media} screenshot(s)`);
     if (role === "Quality gate" && (DATA.logs || []).length) bits.push(`${DATA.logs.length} log(s)`);
+    const edits = role === "Tech Lead" ? 0 : changesFor(role).length;
+    if (edits) bits.unshift(`${edits} changed file(s)`);
     return `<button class="filebtn" data-role="${esc(role)}">${avatar(role, desk.state)}<div><div class="who">${esc(role)}</div><div class="what">${esc(bits.join(" · ") || "nothing yet")}</div></div></button>`;
-  }).join("") : "";
-  document.querySelectorAll(".filebtn").forEach(b => b.addEventListener("click", () => openDrawer(b.dataset.role)));
+  }).join("") : "");
   const rows = (DATA.timeline || []).slice().reverse();
-  document.getElementById("feed").innerHTML = rows.length ? rows.map(r => {
+  const feed = document.getElementById("feed"), scroll = feed.scrollTop;
+  setHTML(feed, rows.length ? rows.map(r => {
     const role = ROLE_ALIAS[r.role] || r.role;
     return `<div class="msg" tabindex="0" data-role="${esc(role)}">${avatar(role)}<div class="body"><div class="head"><b>${esc(r.role)}</b>${chip(r.status)}<span class="time">${esc(r.time)}</span></div>${r.note ? `<div class="text">${esc(r.note)}</div>` : ""}</div></div>`;
-  }).join("") : `<div class="empty">Nothing has happened yet.</div>`;
-  document.querySelectorAll(".msg").forEach(m => {
-    m.addEventListener("click", () => openDrawer(m.dataset.role));
-    m.addEventListener("keydown", e => { if (e.key === "Enter") openDrawer(m.dataset.role); });
-  });
-  document.getElementById("foot").textContent = `Updated ${DATA.generated_at}` + (live() ? " · refreshes every 3s" : "");
+  }).join("") : `<div class="empty">Nothing has happened yet.</div>`);
+  feed.scrollTop = scroll;
+  setHTML(document.getElementById("foot"), live() ? `<span class="livedot"></span>Live · updated ${esc(DATA.generated_at)}` : `Updated ${esc(DATA.generated_at)}`);
+}
+// Replace only what changed, so a refresh never flickers or drops the reader's place.
+const LAST_HTML = new WeakMap();
+function setHTML(el, html) { if (el && LAST_HTML.get(el) !== html) { el.innerHTML = html; LAST_HTML.set(el, html); } }
+function bindSide() {  // delegated once: the side panel is redrawn in place
+  const open = e => { const el = e.target.closest && e.target.closest(".filebtn, .msg"); if (el) openDrawer(el.dataset.role); };
+  document.getElementById("files").addEventListener("click", open);
+  document.getElementById("feed").addEventListener("click", open);
+  document.getElementById("feed").addEventListener("keydown", e => { if (e.key === "Enter") open(e); });
 }
 
 /* ---------- renderers ---------- */
@@ -1347,8 +1605,21 @@ function mediaView() {
     return `<div class="pair">${cell("before", n)}${cell("after", n)}</div>`;
   }).join("");
 }
+function changesView(role) {
+  const items = changesFor(role), t = now();
+  if (!items.length) return `<p class="muted">No file changed yet.</p>`;
+  const owners = (DATA.team && DATA.team.owners) || {};
+  const intro = role === "Tech Lead" ? "Every file the team's change touches, with the slice that owns it." : "Files this agent is changing, newest edit first. The list updates by itself.";
+  return `<p class="muted">${intro}</p>` + items.map(c => {
+    const delta = c.status === "??" || c.status === "A" ? `<span class="plus">new${c.added != null ? ` +${c.added}` : ""}</span>` : c.status === "D" ? `<span class="minus">deleted</span>`
+      : `<span><span class="plus">+${c.added ?? "?"}</span> <span class="minus">−${c.removed ?? "?"}</span></span>`;
+    const owner = role === "Tech Lead" ? `<span class="ago">${esc(owners[c.path] || "unowned")}</span>` : "";
+    return `<div class="change ${c.mtime && t - c.mtime < 6 ? "fresh" : ""}"><span class="chip">${esc(c.status === "??" ? "new" : c.status)}</span><code>${esc(c.path)}</code>${delta}${owner || `<span class="ago" ${c.mtime ? `data-ago="${c.mtime}"` : ""}>${c.mtime ? ago(t - c.mtime) : ""}</span>`}</div>`;
+  }).join("");
+}
 function tabsFor(role) {
   const tabs = ((DATA.artifacts || {})[role] || []).map(a => ({ id: a.name, label: a.label, a }));
+  if (EDITORS.includes(role) && changesFor(role).length) tabs.unshift({ id: "changes", label: `Live changes (${changesFor(role).length})`, render: () => changesView(role) });
   if (role === "Device") tabs.unshift({ id: "media", label: "Before / after", render: mediaView });
   if (role === "Quality gate" && (DATA.logs || []).length) tabs.push({ id: "logs", label: `Gradle logs (${DATA.logs.length})`, render: () => `<p class="muted">Full Gradle output of each gate run; opens in a new tab.</p>${DATA.logs.map(l => `<div class="item"><a href="${esc(l.src)}" target="_blank">${esc(l.name)}</a> <span class="loc">${fmtB(l.size)}</span></div>`).join("")}` });
   if (role === "Orchestrator") tabs.push({ id: "files", label: `All run files (${(DATA.files || []).length})`, render: () => (DATA.files || []).map(f => `<div class="item"><a href="${esc(f.src)}" target="_blank">${esc(f.rel || f.name)}</a> <span class="loc">${fmtB(f.size)}</span></div>`).join("") });
@@ -1357,21 +1628,28 @@ function tabsFor(role) {
 
 /* ---------- drawer ---------- */
 const drawer = document.getElementById("drawer"), scrim = document.getElementById("scrim");
-let refreshTimer = null;
-function openDrawer(role, tabId) {
+let refreshTimer = null, OPEN = null;
+const drawerOpen = () => drawer.classList.contains("open");
+// `refresh`: the run moved while the panel is open. Only the parts that changed are replaced and the
+// reader keeps their scroll position (and the before/after slider its place).
+function openDrawer(role, tabId, refresh) {
   const desk = deskOf(role), tabs = tabsFor(role), active = tabs.find(t => t.id === tabId) || tabs[0];
-  document.getElementById("dhead").innerHTML = `${avatar(role, desk.state)}<div><h3>${esc(role)}</h3><div class="sub">${chip(desk.state || "idle", STATE_LABEL[desk.state] || desk.state || "idle")}<span>${fmtS(desk.seconds)}</span><span>· ${fmtT(desk.tokens)} tokens</span></div></div><button class="close" aria-label="Close">×</button>`;
-  document.getElementById("dnote").innerHTML = desk.note ? esc(desk.note) : `<span class="muted">No note from this agent yet.</span>`;
-  document.getElementById("tabs").innerHTML = tabs.map(t => `<button class="tab ${t === active ? "on" : ""}" role="tab" aria-selected="${t === active}" data-tab="${esc(t.id)}">${esc(t.label)}</button>`).join("");
-  document.getElementById("dbody").innerHTML = active ? (active.render ? active.render() : renderArtifact(active.a)) : `<p class="muted">This agent has not written anything yet.</p>`;
-  document.getElementById("dbody").scrollTop = 0;
-  bindCompare();
+  setHTML(document.getElementById("dhead"), `${avatar(role, desk.state)}<div><h3>${esc(role)}</h3><div class="sub">${chip(desk.state || "idle", STATE_LABEL[desk.state] || desk.state || "idle")}<span data-clock="${esc(role)}">${fmtS(liveSeconds(desk))}</span><span>· ${fmtT(desk.tokens)} tokens</span></div></div><button class="close" aria-label="Close">×</button>`);
+  setHTML(document.getElementById("dnote"), desk.note ? esc(desk.note) : `<span class="muted">No note from this agent yet.</span>`);
+  setHTML(document.getElementById("tabs"), tabs.map(t => `<button class="tab ${t === active ? "on" : ""}" role="tab" aria-selected="${t === active}" data-tab="${esc(t.id)}">${esc(t.label)}</button>`).join(""));
+  const body = document.getElementById("dbody"), scroll = body.scrollTop, before = LAST_HTML.get(body);
+  setHTML(body, active ? (active.render ? active.render() : renderArtifact(active.a)) : `<p class="muted">This agent has not written anything yet.</p>`);
+  const changed = LAST_HTML.get(body) !== before;
+  if (!refresh) body.scrollTop = 0; else body.scrollTop = scroll;
+  if (changed || !refresh) bindCompare();
   const a = active && active.a;
-  document.getElementById("dfoot").innerHTML = (a ? `<a class="btn" href="${esc(a.src)}" target="_blank">Open file ↗</a><button class="btn" id="copy">Copy path</button><span>${esc(a.name)} · ${fmtB(a.size)}${a.truncated ? " · preview truncated" : ""}</span>` : "") + (live() ? `<span class="paused">Live updates paused while this panel is open</span>` : "");
+  setHTML(document.getElementById("dfoot"), (a ? `<a class="btn" href="${esc(a.src)}" target="_blank">Open file ↗</a><button class="btn" id="copy">Copy path</button><span>${esc(a.name)} · ${fmtB(a.size)}${a.truncated ? " · preview truncated" : ""}</span>` : "") + (live() ? `<span class="paused"><span class="livedot"></span>Live</span>` : ""));
   const copy = document.getElementById("copy");
   if (copy && a) copy.onclick = () => navigator.clipboard && navigator.clipboard.writeText(decodeURIComponent(new URL(a.uri).pathname)).then(() => { copy.textContent = "Copied"; });
   document.querySelector("#dhead .close").onclick = closeDrawer;
   document.querySelectorAll(".tab").forEach(b => b.onclick = () => openDrawer(role, b.dataset.tab));
+  OPEN = { role, tab: active ? active.id : null };
+  if (refresh) return;
   drawer.classList.add("open"); scrim.classList.add("open"); drawer.setAttribute("aria-hidden", "false");
   history.replaceState(null, "", `#agent=${encodeURIComponent(role)}${active ? `&tab=${encodeURIComponent(active.id)}` : ""}`);
   clearTimeout(refreshTimer);
@@ -1379,35 +1657,77 @@ function openDrawer(role, tabId) {
 function closeDrawer() {
   drawer.classList.remove("open"); scrim.classList.remove("open"); drawer.setAttribute("aria-hidden", "true");
   history.replaceState(null, "", location.pathname);
+  OPEN = null;
   scheduleRefresh();
 }
-function scheduleRefresh() { clearTimeout(refreshTimer); if (live()) refreshTimer = setTimeout(() => location.reload(), 3000); }
+// A page with no data script (a past run's own page) falls back to reloading while its run is live.
+function scheduleRefresh() { clearTimeout(refreshTimer); if (live() && !DATA.live_src) refreshTimer = setTimeout(() => location.reload(), 3000); }
 scrim.onclick = closeDrawer;
-document.addEventListener("keydown", e => { if (e.key === "Escape" && drawer.classList.contains("open")) closeDrawer(); });
+document.addEventListener("keydown", e => { if (e.key === "Escape" && drawerOpen()) closeDrawer(); });
+
+/* ---------- live updates: load the data script, redraw in place ---------- */
+const keyOf = d => JSON.stringify({ ...d, generated_at: 0 });
+let LAST_KEY = keyOf(DATA), pollTimer = null, pollFailures = 0;
+function applyData(next) {
+  if (!next || typeof next !== "object") return;
+  const key = keyOf(next);
+  if (key === LAST_KEY) return;
+  const newTicket = (next.ticket || null) !== (DATA.ticket || null);
+  DATA = next; LAST_KEY = key;
+  if (newTicket) { OPEN = null; if (drawerOpen()) closeDrawer(); ROSTER_KEY = ""; }
+  renderHeader();
+  renderHistory();
+  renderSide();
+  const roster = rosterOf().join();
+  if (roster !== ROSTER_KEY) { ROSTER_KEY = roster; OFFICE = SIM.build(rosterOf()); renderRoom(); }
+  else { FURNITURE_ITEMS = null; SCENE_KEY = ""; refreshDeskHits(); drawScene(); }
+  if (OPEN && drawerOpen()) openDrawer(OPEN.role, OPEN.tab, true);
+  tickClocks();
+}
+window.officeData = next => { pollFailures = 0; try { applyData(next); } catch (e) { console.error(e); } };
+function schedulePoll() { clearTimeout(pollTimer); pollTimer = setTimeout(poll, live() ? 2000 : 6000); }
+function poll() {
+  if (!DATA.live_src) return;
+  const script = document.createElement("script");
+  script.src = `${DATA.live_src}?t=${Date.now()}`;
+  script.onload = () => { script.remove(); schedulePoll(); };
+  script.onerror = () => {
+    script.remove();
+    // The browser refuses the data script: reload the page instead, as long as no panel is open.
+    if (++pollFailures >= 3 && live() && !drawerOpen()) location.reload(); else schedulePoll();
+  };
+  document.head.appendChild(script);
+}
 
 /* ---------- boot ---------- */
-document.getElementById("ticket").textContent = DATA.ticket || "";
-document.getElementById("ticketTitle").textContent = DATA.title || "";
-document.getElementById("statusChip").innerHTML = chip(DATA.status || "idle");
-document.title = DATA.ticket ? `${DATA.ticket} · Agent Office` : "Agent Office";
+function renderHeader() {
+  document.getElementById("ticket").textContent = DATA.ticket || "";
+  document.getElementById("ticketTitle").textContent = DATA.title || "";
+  setHTML(document.getElementById("statusChip"), chip(runStatus()));
+  document.title = DATA.ticket ? `${DATA.ticket} · Agent Office` : "Agent Office";
+}
 function renderHistory() {
   const runs = DATA.history || [];
+  const picker = document.getElementById("runPicker"), wrap = document.getElementById("pickerWrap");
   if (runs.length > 1 || (runs.length && !DATA.is_current)) {
-    const picker = document.getElementById("runPicker");
-    picker.innerHTML = runs.map(r => `<option value="${esc(r.href)}" ${r.ticket === DATA.ticket ? "selected" : ""}>${esc(r.ticket)}${r.current ? " (current)" : ""} · ${esc(r.status)}${r.pr ? (r.draft ? " · draft PR" : " · PR") : ""}${r.updated ? " · " + esc(r.updated) : ""}</option>`).join("");
+    if (document.activeElement !== picker) {
+      setHTML(picker, runs.map(r => `<option value="${esc(r.href)}" ${r.ticket === DATA.ticket ? "selected" : ""}>${esc(r.ticket)}${r.current ? " (current)" : ""} · ${esc(r.status)}${r.pr ? (r.draft ? " · draft PR" : " · PR") : ""}${r.updated ? " · " + esc(r.updated) : ""}</option>`).join(""));
+    }
     picker.onchange = () => { location.href = picker.value; };
-    document.getElementById("pickerWrap").hidden = false;
-  }
-  const current = runs.find(r => r.current);
+    wrap.hidden = false;
+  } else wrap.hidden = true;
+  const current = runs.find(r => r.current), bar = document.getElementById("pastbar");
   if (DATA.ticket && !DATA.is_current) {
-    const bar = document.getElementById("pastbar");
-    bar.innerHTML = `You are viewing a past run (${esc(DATA.ticket)}).${current ? ` <a href="${esc(current.href)}">Go to the current run (${esc(current.ticket)}) →</a>` : ""}`;
+    setHTML(bar, `You are viewing a past run (${esc(DATA.ticket)}).${current ? ` <a href="${esc(current.href)}">Go to the current run (${esc(current.ticket)}) →</a>` : ""}`);
     bar.hidden = false;
-  }
+  } else bar.hidden = true;
 }
+renderHeader();
 renderHistory();
 renderRoom();
 renderSide();
+bindSide();
+setInterval(() => { if (!document.hidden) tickClocks(); }, 1000);
 const hash = new URLSearchParams(location.hash.slice(1));
 if (hash.get("agent")) {
   // Reopened after a reload: show the panel at once, no slide-in.
@@ -1415,6 +1735,7 @@ if (hash.get("agent")) {
   openDrawer(hash.get("agent"), hash.get("tab"));
   requestAnimationFrame(() => requestAnimationFrame(() => { drawer.classList.remove("instant"); scrim.classList.remove("instant"); }));
 } else scheduleRefresh();
+poll();
 </script>
 </body>
 </html>

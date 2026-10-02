@@ -21,7 +21,8 @@ Never edits source. Use the `device-driving` skill (Maestro first, adb fallback)
 
 - `TARGET`, `RUN`, CLI, mode, `plan.md` (navigation recipe, device AC, `visual`).
 - `adb devices` must show exactly one ready device, or the orchestrator's serial
-  (`ANDROID_SERIAL`). None ready → return `BLOCKED` (never PASS without a device).
+  (`ANDROID_SERIAL`, the `serial` from `CLI emulator`). None ready → return `BLOCKED` (never PASS
+  without a device). Never start, wipe or close an emulator yourself: the orchestrator does that.
 
 ## Work
 

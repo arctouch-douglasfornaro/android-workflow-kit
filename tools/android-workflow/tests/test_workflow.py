@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import os
+
+# Commands start the office watcher for a live run; tests never leave background processes behind.
+os.environ["ANDROID_WORKFLOW_NO_WATCH"] = "1"
+
 import json
 import re
 import shutil
@@ -262,7 +267,7 @@ class HostDrivenTests(unittest.TestCase):
                 value = value.strip()
                 meta[key] = json.loads(value) if value.startswith('"') else value
             roles[meta["name"]] = meta
-        self.assertEqual(set(roles), {"aw-setup", "aw-planner", "aw-implementer", "aw-reviewer", "aw-device", "aw-delivery"})
+        self.assertEqual(set(roles), {"aw-setup", "aw-planner", "aw-tech-lead", "aw-implementer", "aw-reviewer", "aw-device", "aw-delivery"})
         models = {"strong": "opus", "standard": "sonnet", "fast": "haiku"}
         efforts = {"strong": "high", "standard": "medium", "fast": "low"}
         for host in (".claude", ".cursor", ".gemini"):
@@ -1407,7 +1412,7 @@ if __name__ == "__main__":
 
 def office_data(root: Path) -> tuple[dict, str]:
     html = (root / ".ai/workflow/office.html").read_text(encoding="utf-8")
-    payload = re.search(r"const DATA = (.*);\n", html).group(1)
+    payload = re.search(r"let DATA = (.*);\n", html).group(1)
     return json.loads(payload), html
 
 
@@ -1487,7 +1492,7 @@ class OfficeTests(unittest.TestCase):
             main(["office", "--target", str(root), "--no-open"])
             current, _ = office_data(root)
             html = (root / ".ai/workflow/H-1/office.html").read_text(encoding="utf-8")
-            past = json.loads(re.search(r"const DATA = (.*);\n", html).group(1))
+            past = json.loads(re.search(r"let DATA = (.*);\n", html).group(1))
         history = {item["ticket"]: item for item in current["history"]}
         self.assertEqual(set(history), {"H-1", "H-2"})
         self.assertEqual(current["history"][0]["ticket"], "H-2")

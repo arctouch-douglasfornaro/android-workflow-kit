@@ -34,6 +34,9 @@ The only planning role for `/android-workflow`. One pass, short output.
 5. Write the **navigation recipe** for the device agent: launch activity or deep link and the
    taps to reach the changed surface, grounded in code (NavHost routes, intents, test tags).
 6. Test plan: which unit/Compose/Robolectric tests prove each AC and fail without the change.
+7. Parallel work (standard and full levels): can the change split into parts that build and test on
+   their own and never edit the same file (different modules, data layer vs UI)? List each part
+   with its files, or write `single`. The orchestrator uses a team only for 2+ parts and 4+ files.
 
 ## Writes
 
@@ -44,12 +47,13 @@ than `domain` routes through Device.
 
 `RUN/plan.md` with headings exactly: Objective, Steps, Out of scope, Verification.
 Put under Verification: AC table (AC → proof: unit | device | both), `device_required`,
-`visual`, navigation recipe, affected modules. ≤80 lines.
+`visual`, navigation recipe, affected modules, and a `Parallel work` line (`single` or the parts
+with their files). ≤80 lines.
 
 ## Return (≤10 lines)
 
 `READY | NEEDS_INPUT`, business questions (batched), affected modules, top files,
-`device_required`, `visual`, path of `plan.md`.
+`device_required`, `visual`, parallel parts (`single` or their count and file total), path of `plan.md`.
 
 ## Never
 

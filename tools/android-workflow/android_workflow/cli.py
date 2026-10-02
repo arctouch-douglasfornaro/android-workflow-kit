@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -34,6 +35,7 @@ STAGE_ROLES = {
     "T2": "Localizer",
     "T3": "Planner",
     "T4": "Implementer",
+    "T4L": "Tech Lead",
     "T5": "Quality gate",
     "T6": "Reviewer",
     "T7": "Device",
@@ -45,7 +47,7 @@ STAGE_ROLES = {
 # Agents that work inside a stage; the log shows the agent that actually ran.
 AGENT_STAGES = {
     "setup": "T0", "planner": "T3", "implementer": "T4", "quality gate": "T5",
-    "gate": "T5", "reviewer": "T6", "device": "T7", "delivery": "T8",
+    "gate": "T5", "reviewer": "T6", "device": "T7", "delivery": "T8", "tech lead": "T4L",
 }
 
 
@@ -132,8 +134,11 @@ def read_json(path: Path) -> dict[str, Any]:
 
 
 def write_json(path: Path, value: dict[str, Any]) -> None:
+    """Atomic: the office watcher reads these files while commands write them."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
 
 
 def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -2098,7 +2103,41 @@ def save_state(target: Path, state: dict[str, Any], metrics: dict[str, Any] | No
         write_json(run_dir(target) / "stage-metrics.json", metrics)
 
 
-def log_stage(
+OPENING_STATUSES = frozenset({"started", "running"})
+
+
+def open_clock(entry: dict[str, Any], now: float) -> None:
+    """Mark when an agent began, so the office can count its time second by second."""
+    entry.setdefault("running_since", round(now, 3))
+
+
+def close_clock(entry: dict[str, Any], now: float) -> float | None:
+    """Seconds since the matching `started`, or None when the stage was never opened."""
+    since = entry.pop("running_since", None)
+    return max(now - float(since), 0) if isinstance(since, (int, float)) else None
+
+
+@contextlib.contextmanager
+def run_lock(target: Path):
+    """One writer at a time for a run's state files: parallel agents log at the same moment, and a
+    read-modify-write without it loses one of the updates."""
+    path = run_dir(target) / ".state.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def log_stage(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    target = args[0] if args else kwargs["target"]
+    with run_lock(target):
+        return _log_stage(*args, **kwargs)
+
+
+def _log_stage(
     target: Path,
     stage: str,
     status: str,
@@ -2108,34 +2147,58 @@ def log_stage(
     tokens: int | None = None,
     seconds: float | None = None,
     wait_seconds: float | None = None,
+    slice_id: str | None = None,
 ) -> dict[str, Any]:
     """Record a host stage by role name (or stage id).
 
-    Without `seconds`, its time is the gap since the last recorded event. `wait_seconds` is time
-    the run spent waiting on a human inside that gap; it is kept apart and not counted as work.
+    Without `seconds`, its time runs from the stage's `started` (else the gap since the last recorded
+    event). `wait_seconds` is time the run spent waiting on a human inside that gap; it is kept apart
+    and not counted as work. `slice_id` (Implementer only) records one Implementer of a team.
     """
+    from android_workflow.team import normalize_slice, slice_role
+
     agent_dir = run_dir(target)
     stage, role = resolve_stage(stage)
-    append_stage_log(agent_dir, stage, status, actor, note, role=role)
+    if slice_id is not None:
+        if stage != "T4":
+            raise ValueError("--slice is only for the Implementer")
+        slice_id = normalize_slice(slice_id)
+    shown = slice_role(slice_id) if slice_id else role
+    append_stage_log(agent_dir, stage, status, actor, note, role=shown)
     if stage == "T4" and files:
         kept = [
             item
             for item in files
             if ".ai" not in Path(item).parts
         ]
+        if kept and slice_id:
+            # Parallel Implementers each report their own files: keep the union, never the last one.
+            previous = read_json(agent_dir / "t4-files.json").get("files", []) if (agent_dir / "t4-files.json").exists() else []
+            kept = list(dict.fromkeys([*previous, *kept]))
         if kept:
             write_json(agent_dir / "t4-files.json", {"files": kept})
     state = load_state(target)
     metrics = read_json(agent_dir / "stage-metrics.json")
+    now = time.time()
+    if slice_id:
+        return _log_slice(target, agent_dir, state, metrics, slice_id, status, note, files, tokens, seconds, wait_seconds, now)
     state.setdefault("stages", {}).setdefault(stage, {})
+    previous = str(state["stages"][stage].get("status") or "")
     state["stages"][stage]["status"] = status
     if note:
         state["stages"][stage]["note"] = note
-    if status == "started":
-        # A marker for the office page: the agent's time is measured from here to its `completed`.
-        seconds = None
-    elif seconds is None and state.get("updated_at"):
-        seconds = time.time() - int(state["updated_at"])
+    entry = metrics.setdefault("stages", {}).setdefault(stage, {})
+    if status in OPENING_STATUSES:
+        # A marker: the agent's time is measured from here to its `completed`, and the office counts it live.
+        if status == "started":
+            seconds = None
+        if previous not in OPENING_STATUSES:
+            entry.pop("running_since", None)  # a clock left open by a crashed round starts over
+        open_clock(entry, now)
+    else:
+        since = close_clock(entry, now)
+        if seconds is None:
+            seconds = since if since is not None else (now - int(state["updated_at"]) if state.get("updated_at") else None)
     if wait_seconds and seconds is not None:
         seconds = max(seconds - wait_seconds, 0)
     record_stage_metrics(
@@ -2146,6 +2209,11 @@ def log_stage(
         entry = metrics["stages"][stage]
         entry["human_wait_seconds"] = round((entry.get("human_wait_seconds") or 0) + wait_seconds, 3)
     if status == "completed" and stage == "T4":
+        state["status"] = "running"
+        state["current_stage"] = "T5"
+    elif status == "completed" and stage == "T4L" and team_integrated(agent_dir, state):
+        # The Tech Lead's integration ends the team's implementation: the gate is next.
+        state["stages"].setdefault("T4", {}).update({"status": "completed", "integrated": True})
         state["status"] = "running"
         state["current_stage"] = "T5"
     elif status == "completed" and stage in {"T5", "T6", "T7", "T8"} and state.get("status") != "completed":
@@ -2164,6 +2232,128 @@ def log_stage(
             **state,
             "warnings": [f"{role} logged without --tokens: pass the total the agent's result reports"],
         }
+    return state
+
+
+def mark_gate_started(target: Path) -> None:
+    """The gate can take minutes: show it working (and its clock running) while it does.
+
+    Its pid is recorded, so a gate killed by a signal (a host's command timeout) is not shown as
+    running forever."""
+    agent_dir = run_dir(target)
+    with run_lock(target):
+        state = load_state(target)
+        metrics = read_json(agent_dir / "stage-metrics.json")
+        previous = (state.get("stages") or {}).get("T5") or {}
+        state.setdefault("stages", {})["T5"] = {**previous, "status": "running", "pid": os.getpid()}
+        entry = metrics.setdefault("stages", {}).setdefault("T5", {})
+        entry.pop("running_since", None)
+        open_clock(entry, time.time())
+        append_stage_log(agent_dir, "T5", "started", "cli", "running the checks")
+        save_state(target, state, metrics)
+    refresh_office(target)
+
+
+def mark_gate_interrupted(target: Path) -> None:
+    """A gate that crashed or was stopped must not look like it is still running."""
+    try:
+        agent_dir = run_dir(target)
+        with run_lock(target):
+            state = load_state(target)
+            metrics = read_json(agent_dir / "stage-metrics.json")
+            state.setdefault("stages", {})["T5"] = {"status": "failed", "note": "the gate did not finish"}
+            close_clock(metrics.setdefault("stages", {}).setdefault("T5", {}), time.time())
+            append_stage_log(agent_dir, "T5", "failed", "cli", "the gate did not finish")
+            save_state(target, state, metrics)
+    except (OSError, ValueError):
+        pass
+
+
+def team_integrated(agent_dir: Path, state: dict[str, Any]) -> bool:
+    """True once every slice of the team plan has completed and none is still working."""
+    from android_workflow.team import read_plan
+
+    plan = read_plan(agent_dir)
+    if not plan or len(plan["slices"]) < 2:
+        return False
+    slices = ((state.get("stages") or {}).get("T4") or {}).get("slices") or {}
+    return all((slices.get(item["id"]) or {}).get("status") == "completed" for item in plan["slices"])
+
+
+def _log_slice(
+    target: Path,
+    agent_dir: Path,
+    state: dict[str, Any],
+    metrics: dict[str, Any],
+    slice_id: str,
+    status: str,
+    note: str,
+    files: list[str] | None,
+    tokens: int | None,
+    seconds: float | None,
+    wait_seconds: float | None,
+    now: float,
+) -> dict[str, Any]:
+    """One Implementer of a team. Its own time and tokens are kept per slice; the stage's wall time is
+    the window in which any slice was working (parallel work is not counted twice), its tokens the sum."""
+    from android_workflow.team import slice_role
+
+    stage_state = state.setdefault("stages", {}).setdefault("T4", {})
+    slices_state = stage_state.setdefault("slices", {})
+    item = slices_state.setdefault(slice_id, {})
+    item["status"] = status
+    if note:
+        item["note"] = note
+    stage = metrics.setdefault("stages", {}).setdefault("T4", {})
+    entry = stage.setdefault("slices", {}).setdefault(slice_id, {})
+    if status in OPENING_STATUSES:
+        open_clock(entry, now)
+        open_clock(stage, now)
+        own = None
+    else:
+        since = close_clock(entry, now)
+        own = seconds if seconds is not None else since
+        if wait_seconds and own is not None:
+            own = max(own - wait_seconds, 0)
+    entry["status"] = status
+    if own is not None:
+        entry["wall_time_seconds"] = round((entry.get("wall_time_seconds") or 0) + own, 3)
+    else:
+        entry.setdefault("wall_time_seconds", None)
+    if tokens is not None:
+        entry["tokens"] = (entry.get("tokens") or 0) + tokens
+        stage["tokens"] = (stage.get("tokens") or 0) + tokens
+    else:
+        entry.setdefault("tokens", None)
+        stage.setdefault("tokens", None)
+    if status not in OPENING_STATUSES:
+        entry["attempts"] = (entry.get("attempts") or 0) + 1
+        if files:
+            entry["files"] = list(dict.fromkeys([*(entry.get("files") or []), *[f for f in files if ".ai" not in Path(f).parts]]))
+    still_working = any(
+        (other.get("status") in OPENING_STATUSES) for name, other in slices_state.items() if name != slice_id
+    )
+    if status in OPENING_STATUSES:
+        stage_state["status"] = "started"
+        stage["status"] = "started"
+    elif not still_working:
+        window = close_clock(stage, now)
+        if window is not None:
+            stage["wall_time_seconds"] = round((stage.get("wall_time_seconds") or 0) + window, 3)
+        stage["attempts"] = (stage.get("attempts") or 0) + 1
+        stage["status"] = status
+        if status == "completed" and stage_state.get("integrated"):
+            # A fix round after the Tech Lead integrated: the change goes straight back to the gate.
+            stage_state["status"] = "completed"
+            state["status"] = "running"
+            state["current_stage"] = "T5"
+        else:
+            # Every Implementer is done; the Tech Lead integrates their work before the gate.
+            stage_state["status"] = "integrating" if status == "completed" else status
+    stage.setdefault("wall_time_seconds", None)
+    save_state(target, state, metrics)
+    if status == "completed" and tokens is None:
+        return {**state, "warnings": [f"{slice_role(slice_id)} logged without --tokens: pass the total the agent's result reports"]}
     return state
 
 
@@ -2256,7 +2446,7 @@ def finish_run(
         state["stages"]["T7"] = {"status": "skipped", "reason": skip_device}
         append_stage_log(agent_dir, "T7", "skipped", "host", skip_device)
     changed = source_changes(target)
-    state["stages"]["T4"] = {"status": "completed", "files": changed}
+    state["stages"]["T4"] = {**(state["stages"].get("T4") or {}), "status": "completed", "files": changed}
     state["stages"]["T8"] = {"status": "completed", "ready_for_review": not issues}
     state["stages"]["T9"] = {"status": "completed"}
     delivery_started = time.monotonic()
@@ -2462,6 +2652,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--wait-seconds", type=float, dest="wait_seconds",
         help="time inside this stage spent waiting on the human; excluded from the stage's work time",
     )
+    log_parser.add_argument(
+        "--slice", dest="slice_id",
+        help="Implementer of a team: the slice id from team-plan.json (S1, S2, S3)",
+    )
     finish_parser = subparsers.add_parser("finish")
     finish_parser.add_argument("--target", required=True, type=Path)
     finish_parser.add_argument(
@@ -2509,6 +2703,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--stale", nargs="?", type=float, const=24.0, metavar="HOURS",
         help="remove unfinished runs (awaiting_host/paused/running) idle for HOURS (default 24)",
     )
+    team_parser = subparsers.add_parser("team", help="check the Tech Lead's team-plan.json, or who touched what")
+    team_parser.add_argument("--target", required=True, type=Path)
+    team_parser.add_argument("--check", action="store_true", help="after the Implementers: write team-report.json")
+    emulator_parser = subparsers.add_parser(
+        "emulator", help="start an existing emulator when no device is connected (and stop it at the end)",
+    )
+    emulator_parser.add_argument("--target", required=True, type=Path)
+    emulator_parser.add_argument("--wait", action="store_true", help="block until the device has booted")
+    emulator_parser.add_argument("--stop", action="store_true", help="close the emulator, only if the workflow started it")
+    emulator_parser.add_argument("--status", action="store_true", help="report without starting anything")
+    emulator_parser.add_argument("--avd", help="AVD to start (default: device.avd in the project overrides, else the first)")
+    emulator_parser.add_argument("--headless", action="store_true", help="start without a window")
+    emulator_parser.add_argument("--timeout", type=float, help="seconds --wait waits for the boot (default 300)")
     office_parser = subparsers.add_parser("office", help="open the page that shows the agents at work")
     office_parser.add_argument("--target", required=True, type=Path)
     office_parser.add_argument("--no-open", action="store_true", help="only print the page's path")
@@ -2537,36 +2744,59 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
     if args.command == "log":
         return log_stage(
             target, args.stage, args.status, args.note, args.actor, args.files, args.tokens, args.seconds,
-            args.wait_seconds,
+            args.wait_seconds, args.slice_id,
         ), 0
     if args.command == "gate":
-        report = run_quality_gate(target)
-        state = load_state(target)
-        metrics = read_json(run_dir(target) / "stage-metrics.json")
-        status = "completed" if report["status"] == "passed" else "escalated"
-        state["stages"]["T5"] = {"status": status, "gate": report["status"]}
-        record_stage_metrics(
-            metrics, "T5", status, seconds=report.get("duration_seconds"),
-        )
-        if status == "escalated":
-            state.update({"status": "escalated", "current_stage": "T5"})
-        else:
-            state.update({"status": "running", "current_stage": "T6"})
-        notes = [report["status"]]
-        if report.get("reason"):
-            notes.append(report["reason"])
-        if report.get("waivers"):
-            notes.append(f"{len(report['waivers'])} lint step(s) waived: findings only in untouched files")
-        formatted = (report.get("auto_format") or {}).get("formatted")
-        if formatted:
-            notes.append(f"auto-formatted {len(formatted)} file(s)")
-        append_stage_log(run_dir(target), "T5", status, "cli", "; ".join(notes))
-        save_state(target, state, metrics)
+        mark_gate_started(target)
+        import signal
+
+        def stopped(signum: int, _frame: Any) -> None:
+            raise SystemExit(128 + signum)  # a host timeout: unwind, so the gate is marked as not finished
+
+        previous_handlers = {}
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            try:
+                previous_handlers[sig] = signal.signal(sig, stopped)
+            except ValueError:  # not the main thread: nothing to install
+                pass
+        try:
+            report = run_quality_gate(target)
+        except BaseException:
+            mark_gate_interrupted(target)
+            raise
+        finally:
+            for sig, handler in previous_handlers.items():
+                signal.signal(sig, handler)
+        with run_lock(target):
+            state = load_state(target)
+            metrics = read_json(run_dir(target) / "stage-metrics.json")
+            status = "completed" if report["status"] == "passed" else "escalated"
+            state["stages"]["T5"] = {"status": status, "gate": report["status"]}
+            since = close_clock(metrics.setdefault("stages", {}).setdefault("T5", {}), time.time())
+            record_stage_metrics(
+                metrics, "T5", status,
+                seconds=report.get("duration_seconds") if report.get("duration_seconds") is not None else since,
+            )
+            if status == "escalated":
+                state.update({"status": "escalated", "current_stage": "T5"})
+            else:
+                state.update({"status": "running", "current_stage": "T6"})
+            notes = [report["status"]]
+            if report.get("reason"):
+                notes.append(report["reason"])
+            if report.get("waivers"):
+                notes.append(f"{len(report['waivers'])} lint step(s) waived: findings only in untouched files")
+            formatted = (report.get("auto_format") or {}).get("formatted")
+            if formatted:
+                notes.append(f"auto-formatted {len(formatted)} file(s)")
+            append_stage_log(run_dir(target), "T5", status, "cli", "; ".join(notes))
+            save_state(target, state, metrics)
         return {"gate": report, "run": state}, 0 if status == "completed" else 1
     if args.command == "status":
         return status_payload(target), 0
     if args.command == "finish":
-        return finish_run(target, skip_device=args.skip_device, draft=args.draft), 0
+        with run_lock(target):
+            return finish_run(target, skip_device=args.skip_device, draft=args.draft), 0
     if args.command == "prebuild":
         from android_workflow.prebuild import current_status, start_prebuild, wait_prebuild
 
@@ -2593,6 +2823,13 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
         current = next((item["ticket_id"] for item in runs if item["current"]), None)
         return {"runs": runs, "current": current}, 0
     if args.command == "clean":
+        from android_workflow.live import stop_watcher
+
+        if not args.ticket and args.stale is None:
+            from android_workflow.emulator import stop as stop_emulator
+
+            stop_watcher(target)  # every run goes: the office has nothing left to watch
+            stop_emulator(target)  # only one the workflow started; its record lives in the cache
         return clean_runs(target, ticket_id=args.ticket, stale_hours=args.stale), 0
     if args.command == "office":
         import webbrowser
@@ -2603,6 +2840,16 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
         if not args.no_open:
             webbrowser.open(path.as_uri())
         return {"office": str(path)}, 0
+    if args.command == "team":
+        from android_workflow.team import check_plan, team_report
+
+        if args.check:
+            return team_report(target), 0
+        return check_plan(target)
+    if args.command == "emulator":
+        from android_workflow.emulator import dispatch_emulator
+
+        return dispatch_emulator(target, args)
     if args.command == "evidence":
         from android_workflow.evidence import dispatch_evidence
 
@@ -2616,12 +2863,17 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
 
 
 def refresh_office(target: Path) -> None:
-    """Keep the office page in step with the run; a page problem never fails a workflow command."""
+    """Keep the office page in step with the run; a page problem never fails a workflow command.
+
+    While the run is live, a background watcher keeps the page current between commands too.
+    """
+    from android_workflow.live import ensure_watcher
     from android_workflow.office import render
 
     try:
         if (target / ".ai" / "workflow").is_dir():
             render(target)
+            ensure_watcher(target)
     except Exception:  # noqa: BLE001 - the page is a convenience, never a gate
         pass
 

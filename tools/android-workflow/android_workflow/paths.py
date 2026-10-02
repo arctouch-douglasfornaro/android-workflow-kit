@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import time
@@ -45,7 +46,10 @@ def set_current(target: Path, ticket_id: str, run_id: str | None = None) -> None
     payload: dict[str, Any] = {"ticket_id": ticket_slug(ticket_id)}
     if run_id:
         payload["run_id"] = run_id
-    current_pointer(target).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    pointer = current_pointer(target)
+    temporary = pointer.with_name(f".{pointer.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, pointer)
 
 
 def current_ticket_id(target: Path) -> str | None:

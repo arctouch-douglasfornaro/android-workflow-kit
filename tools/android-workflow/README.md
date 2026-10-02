@@ -16,12 +16,14 @@ How the workflow runs (stages, agents, levels, stops) is described in one place 
 | `resume --target APP --question-id Q --answer "…"` | Answers a business question that paused the run |
 | `update-spec --target APP --surfaces ui --acceptance "a\|b"` | Planner corrections; the route is recomputed |
 | `prebuild --target APP [--wait\|--status]` | Builds the unmodified app in the background for the `before` capture |
-| `log --target APP --stage Implementer --status started\|completed [--note …] [--file P] [--tokens N]` | Records when an agent starts and ends (role names) |
+| `log --target APP --stage Implementer --status started\|completed [--note …] [--file P] [--tokens N] [--slice S2]` | Records when an agent starts and ends (role names); `started` opens the clock the office counts live. `--slice`: one Implementer of a team |
+| `team --target APP [--check]` | Checks the Tech Lead's `team-plan.json` (one owner per file, at most 3 slices); `--check` writes `team-report.json`: which slice touched what, and what nobody owned |
+| `emulator --target APP [--wait\|--stop\|--status] [--avd NAME] [--headless]` | No device connected: starts an existing AVD in the background (`device.avd`, else the first). `--wait` until booted; `--stop` closes it only if the workflow started it. Never creates an AVD |
 | `gate --target APP` | Formatter, compile, unit tests, detekt, lint, consumer modules, secret scan |
 | `evidence capture\|ingest\|compare\|list --target APP` | Screenshots/videos in `media/{before,after}/` and `media/compare.md` |
 | `finish --target APP [--skip-device "reason"] [--draft "reason"]` | Final check: gate, review and device belong to the code that ships. `--draft` turns what is still unresolved into a draft PR's known issues |
 | `deliver --target APP [--subject "ID: title"] [--no-commit\|--no-push\|--no-pr]` | Commits app source only, pushes, opens the PR (as a draft after `finish --draft`) |
-| `office --target APP [--no-open]` | Opens `.ai/workflow/office.html`, the pixel-art office that shows each agent's desk; every command keeps it current |
+| `office --target APP [--no-open]` | Opens `.ai/workflow/office.html`, the pixel-art office that shows each agent's desk. Every command keeps it current, and while a run is live a watcher (`live.py`) refreshes `office-data.js` between commands, so clocks, edited files and activity update in place |
 | `status`, `list`, `clean [--ticket ID \| --stale [HOURS]]` | Run housekeeping: one ticket, unfinished idle runs, or everything when nothing is given |
 
 ## Quality gate details
@@ -42,6 +44,17 @@ How the workflow runs (stages, agents, levels, stops) is described in one place 
 - **Toolkit integrity.** If the toolkit changes after `start`, the gate is `blocked`.
 
 Defaults live in `DEFAULT_CONFIG` (`android_workflow/cli.py`); per-project overrides in `TARGET/.ai/android-workflow.json`.
+
+Optional overrides read by the newer commands (all may be left out):
+
+| Key | Default | Used by |
+|---|---|---|
+| `device.avd` | the first AVD `emulator -list-avds` prints | `emulator`: which AVD to open when nothing is connected |
+| `device.emulator_headless` | `false` (a window you can watch) | `emulator`: `true` starts it with `-no-window` |
+| `device.boot_timeout_seconds` | `300` | `emulator --wait` |
+| `team.max_parallel` | `3` (1–3) | `team`: how many Implementers may work at once |
+
+Set `ANDROID_WORKFLOW_NO_WATCH=1` to keep the office from starting its background watcher (the tests do).
 
 ## Tests
 

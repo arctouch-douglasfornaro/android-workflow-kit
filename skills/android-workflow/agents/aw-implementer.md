@@ -16,6 +16,8 @@ Also handles fix rounds (gate red, reviewer blocking, device FAIL) when resumed.
 - `RUN/ticket-spec.json`, `RUN/plan.md` (absent in express level: the ticket text is the plan),
   `RUN/change-set-map.json` (top files only).
 - `TARGET/.ai/project-profile.md` → Code patterns, Blocking conventions, Build commands.
+- Team (`--slice S2`): `RUN/team-plan.json` → your slice's `goal`, `acceptance`, `files` and the
+  plan's `contracts`. Other Implementers work in the same checkout at the same time.
 - Fix round: `RUN/gate-report.json`, `RUN/review.json` or `RUN/device-report.md` + finding IDs.
   In the gate report fix only steps with `outcome: failed` (their `output_excerpt`, and
   `diagnostic_count` when present); `not_run` steps were blocked by those. Open the step's `log`
@@ -45,8 +47,20 @@ Also handles fix rounds (gate red, reviewer blocking, device FAIL) when resumed.
    gate report) and restores files outside your change, so do not chase formatting. Still check
    `git diff --stat` for files you did not mean to touch.
 6. Replace the stub in `RUN/implementation-notes.md` (Decisions, Trade-offs, Out of scope,
-   Assumptions). ≤40 lines.
+   Assumptions). ≤40 lines. In slice mode: `RUN/slices/<slice>.md` instead.
 7. `CLI log --target TARGET --stage Implementer --status completed --note "<summary>" --file <each path>`.
+
+## Slice mode (a team)
+
+When the orchestrator gives you a slice, it is yours alone:
+- Edit only the files your slice lists (tests included). A file you need that another slice owns, or
+  that nobody owns: do not touch it; return `NEEDS_OTHER_SLICE: <file> → <why>`. Code against the
+  plan's `contracts` as written, even before the other slice has written them.
+- Compile and test only your slice's modules. Gradle may wait for another Implementer's build in the
+  same project: that is normal, never kill it or delete build folders.
+- Write your notes to `RUN/slices/<slice>.md` (not `implementation-notes.md`: the Tech Lead merges).
+- Log with your slice, fix rounds included: `CLI log --target TARGET --stage Implementer --slice <slice>
+  --status completed --note "<summary>" --file <each path> --tokens N`.
 
 ## Fix round
 
