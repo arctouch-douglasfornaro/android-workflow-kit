@@ -55,3 +55,69 @@ class OfficePlanTests(unittest.TestCase):
           }
           console.log(JSON.stringify({ crossings }));""")
         self.assertEqual(result["crossings"], 0)
+
+
+ROUTINE = """
+const NOW = 1800000000;
+const WORK = { Orchestrator: [[NOW - 600, null]], Implementer: [[NOW - 300, NOW - 100]], Reviewer: [[NOW - 40, null]] };
+const states = (seed, t, work) => Object.fromEntries(SIM.AGENTS.map(r => [r, SIM.stateAt(seed, r, t, work)]));
+"""
+
+
+@unittest.skipUnless(NODE, "Node is not installed; the office model is JavaScript")
+class OfficeRoutineTests(unittest.TestCase):
+    def test_same_inputs_always_give_the_same_scene(self) -> None:
+        result = run_sim(ROUTINE + """
+          const a = JSON.stringify(states("APP-1", NOW + 77.7, WORK)), b = JSON.stringify(states("APP-1", NOW + 77.7, WORK));
+          const other = JSON.stringify(states("APP-2", NOW + 77.7, WORK));
+          console.log(JSON.stringify({ same: a === b, seedMatters: a !== other }));""")
+        self.assertTrue(result["same"])
+        self.assertTrue(result["seedMatters"])
+
+    def test_agents_never_teleport(self) -> None:
+        result = run_sim(ROUTINE + """
+          let worst = 0, prev = null;
+          for (let t = NOW - 400; t < NOW + 400; t += 0.1) {
+            const s = states("APP-1", t, WORK);
+            if (prev) for (const r of SIM.AGENTS) worst = Math.max(worst, Math.abs(s[r].x - prev[r].x) + Math.abs(s[r].y - prev[r].y));
+            prev = s;
+          }
+          console.log(JSON.stringify({ worst }));""")
+        self.assertLessEqual(result["worst"], 0.1 * 2.2 + 1e-6)
+
+    def test_working_agents_go_to_their_desk_and_stay(self) -> None:
+        result = run_sim(ROUTINE + """
+          let away = 0, seatedLate = 0;
+          for (let t = NOW - 300; t < NOW + 300; t += 0.5) {
+            const s = states("APP-1", t, WORK);
+            for (const r of SIM.AGENTS) {
+              if (s[r].working && s[r].mode !== "desk" && s[r].mode !== "walk") away++;
+            }
+          }
+          const r = SIM.stateAt("APP-1", "Reviewer", NOW + 60, WORK);
+          console.log(JSON.stringify({ away, reviewer: [r.mode, r.working, +r.x.toFixed(2), +r.y.toFixed(2)], seat: [SIM.SEATS.Reviewer.x, SIM.SEATS.Reviewer.y] }));""")
+        self.assertEqual(result["away"], 0)
+        self.assertEqual(result["reviewer"][:2], ["desk", True])
+        self.assertEqual(result["reviewer"][2:], result["seat"])
+
+    def test_one_agent_per_spot_and_chats_come_in_pairs(self) -> None:
+        result = run_sim(ROUTINE + """
+          let clashes = 0, loneChat = 0;
+          for (let t = NOW; t < NOW + 24 * 300; t += 6) {
+            const s = states("OFFICE", t, {});
+            const placed = SIM.AGENTS.filter(r => s[r].mode !== "walk");
+            const spots = placed.map(r => s[r].x.toFixed(2) + "," + s[r].y.toFixed(2));
+            if (new Set(spots).size !== spots.length) clashes++;
+            // A partner may still be walking over; it must never be doing something else.
+            for (const r of SIM.AGENTS) if (s[r].mode === "chat" && !["chat", "walk"].includes(s[s[r].partner].mode)) loneChat++;
+          }
+          console.log(JSON.stringify({ clashes, loneChat }));""")
+        self.assertEqual(result["clashes"], 0)
+        self.assertEqual(result["loneChat"], 0)
+
+    def test_idle_agents_do_every_kind_of_thing(self) -> None:
+        result = run_sim(ROUTINE + """
+          const modes = {};
+          for (let k = 0; k < 400; k++) for (const r of SIM.AGENTS) { const m = SIM.stateAt("X", r, NOW + k * SIM.SLOT + 20, {}).mode; modes[m] = (modes[m] || 0) + 1; }
+          console.log(JSON.stringify(Object.keys(modes).sort()));""")
+        self.assertEqual(result, sorted(["chat", "coffee", "copa", "cooler", "desk", "game", "sofa", "window"]))

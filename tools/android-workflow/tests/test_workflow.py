@@ -1517,3 +1517,22 @@ class OfficeTests(unittest.TestCase):
         self.assertEqual(data["media"]["after"][0]["kind"], "image")
         self.assertEqual(data["media"]["after"][0]["src"], "S-9/media/after/profile.png")
         self.assertIn("function compareView", html)
+
+    def test_office_knows_when_each_agent_worked(self) -> None:
+        with AndroidProject() as root:
+            run(root, {"id": "W-1", "title": "Change ProfileScreen", "type": "chore"})
+            log = run_dir(root) / "stage-log.md"
+            log.write_text(log.read_text(encoding="utf-8")
+                           + "| 2026-10-01T10:00:00Z | Planner | started | host | plan |\n"
+                           + "| 2026-10-01T10:02:00Z | Planner | completed | host | done |\n"
+                           + "| 2026-10-01T10:03:00Z | Reviewer | started | host | review |\n", encoding="utf-8")
+            state = read_json(run_dir(root) / "run-state.json")
+            state["stages"]["T6"] = {"status": "started"}
+            (run_dir(root) / "run-state.json").write_text(json.dumps(state), encoding="utf-8")
+            main(["office", "--target", str(root), "--no-open"])
+            data, _ = office_data(root)
+        work = data["work"]
+        planner = [interval for interval in work["Planner"] if interval[0] == 1790848800.0]
+        self.assertEqual(planner, [[1790848800.0, 1790848920.0]])
+        self.assertEqual(work["Reviewer"], [[1790848980.0, None]])
+        self.assertIsNone(work["Orchestrator"][0][1])

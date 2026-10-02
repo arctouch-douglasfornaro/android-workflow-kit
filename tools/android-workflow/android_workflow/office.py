@@ -75,6 +75,50 @@ def _timeline(run: Path, limit: int = 60) -> list[dict[str, str]]:
     return rows[-limit:]
 
 
+ROLE_ALIASES = {"Triage": "Planner", "Localizer": "Planner", "Bootstrap": "Orchestrator", "Telemetry": "Orchestrator"}
+
+
+def _work(run: Path, state: dict[str, Any], desks: list[dict[str, Any]], now: float) -> dict[str, list[list[float | None]]]:
+    """When each agent was working, as [start, end] epoch intervals (end None = still working).
+
+    Built from `started` and the next event of the same role in the stage log. The office uses it to
+    keep working agents at their desk and to let the others follow their routine.
+    """
+    try:
+        lines = (run / "stage-log.md").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        lines = []
+    events: list[tuple[float, str, str]] = []
+    for line in lines:
+        match = re.match(r"^\| (\S+Z) \| (.+?) \| (.+?) \|", line)
+        if not match:
+            continue
+        try:
+            stamp = datetime.strptime(match.group(1), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+        except ValueError:
+            continue
+        events.append((stamp, ROLE_ALIASES.get(match.group(2), match.group(2)), match.group(3)))
+    states = {desk["role"]: desk["state"] for desk in desks}
+    work: dict[str, list[list[float | None]]] = {}
+    open_at: dict[str, float] = {}
+    for stamp, role, status in events:
+        if status in WORKING:
+            open_at.setdefault(role, stamp)
+        elif role in open_at:
+            work.setdefault(role, []).append([open_at.pop(role), stamp])
+    last = events[-1][0] if events else now
+    for role, start in open_at.items():
+        work.setdefault(role, []).append([start, None if states.get(role) == "working" else last])
+    for role, desk_state in states.items():  # working without a `started` row (an older run)
+        if desk_state == "working" and not any(end is None for _, end in work.get(role, [])):
+            work.setdefault(role, []).append([now, None])
+    created = state.get("created_at")
+    if created:  # the Orchestrator coordinates for the whole run
+        live = (state.get("status") or "") not in {"completed", "idle"}
+        work["Orchestrator"] = [[float(created), None if live else last]]
+    return work
+
+
 def _link(path: Path, page_dir: Path) -> dict[str, Any]:
     """A file as the page sees it: `src` is relative to the folder the page is written in."""
     resolved = path.resolve()
@@ -226,6 +270,7 @@ def collect(target: Path, ticket: str | None = None, page_dir: Path | None = Non
         "files": [{**_link(path, page_dir), "rel": path.relative_to(run).as_posix()} for path in sorted(run.rglob("*"))
                   if path.is_file() and "media" not in path.relative_to(run).parts
                   and path.name not in {OFFICE_NAME, f"{Path(OFFICE_NAME).stem}.tmp"}],
+        "work": _work(run, state, desks, datetime.now(timezone.utc).timestamp()),
         # Only the run that is going right now keeps refreshing; a past run's page is a snapshot.
         "live": ticket == current and (state.get("status") or "idle") not in {"completed", "idle"},
     })
@@ -341,7 +386,96 @@ const SIM = (() => {
     return out;
   }
   const pathLength = pts => pts.slice(1).reduce((sum, q, i) => sum + Math.abs(q.x - pts[i].x) + Math.abs(q.y - pts[i].y), 0);
-  return { W, D, CELL, COLS, ROWS, LAYOUT, AGENTS, FURNITURE, POIS, SEATS, blocked, cellOf, walkable, path, pathLength };
+
+  /* ---- the routine: deterministic, a pure function of (seed, time, work intervals) ---- */
+  const SLOT = 24, SPEED = 2.2;  // seconds per routine slot; tiles walked per second
+  const ACTIVITIES = [["coffee", 3], ["copa", 2], ["sofa", 2], ["chat", 3], ["window", 1], ["cooler", 1], ["game", 2], ["desk", 2]];
+  const TOTAL = ACTIVITIES.reduce((sum, [, w]) => sum + w, 0);
+  function hash(text) {  // FNV-1a, 32 bit
+    let h = 0x811c9dc5;
+    for (let i = 0; i < text.length; i++) { h ^= text.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+    return h >>> 0;
+  }
+  const rand = (...parts) => hash(parts.join("|")) / 4294967296;
+  const working = (work, role, t) => (work[role] || []).some(([s, e]) => s <= t && t < (e == null ? Infinity : e));
+  const workedDuring = (work, role, a, b) => (work[role] || []).some(([s, e]) => s < b && a < (e == null ? Infinity : e));
+  const seatSpot = role => ({ ...SEATS[role], activity: "desk" });
+  const planCache = new Map();
+  // Who does what in one slot. Depends only on the seed, the slot and who is idle at its start.
+  function plan(seed, slot, work) {
+    const idle = AGENTS.filter(role => !working(work, role, slot * SLOT));
+    const key = `${seed}|${slot}|${idle.join(",")}`;
+    if (planCache.has(key)) return planCache.get(key);
+    const order = idle.slice().sort((a, b) => hash(`${seed}|${slot}|${a}`) - hash(`${seed}|${slot}|${b}`) || (a < b ? -1 : 1));
+    const free = { coffee: POIS.coffee.slice(), copa: POIS.copa.slice(), sofa: POIS.sofa.slice(), window: POIS.window.slice(),
+      cooler: POIS.cooler.slice(), chat: POIS.chat.slice() };
+    const out = {};
+    let waiting = null;
+    for (const role of order) {
+      let roll = rand(seed, slot, role, "activity") * TOTAL, activity = "desk";
+      for (const [name, weight] of ACTIVITIES) { if (roll < weight) { activity = name; break; } roll -= weight; }
+      if (activity === "chat") {
+        if (waiting && free.chat.length) {
+          const [a, b] = free.chat.shift();
+          out[waiting] = { ...a, activity: "chat", partner: role };
+          out[role] = { ...b, activity: "chat", partner: waiting };
+          waiting = null;
+        } else if (!waiting && free.chat.length) waiting = role;
+        else out[role] = seatSpot(role);
+        continue;
+      }
+      if (activity === "game" || activity === "desk") { out[role] = { ...seatSpot(role), activity }; continue; }
+      out[role] = free[activity].length ? { ...free[activity].shift(), activity } : seatSpot(role);
+    }
+    if (waiting) out[waiting] = free.coffee.length ? { ...free.coffee.shift(), activity: "coffee" } : seatSpot(waiting);
+    if (planCache.size > 500) planCache.clear();
+    planCache.set(key, out);
+    return out;
+  }
+  // Where an agent stands at the end of slot k: at the desk if it worked at all in that slot.
+  function slotEnd(seed, role, k, work) {
+    if (workedDuring(work, role, k * SLOT, (k + 1) * SLOT)) return seatSpot(role);
+    return plan(seed, k, work)[role] || seatSpot(role);
+  }
+  function along(points, distance) {
+    for (let i = 1; i < points.length; i++) {
+      const a = points[i - 1], b = points[i], len = Math.abs(b.x - a.x) + Math.abs(b.y - a.y);
+      if (distance <= len || i === points.length - 1) {
+        const f = len ? Math.min(1, distance / len) : 1;
+        const face = b.x > a.x ? "+x" : b.x < a.x ? "-x" : b.y > a.y ? "+y" : "-y";
+        return { x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f, face };
+      }
+      distance -= len;
+    }
+    return { ...points[points.length - 1], face: "+y" };
+  }
+  // From where the agent is drawn now to where it will be drawn on arrival (`to.pose`), over walkable cells.
+  function walk(from, to, elapsed) {
+    const pose = to.pose || to, route = (path(from, to) || [{ x: from.x, y: from.y }, { x: to.x, y: to.y }]).slice();
+    if (pose.x !== to.x || pose.y !== to.y) route.push({ x: pose.x, y: pose.y });
+    const length = pathLength(route), duration = length / SPEED;
+    if (elapsed >= duration) return null;
+    const at = along(route, elapsed * SPEED);
+    return { mode: "walk", x: at.x, y: at.y, face: at.face, step: Math.floor(elapsed * SPEED * 2) % 2 };
+  }
+  const arrived = spot => ({ mode: spot.activity, x: spot.pose.x, y: spot.pose.y, face: spot.face, partner: spot.partner || null });
+  // Idle logic only: where an idle agent is at time t (used for itself and as the start of a walk to work).
+  function idleState(seed, role, t, work) {
+    const k = Math.floor(t / SLOT), start = k * SLOT;
+    if (workedDuring(work, role, start, t)) return { ...arrived(seatSpot(role)), mode: "desk" };
+    const from = slotEnd(seed, role, k - 1, work), to = plan(seed, k, work)[role] || seatSpot(role);
+    return walk(from.pose || from, to, t - start) || arrived(to);
+  }
+  // The full answer for one agent at time t: working agents walk back and sit at their desk.
+  function stateAt(seed, role, t, work) {
+    const interval = (work[role] || []).find(([s, e]) => s <= t && t < (e == null ? Infinity : e));
+    if (!interval) return { ...idleState(seed, role, t, work), working: false };
+    const begin = interval[0], from = idleState(seed, role, begin, work);
+    const moving = walk({ x: from.x, y: from.y }, seatSpot(role), t - begin);
+    return moving ? { ...moving, working: true } : { ...arrived(seatSpot(role)), mode: "desk", working: true };
+  }
+  return { W, D, CELL, COLS, ROWS, LAYOUT, AGENTS, FURNITURE, POIS, SEATS, blocked, cellOf, walkable, path, pathLength,
+    SLOT, SPEED, hash, plan, stateAt };
 })();
 if (typeof module !== "undefined") module.exports = { SIM };
 """
@@ -758,11 +892,43 @@ function depthSort(items) {
   }
   return out;
 }
-// Where every agent is at time `now` (seconds). For now everyone sits at their desk.
+// Where every agent is at time `now` (seconds): the deterministic routine in SIM decides.
 function placements(now) {
-  const out = {};
-  for (const role of SIM.AGENTS) out[role] = { role, mode: "desk", x: SIM.SEATS[role].x, y: SIM.SEATS[role].y, face: "+y" };
+  const out = {}, seed = DATA.ticket || "office", work = DATA.work || {};
+  for (const role of SIM.AGENTS) out[role] = { role, ...SIM.stateAt(seed, role, now, work) };
   return out;
+}
+const HEAD_FRONT = ["....hhhh....", "...hhhhhhh..", "..hhhhhhhhh.", "..hhsssssh..", "...ssesses..", "...ssssss...", "....smms....", ".....ss....."];
+const HEAD_BACK = ["....hhhh....", "...hhhhhhh..", "..hhhhhhhhh.", "..hhhhhhhhh.", "..hhhhhhhhh.", "...hhhhhh...", "....hhhh....", ".....ss....."];
+const TORSO = ["..cccccccc..", ".cccccccccc.", ".sccccccccs.", ".sccccccccs.", "..cccccccc.."];
+const LEGS = {
+  stand: ["..pppppppp..", "..ppp..ppp..", "..ppp..ppp..", "..kkk..kkk.."],
+  stepA: ["..pppppppp..", "..ppp...pp..", ".ppp....pp..", ".kkk....kk.."],
+  stepB: ["..pppppppp..", "..pp...ppp..", "..pp....ppp.", "..kk....kkk."],
+  sit: ["..pppppppp..", ".pppppppppp.", ".kk......kk."],
+};
+// A full-body agent with its feet at (fx, fy). Faces toward the viewer for +x/+y, away for -x/-y.
+function figure(desk, fx, fy, face, legs, s = 2.1) {
+  const [hair, skin] = LOOK[desk.role] || ["#3b2a20", "#f2c39b"];
+  const pal = { h: hair, s: skin, e: "#1a1a1a", m: "#c46a5a", c: desk.colour, p: "#2f3542", k: "#1e1e1e" };
+  const rows = [...(face === "-x" || face === "-y" ? HEAD_BACK : HEAD_FRONT), ...TORSO, ...LEGS[legs]];
+  const w = rows[0].length * s, h = rows.length * s, x0 = -w / 2, y0 = -h;
+  let out = "";
+  rows.forEach((row, r) => [...row].forEach((ch, c) => {
+    if (ch !== ".") out += `<rect x="${(x0 + c * s).toFixed(1)}" y="${(y0 + r * s).toFixed(1)}" width="${(s + .2).toFixed(1)}" height="${(s + .2).toFixed(1)}" fill="${pal[ch]}"/>`;
+  }));
+  const flip = face === "+x" || face === "-x" ? " scale(-1 1)" : "";
+  return { svg: `<g shape-rendering="crispEdges" transform="translate(${fx.toFixed(1)} ${fy.toFixed(1)})${flip}">${out}</g>`, top: fy + y0 };
+}
+// Small pictograms for what an idle agent is doing (drawn, so they look the same in every browser).
+function icon(mode, x, y) {
+  const g = body => `<g transform="translate(${x.toFixed(1)} ${y.toFixed(1)})">${body}</g>`;
+  if (mode === "coffee" || mode === "copa") return g('<rect x="-4" y="-3" width="7" height="6" rx="1" fill="#fff" stroke="#5b3a29" stroke-width="1"/><path d="M3 -1.5 h1.6 v3 h-1.6" fill="none" stroke="#5b3a29" stroke-width="1"/><path d="M-2 -5 q1 -1.5 0 -3 M1 -5 q1 -1.5 0 -3" stroke="#ddd" stroke-width=".8" fill="none"/>');
+  if (mode === "game") return g('<rect x="-6" y="-3" width="12" height="6" rx="3" fill="#2c3e50" stroke="#111" stroke-width=".8"/><rect x="-4" y="-.5" width="3" height="1" fill="#fff"/><rect x="-3" y="-1.5" width="1" height="3" fill="#fff"/><circle cx="3" cy="-1" r=".9" fill="#e74c3c"/><circle cx="4.4" cy=".6" r=".9" fill="#f1c40f"/>');
+  if (mode === "cooler") return g('<path d="M0 -5 C3 -1 3.5 1 0 3.5 C-3.5 1 -3 -1 0 -5 Z" fill="#5dade2" stroke="#1f618d" stroke-width=".8"/>');
+  if (mode === "sofa") return g('<rect x="-6" y="-2" width="12" height="4" rx="1" fill="#3f6fb5" stroke="#1d3557" stroke-width=".8"/><rect x="-6" y="-4.5" width="12" height="3" rx="1" fill="#355f9c" stroke="#1d3557" stroke-width=".8"/>');
+  if (mode === "window") return g('<circle r="3.4" fill="#f9d342" stroke="#c9a227" stroke-width=".8"/><path d="M0 -6 v1.6 M0 4.4 v1.6 M-6 0 h1.6 M4.4 0 h1.6" stroke="#f9d342" stroke-width="1"/>');
+  return "";
 }
 let PLACED = {};
 function screenFor(role) {
@@ -772,15 +938,27 @@ function screenFor(role) {
   return { fill: "#2c3b47", cls: "", lines: null };
 }
 function agentItem(desk, pl) {
-  const [ax, ay] = iso(pl.x + 0.05, pl.y + 0.2, 12);
-  const p = person(desk, ax, ay + 2);
-  const typing = desk.state === "working" && pl.mode === "desk";
-  return { id: `agent:${desk.role}`, x: pl.x - 0.2, y: pl.y - 0.2, w: 0.4, d: 0.4, h: 50, prio: 1,
-    svg: `<g class="${typing ? "typing" : ""}">${p.svg}</g>`, anchor: [ax, ay], top: p.top, desk, pl };
+  const base = { id: `agent:${desk.role}`, x: pl.x - 0.2, y: pl.y - 0.2, w: 0.4, d: 0.4, h: 50, prio: 3, desk, pl };
+  if (pl.mode === "desk" || pl.mode === "game") {
+    const [ax, ay] = iso(pl.x + 0.05, pl.y + 0.2, 12);
+    const p = person(desk, ax, ay + 2), typing = desk.state === "working" && pl.mode === "desk" && pl.working;
+    return { ...base, svg: `<g class="${typing ? "typing" : ""}">${p.svg}</g>`, anchor: [ax, ay], top: p.top };
+  }
+  const seated = pl.mode === "copa" || pl.mode === "sofa";
+  const [fx, fy] = iso(pl.x, pl.y, seated ? 10 : 0);
+  const legs = pl.mode === "walk" ? (pl.step ? "stepA" : "stepB") : seated ? "sit" : "stand";
+  const f = figure(desk, fx, fy, pl.face, legs);
+  let props = "";
+  if (pl.mode === "coffee" || pl.mode === "copa") props += `<rect x="${(fx + 7).toFixed(1)}" y="${(f.top + 30).toFixed(1)}" width="5" height="5" fill="#fff" stroke="#6b4f3a" stroke-width=".8"/><path d="M${(fx + 8.5).toFixed(1)} ${(f.top + 27).toFixed(1)} q1.5 -2 0 -4" stroke="#fff" stroke-width=".8" fill="none" class="zz"/>`;
+  if (pl.mode === "chat") props += `<g class="zz"><rect x="${(fx + 4).toFixed(1)}" y="${(f.top - 13).toFixed(1)}" width="17" height="10" rx="3" fill="#fff" stroke="#222" stroke-width=".8"/><text x="${(fx + 12.5).toFixed(1)}" y="${(f.top - 6).toFixed(1)}" font-size="6" text-anchor="middle" fill="#111">\u2026</text></g>`;
+  return { ...base, svg: f.svg + props, anchor: [fx, fy], top: f.top - (pl.mode === "chat" ? 14 : 0) };
 }
-function overlayFor(desk, anchor, top) {
+function overlayFor(desk, anchor, top, pl) {
   const [ax, ay] = anchor, working = desk.state === "working";
   const above = Math.min(top, ay - 30) - 6, floating = ["idle", "waiting"].includes(desk.state);
+  if (pl && pl.mode !== "desk") {  // away from the desk: a light name tag and what they are up to
+    return tag(ax, above, desk) + icon(pl.mode, ax, above - 20);
+  }
   let over = tag(ax, above, desk) + (floating ? statusMark(ax, above - 20, desk) : statusMark(ax + desk.role.length * 3 + 17, above - 6, desk));
   if (working && desk.note) over += bubble(ax, above - 16, desk.note);
   if (desk.state === "failed" && desk.note) over += bubble(ax, above - 16, desk.note, true);
@@ -809,23 +987,22 @@ function renderRoom() {
       hits.push(hitArea(desk, hx, hy + 30));
       continue;
     }
-    const pl = PLACED[desk.role];
-    if (!pl || desk.state === "skipped") {
-      const seat = SIM.SEATS[desk.role], [sx, sy] = iso(seat.x, seat.y, 12);
-      hits.push(hitArea(desk, sx, sy));
-      overlays.push(overlayFor(desk, [sx, sy], sy - 30));
-      continue;
-    }
+    const pl = PLACED[desk.role], seat = SIM.SEATS[desk.role], [sx, sy] = iso(seat.x, seat.y, 12);
+    if (!pl) { hits.push(hitArea(desk, sx, sy)); continue; }
     const it = agentItem(desk, pl);
     items.push(it);
-    overlays.push(overlayFor(desk, it.anchor, it.top));
-    hits.push(hitArea(desk, it.anchor[0], it.anchor[1]));
+    overlays.push(overlayFor(desk, it.anchor, it.top, pl));
+    hits.push(hitArea(desk, sx, sy));
+    if (pl.mode !== "desk" && pl.mode !== "game") hits.push(agentHit(desk, it.anchor[0], it.anchor[1]));
   }
   svg.innerHTML = walls() + floorTiles() + rings.join("") + depthSort(items).map(i => i.svg).join("") + overlays.join("") + hits.join("");
   bindSpots(svg);
 }
 function hitArea(desk, hx, hy) {
   return `<g class="spot" data-role="${esc(desk.role)}" tabindex="0" role="button" aria-label="${esc(desk.role)}: ${esc(STATE_LABEL[desk.state] || desk.state)}. Open details."><rect class="hit" x="${(hx - 64).toFixed(1)}" y="${(hy - 96).toFixed(1)}" width="128" height="132" rx="10"/></g>`;
+}
+function agentHit(desk, x, y) {
+  return `<g class="spot" data-role="${esc(desk.role)}" tabindex="-1" aria-label="${esc(desk.role)}"><rect class="hit" x="${(x - 16).toFixed(1)}" y="${(y - 52).toFixed(1)}" width="32" height="56" rx="6"/></g>`;
 }
 function bindSpots(svg) {
   svg.querySelectorAll(".spot").forEach(el => {
