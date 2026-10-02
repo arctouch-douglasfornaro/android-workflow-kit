@@ -344,6 +344,9 @@ def collect(target: Path, ticket: str | None = None, page_dir: Path | None = Non
     draft = state.get("draft") or {}
     # A run's own page (reached from the history) is a snapshot: only the main page follows the run live.
     live = ticket == current and run_is_live(run) and not snapshot
+    if snapshot and ticket == current and run_is_live(run):
+        # Opened while the run is still going: send the reader to the live page instead.
+        data["redirect"] = Path(os.path.relpath(office_path(target), page_dir)).as_posix()
     changes: list[dict[str, Any]] = []
     if live:
         from android_workflow.live import live_changes
@@ -403,6 +406,15 @@ def _stale(page: Path, run: Path) -> bool:
     return any(item.stat().st_mtime > built for item in run.iterdir() if item.is_file() and item != page)
 
 
+def _redirects(page: Path) -> bool:
+    """A run page written while its run was live points at the live page; once another run is
+    current it must become that run's own snapshot again."""
+    try:
+        return '"redirect": "' in page.read_text(encoding="utf-8")
+    except OSError:
+        return False
+
+
 def render(target: Path) -> Path:
     """Write the office page for TARGET's current run, plus one page per run for the history."""
     current = current_ticket_id(target)
@@ -413,7 +425,7 @@ def render(target: Path) -> Path:
     for item in list_runs(target):
         run = Path(item["path"])
         page = run / OFFICE_NAME
-        if item["ticket_id"] == current or _stale(page, run):
+        if item["ticket_id"] == current or _stale(page, run) or _redirects(page):
             _write(page, collect(target, item["ticket_id"], run, snapshot=True))
     return main
 
@@ -830,6 +842,7 @@ figcaption { color: var(--muted); font-size: 11px; margin-top: 4px; }
 </aside>
 <script>
 let DATA = __DATA__;
+if (DATA.redirect) location.replace(DATA.redirect + location.hash);  // this run is live: show the live page
 __SIM__
 const ROLE_OF_STAGE = { T0: "Setup", T1: "Planner", T2: "Planner", T3: "Planner", T4: "Implementer", T4L: "Tech Lead",
   T5: "Quality gate", T6: "Reviewer", T7: "Device", T8: "Delivery", T9: "Orchestrator" };

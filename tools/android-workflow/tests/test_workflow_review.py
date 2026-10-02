@@ -253,6 +253,27 @@ class LogTests(unittest.TestCase):
         self.assertNotIn("New.kt", patch)  # already reviewed
 
 
+class RunPageTests(unittest.TestCase):
+    def test_a_live_runs_own_page_sends_the_reader_to_the_live_page(self) -> None:
+        import re
+
+        def page_data(path: Path) -> dict:
+            return json.loads(re.search(r"let DATA = (.*);\n", path.read_text(encoding="utf-8")).group(1))
+
+        with GitProject() as root:
+            run(root, {"id": "P-1", "title": "Change ProfileScreen", "type": "chore"})
+            main(["office", "--target", str(root), "--no-open"])
+            live_page = page_data(run_dir(root, "P-1") / "office.html")
+            state = run_dir(root, "P-1") / "run-state.json"
+            state.write_text(json.dumps({**read_json(state), "status": "completed"}), encoding="utf-8")
+            run(root, {"id": "P-2", "title": "Another change", "type": "chore"})
+            main(["office", "--target", str(root), "--no-open"])
+            past_page = page_data(run_dir(root, "P-1") / "office.html")
+        self.assertEqual(live_page["redirect"], "../office.html")
+        self.assertNotIn("redirect", past_page)  # once another run is current it is P-1's own snapshot again
+        self.assertEqual(past_page["ticket"], "P-1")
+
+
 class ReopenedRunTests(unittest.TestCase):
     def test_the_office_follows_a_run_reopened_after_finish(self) -> None:
         with GitProject() as root:
