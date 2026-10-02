@@ -79,13 +79,26 @@ def _alive(pid: Any) -> bool:
     return True
 
 
+LIVE_AGENT_SECONDS = 4 * 3600
+
+
 def run_is_live(run: Path) -> bool:
-    """A run is live until it ends; after `finish`, also while the Delivery agent is still at work."""
+    """A run is live until it ends, and again whenever an agent works on it after that: the Delivery
+    agent after `finish`, or a run reopened for more changes. An agent left `started` by a crashed
+    session stops counting after a few hours."""
     state = _json(run / "run-state.json")
     if (state.get("status") or "idle") not in {"completed", "idle"}:
         return True
-    delivery = (state.get("stages") or {}).get("T8") or {}
-    return isinstance(delivery, dict) and str(delivery.get("status") or "") in WORKING
+    metrics = (_json(run / "stage-metrics.json").get("stages")) or {}
+    now = time.time()
+    for stage, entry in (state.get("stages") or {}).items():
+        if not isinstance(entry, dict) or str(entry.get("status") or "") not in WORKING:
+            continue
+        since = (metrics.get(stage) or {}).get("running_since")
+        updated = state.get("updated_at") or 0
+        if now - float(since if isinstance(since, (int, float)) else updated) < LIVE_AGENT_SECONDS:
+            return True
+    return False
 
 
 def _json(path: Path) -> dict[str, Any]:

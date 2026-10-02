@@ -847,10 +847,17 @@ def record_totals(metrics: dict[str, Any], state: dict[str, Any]) -> None:
         if isinstance(item, dict) and isinstance(item.get("tokens"), int)
     ]
     created = state.get("created_at")
+    missing = [
+        STAGE_ROLES.get(stage, stage) for stage, item in metrics.get("stages", {}).items()
+        if stage in {"T3", "T4", "T4L", "T6", "T7"} and isinstance(item, dict)
+        and (item.get("attempts") or 0) > 0 and item.get("tokens") is None
+    ]
     metrics["totals"] = {
         "wall_time_seconds": max(int(time.time()) - int(created), 0) if created else None,
         "tokens": sum(reported) if reported else None,
         "stages_reporting_tokens": len(reported),
+        # Agents that ran but never reported tokens: the total above leaves them out.
+        "stages_missing_tokens": missing,
     }
 
 
@@ -1059,6 +1066,42 @@ DECLARATION_PATTERN = re.compile(
 SOURCE_SUFFIXES = frozenset({".kt", ".java"})
 
 
+MAX_CONSUMER_TEST_CLASSES = 40
+
+
+def consumer_test_classes(target: Path, consumers: list[str], names: set[str]) -> dict[str, list[str] | None]:
+    """Per consumer module, the test classes (`com.example.FooTest`) that mention a changed declaration.
+
+    An empty list means none does; None (too many, or a class name that cannot be read) means run them all.
+    """
+    found: dict[str, list[str] | None] = {}
+    patterns = [argument for name in sorted(names) for argument in ("-e", name)]
+    for module in consumers:
+        folders = [path.relative_to(target).as_posix() for path in sorted(module_dir(target, module).glob("src/test*"))
+                   if path.is_dir() and "fixtures" not in path.name.lower()]
+        if not folders or not patterns:
+            found[module] = []
+            continue
+        result = subprocess.run(
+            ["git", "-C", str(target), "grep", "--untracked", "-l", "-w", "-F", *patterns, "--", *folders],
+            text=True, capture_output=True, check=False,
+        )
+        if result.returncode not in (0, 1):  # 1 = no match; anything else: not readable, run them all
+            found[module] = None
+            continue
+        hits = [line for line in result.stdout.splitlines() if line]
+        classes: list[str] = []
+        for hit in hits:
+            path = target / hit
+            text = text_if_exists(path)
+            if path.suffix not in SOURCE_SUFFIXES or "@Test" not in text:
+                continue  # a fake or a helper is not a test class: filtering on it would match nothing
+            package = re.search(r"^\s*package\s+([\w.]+)", text, re.M)
+            classes.append(f"{package.group(1)}.{path.stem}" if package else path.stem)
+        found[module] = None if len(classes) > MAX_CONSUMER_TEST_CLASSES else sorted(set(classes))
+    return found
+
+
 def changed_declarations(target: Path, changes: list[str]) -> set[str]:
     """Type names another module could reference: each changed main-source file's name and its
     top-level declarations that are neither private nor internal (nested types go through them)."""
@@ -1158,17 +1201,37 @@ def feature_docs_step(target: Path, config: dict[str, Any], changes: list[str]) 
 GRADLE_EXECUTABLES = frozenset({"gradlew", "gradle", "gradlew.bat"})
 
 
-def gradle_invocation(command: str) -> tuple[str, list[str]] | None:
-    """`(program, tasks)` for a plain Gradle task command; None when it has flags or is not Gradle."""
+TASK_OPTIONS = frozenset({"--tests"})
+
+
+def gradle_task_args(command: str) -> tuple[str, list[tuple[str, list[str]]]] | None:
+    """`(program, [(task, its options)])` for a Gradle task command. Only task options the gate
+    writes itself (`--tests <filter>` after a test task) are allowed; any other flag → None."""
     try:
         parts = shlex.split(command)
     except ValueError:
         return None
     if len(parts) < 2 or Path(parts[0]).name not in GRADLE_EXECUTABLES:
         return None
-    if any(part.startswith("-") for part in parts[1:]):
-        return None
-    return parts[0], parts[1:]
+    tasks: list[tuple[str, list[str]]] = []
+    index = 1
+    while index < len(parts):
+        part = parts[index]
+        if part in TASK_OPTIONS and tasks and index + 1 < len(parts) and not parts[index + 1].startswith("-"):
+            tasks[-1][1].extend([part, parts[index + 1]])
+            index += 2
+            continue
+        if part.startswith("-"):
+            return None
+        tasks.append((part, []))
+        index += 1
+    return (parts[0], tasks) if tasks else None
+
+
+def gradle_invocation(command: str) -> tuple[str, list[str]] | None:
+    """`(program, tasks)` for a plain Gradle task command; None when it has flags or is not Gradle."""
+    parsed = gradle_task_args(command)
+    return (parsed[0], [task for task, _ in parsed[1]]) if parsed else None
 
 
 def scoped_format_checks(format_check: str, modules: list[str]) -> list[str]:
@@ -1189,6 +1252,7 @@ def gate_commands(
     modules: list[str] | None = None,
     scope_format: bool = False,
     consumers: list[str] | None = None,
+    consumer_tests: dict[str, list[str] | None] | None = None,
 ) -> list[str]:
     """Order steps so the cheapest likely failure runs first; lint is last because it is slowest.
 
@@ -1214,8 +1278,19 @@ def gate_commands(
             for module in [*modules, *(consumers if name != "android_lint" and consumers else [])]:
                 table = config.get("jvm_module_commands", {}) if module in jvm else config["module_commands"]
                 template = table.get(name)
-                if template:
-                    commands.append(template.format(module=module))
+                if not template:
+                    continue
+                command = template.format(module=module)
+                parsed = gradle_task_args(command)
+                if (name == "unit_tests" and module not in modules and consumer_tests is not None and module in consumer_tests
+                        and parsed and len(parsed[1]) == 1):
+                    # A consumer runs only the test classes that use a changed declaration (None: all of them).
+                    classes = consumer_tests[module]
+                    if classes == [] and table.get("compile"):
+                        continue  # no test of this module uses it: compiling the module is the check
+                    if classes:
+                        command += "".join(f" --tests {shlex.quote(name_)}" for name_ in classes)
+                commands.append(command)
         if config["commands"].get("detekt"):
             commands.append(config["commands"]["detekt"])
     else:
@@ -1415,8 +1490,13 @@ def run_gradle_batch(
 
     `timeout` is per command, as when each ran alone, so the batch keeps the same total bound.
     """
-    tasks = list(dict.fromkeys(task for command in commands for task in (gradle_invocation(command) or ("", []))[1]))
-    batch_args = [program, *tasks]
+    batch_args = [program]
+    added: set[str] = set()
+    for command in commands:
+        for task, options in (gradle_task_args(command) or ("", []))[1]:
+            if task not in added:  # a task option (`--tests`) belongs right after its task
+                added.add(task)
+                batch_args.extend([task, *options])
     lint_init_script: Path | None = None
     if any(failure_category(command) == "android_lint" for command in commands):
         batch_args.extend([
@@ -1437,6 +1517,15 @@ def run_gradle_batch(
         )
         lint_init_script = root_init_script
         batch_args.extend(["--init-script", str(lint_init_script)])
+    if any("--tests" in options for command in commands for _, options in (gradle_task_args(command) or ("", []))[1]):
+        # A filter whose class was renamed or deleted since an earlier round matches nothing: not a failure.
+        tests_init = cache_dir(root) / "gate-test-filters.init.gradle"
+        tests_init.parent.mkdir(parents=True, exist_ok=True)
+        tests_init.write_text(
+            "allprojects {\n    tasks.withType(Test).configureEach { filter.failOnNoMatchingTests = false }\n}\n",
+            encoding="utf-8",
+        )
+        batch_args.extend(["--init-script", str(tests_init)])
     batch = shlex.join([*batch_args, "--continue", "--console=plain"])
     try:
         result = execute_command(batch, root, timeout * len(commands), full_output=True)
@@ -1750,8 +1839,28 @@ def gate_attempt(
     modules, covered = gate_scope(target, change_set)
     changes = source_changes(target)
     consumers, omitted = consumer_modules(target, config, modules, changes)
+    gates = config.get("quality_gates") or {}
+    tests = None
+    if gates.get("consumer_tests", "referencing") != "all" and consumers:
+        tests = consumer_test_classes(target, consumers, changed_declarations(target, changes))
+    # Keep every module and test filter of earlier rounds: the same task list reuses Gradle's
+    # configuration cache (a changed list recomputes it, minutes on a large app).
+    earlier = (read_json(run_dir(target) / "gate-report.json").get("scope") or {}) if (run_dir(target) / "gate-report.json").exists() else {}
+    def still(module: str) -> bool:  # an earlier module is dropped only once its folder is gone
+        return module_dir(target, module).is_dir()
+    modules = list(dict.fromkeys([*[m for m in earlier.get("modules") or [] if still(m)], *modules]))
+    consumers = [m for m in dict.fromkeys([*[m for m in earlier.get("consumers") or [] if still(m)], *consumers]) if m not in modules]
+    if tests is not None or earlier.get("consumer_tests"):
+        merged: dict[str, list[str] | None] = {}
+        for module in consumers:
+            before = (earlier.get("consumer_tests") or {}).get(module, [])
+            now = None if tests is None else tests.get(module, [])
+            merged[module] = None if before is None or now is None else sorted(set(before) | set(now))
+        tests = merged
+    if extras is not None:
+        extras["scope"] = {"modules": modules, "consumers": consumers, "consumer_tests": tests}
     commands = gate_commands(
-        config, change_set, needs_device, modules, scope_format=covered, consumers=consumers,
+        config, change_set, needs_device, modules, scope_format=covered, consumers=consumers, consumer_tests=tests,
     )
     format_check = config["commands"].get("format_check") or config["commands"].get("ktlint")
     fallbacks = {
@@ -2001,6 +2110,7 @@ def update_spec(target: Path, args: argparse.Namespace) -> dict[str, Any]:
         if value is not None:
             spec[field] = value
     spec["route"] = route_for(spec["type"], spec["complexity"], spec["risk"], spec["surfaces"])
+    spec["planner_updated"] = True  # a later `start` of this ticket keeps these decisions
     errors = validate_artifact("ticket-spec.json", spec)
     if errors:
         raise ValueError("; ".join(errors))
@@ -2017,14 +2127,15 @@ def ticket_from_flags(args: argparse.Namespace) -> dict[str, Any]:
         "id": args.id,
         "title": args.title,
         "description": args.description or args.title or "",
-        "type": args.type,
+        "type": args.type or "feature",
         "reproduction": args.reproduction,
         "acceptance_criteria": [
             item.strip() for item in (args.acceptance or "").split("|") if item.strip()
         ],
         "surfaces": surfaces,
-        "complexity": args.complexity,
-        "risk": args.risk,
+        "complexity": args.complexity or "low",
+        "risk": args.risk or "low",
+        "explicit": [name for name in ("type", "complexity", "risk") if getattr(args, name) is not None],
         "business_questions": [],
     }
 
@@ -2104,6 +2215,7 @@ def save_state(target: Path, state: dict[str, Any], metrics: dict[str, Any] | No
 
 
 OPENING_STATUSES = frozenset({"started", "running"})
+DUPLICATE_WINDOW_SECONDS = 600
 
 
 def open_clock(entry: dict[str, Any], now: float) -> None:
@@ -2195,16 +2307,39 @@ def _log_stage(
         if previous not in OPENING_STATUSES:
             entry.pop("running_since", None)  # a clock left open by a crashed round starts over
         open_clock(entry, now)
-    else:
+    duplicate = False
+    if status not in OPENING_STATUSES:
+        # The same round logged twice (the agent, then the orchestrator with the tokens): one round,
+        # its time and attempt counted once, its tokens not added twice.
+        last = entry.get("last_logged_at")
+        latest = metrics.get("last_log") or {}
+        duplicate = (
+            seconds is None and previous == status and "running_since" not in entry
+            and isinstance(last, (int, float)) and now - last < DUPLICATE_WINDOW_SECONDS
+            and latest.get("stage") == stage and latest.get("status") == status  # nothing else happened in between
+        )
         since = close_clock(entry, now)
-        if seconds is None:
+        if duplicate:
+            seconds = None
+        elif seconds is None:
             seconds = since if since is not None else (now - int(state["updated_at"]) if state.get("updated_at") else None)
     if wait_seconds and seconds is not None:
         seconds = max(seconds - wait_seconds, 0)
-    record_stage_metrics(
-        metrics, stage, status, seconds=seconds, tokens=tokens,
-        attempts=0 if status in {"running", "awaiting_host", "started"} else 1,
-    )
+    if duplicate:
+        counted = entry.get("round_tokens") or 0
+        added = max(tokens - counted, 0) if tokens is not None else None
+        entry["round_tokens"] = max(counted, tokens or 0)
+        record_stage_metrics(metrics, stage, status, seconds=None, tokens=added or None, attempts=0)
+    else:
+        if status not in OPENING_STATUSES:
+            entry["round_tokens"] = tokens or 0
+        record_stage_metrics(
+            metrics, stage, status, seconds=seconds, tokens=tokens,
+            attempts=0 if status in {"running", "awaiting_host", "started"} else 1,
+        )
+    if status not in OPENING_STATUSES:
+        metrics["stages"][stage]["last_logged_at"] = round(now, 3)
+    metrics["last_log"] = {"stage": stage, "status": status}
     if wait_seconds:
         entry = metrics["stages"][stage]
         entry["human_wait_seconds"] = round((entry.get("human_wait_seconds") or 0) + wait_seconds, 3)
@@ -2226,13 +2361,26 @@ def _log_stage(
     if status == "completed" and stage in {"T6", "T7"}:
         verdict = recorded_verdict(agent_dir, stage)
         state["stages"][stage].update({"verdict": verdict, "fingerprint": source_fingerprint(target)})
+        if stage == "T6" and not duplicate:  # a repeated log must not move what the review saw
+            try:
+                tree = snapshot_tree(target)
+            except (OSError, subprocess.SubprocessError):
+                tree = None  # a delta review then reads the whole diff, as before
+            if tree:
+                # What this review saw: a delta review reads only `git diff <reviewed_tree>`.
+                state["stages"]["T6"]["reviewed_tree"] = tree
     save_state(target, state, metrics)
+    warnings: list[str] = []
     if status == "completed" and tokens is None and role and role.lower() in AGENT_STAGES and stage != "T5":
-        return {
-            **state,
-            "warnings": [f"{role} logged without --tokens: pass the total the agent's result reports"],
-        }
-    return state
+        warnings.append(f"{role} logged without --tokens: pass the total the agent's result reports")
+    if status == "started":
+        changed_toolkit = toolkit_changes(agent_dir)
+        if changed_toolkit:
+            warnings.append(
+                f"the workflow toolkit changed since `start` ({len(changed_toolkit)} file(s)): run `CLI start` "
+                "for this ticket again now (it keeps the plan); otherwise the gate will be blocked"
+            )
+    return {**state, "warnings": warnings} if warnings else state
 
 
 def mark_gate_started(target: Path) -> None:
@@ -2267,6 +2415,53 @@ def mark_gate_interrupted(target: Path) -> None:
             save_state(target, state, metrics)
     except (OSError, ValueError):
         pass
+
+
+def snapshot_tree(target: Path) -> str | None:
+    """A git tree of the working tree as it is now (tracked and new files, ignored ones left out),
+    written through a throwaway index: the real index, HEAD and the files are never touched."""
+    import shutil
+    import tempfile
+
+    index = subprocess.run(["git", "-C", str(target), "rev-parse", "--git-path", "index"],
+                           text=True, capture_output=True, check=False)
+    if index.returncode != 0:
+        return None
+    real = Path(index.stdout.strip())
+    real = real if real.is_absolute() else target / real
+    with tempfile.TemporaryDirectory() as folder:
+        scratch = Path(folder) / "index"
+        if real.is_file():
+            shutil.copyfile(real, scratch)
+        env = {**os.environ, "GIT_INDEX_FILE": str(scratch)}
+        added = subprocess.run(["git", "-C", str(target), "add", "-A", "--", "."], env=env,
+                               capture_output=True, check=False, timeout=120)
+        if added.returncode != 0:
+            return None
+        tree = subprocess.run(["git", "-C", str(target), "write-tree"], env=env, text=True,
+                              capture_output=True, check=False, timeout=60)
+    return tree.stdout.strip() if tree.returncode == 0 and tree.stdout.strip() else None
+
+
+def review_delta(target: Path) -> dict[str, Any]:
+    """What changed since the last review: `RUN/review-delta.diff` (new files included), for a
+    delta review that reads only that."""
+    agent_dir = run_dir(target)
+    state = load_state(target)
+    old = ((state.get("stages") or {}).get("T6") or {}).get("reviewed_tree")
+    if not old:
+        return {"status": "no_previous_review", "next": "review the whole diff from the base commit"}
+    try:
+        new = snapshot_tree(target)
+    except (OSError, subprocess.SubprocessError):
+        new = None
+    if not new:
+        return {"status": "unavailable", "next": "review the whole diff from the base commit"}
+    names = git_lines(target, "diff", "--name-only", old, new) or []
+    diff = subprocess.run(["git", "-C", str(target), "diff", old, new], text=True, capture_output=True, check=False).stdout
+    path = agent_dir / "review-delta.diff"
+    path.write_text(diff, encoding="utf-8")
+    return {"status": "ok", "reviewed_tree": old, "current_tree": new, "files": names, "diff": str(path)}
 
 
 def team_integrated(agent_dir: Path, state: dict[str, Any]) -> bool:
@@ -2404,17 +2599,50 @@ def verification_errors(
     return errors
 
 
+NO_DEVICE_CHECK_ENV = "ANDROID_WORKFLOW_NO_DEVICE_CHECK"
+
+
+def connected_device(target: Path) -> str | None:
+    """The serial of a ready device, asked to adb (never guessed); None when there is none or no adb."""
+    if os.environ.get(NO_DEVICE_CHECK_ENV):
+        return None
+    from android_workflow.emulator import status as device_status
+
+    try:
+        current = device_status(target)
+    except Exception:  # noqa: BLE001 - no SDK, no adb: nothing to check
+        return None
+    if current.get("status") in {"connected", "ready"}:
+        return str(current.get("serial") or (current.get("devices") or ["a device"])[0])
+    return None
+
+
 def finish_run(
     target: Path,
     skip_device: str | None = None,
     draft: str | None = None,
+    no_device: bool = False,
 ) -> dict[str, Any]:
-    """Final check before the PR. With `draft`, unresolved checks become known issues of a draft PR."""
+    """Final check before the PR. With `draft`, unresolved checks become known issues of a draft PR.
+
+    `skip_device` is refused while a device is connected: "no device" is checked, not believed. The
+    developer's own `--no-device` (`no_device`) is the only way to skip a device that is there.
+    """
     errors = implementation_errors(target)
     if errors:
         raise ValueError("Implementer incomplete: " + "; ".join(errors))
+    if no_device and not skip_device:
+        skip_device = "the developer asked for --no-device"
     agent_dir = run_dir(target)
     spec = read_json(agent_dir / "ticket-spec.json")
+    if skip_device and not no_device and not draft and "T7" in spec["route"]:
+        serial = connected_device(target)
+        if serial:
+            raise ValueError(
+                f"a device is connected ({serial}): run the Device stage (`CLI emulator --wait`, then aw-device) "
+                "instead of skipping it. If the screen cannot be reached on it, `finish --draft \"<what blocks it>\"`; "
+                "if the developer asked for --no-device, pass `--no-device` too"
+            )
     state = load_state(target)
     metrics = read_json(agent_dir / "stage-metrics.json")
     gate = read_json(agent_dir / "gate-report.json")
@@ -2508,7 +2736,8 @@ def execute_pipeline(target: Path, state: dict[str, Any], spec: dict[str, Any]) 
 
     started = stage_start(state, "T3")
     if "T3" in spec["route"]:
-        write_plan(agent_dir, spec, change_set)
+        if not (spec.get("planner_updated") and (agent_dir / "plan.md").is_file()):
+            write_plan(agent_dir, spec, change_set)  # a restart keeps the plan the Planner wrote
         if spec["type"] == "bug" and not spec.get("reproduction"):
             stage_end(state, metrics, "T3", started, "escalated", reason="bug_reproduction_missing")
             state.update({"status": "escalated", "current_stage": "T3"})
@@ -2537,14 +2766,23 @@ def run(target: Path, ticket: dict[str, Any]) -> dict[str, Any]:
     agent_dir = run_dir(target, ticket_id)
     agent_dir.mkdir(parents=True, exist_ok=True)
     set_current(target, ticket_id)
+    spec = keep_planner_decisions(agent_dir, spec, ticket)
     write_json(agent_dir / "ticket-spec.json", spec)
     write_json(agent_dir / TOOLKIT_FINGERPRINT_FILE, {"files": toolkit_fingerprint()})
     # Starting a ticket again is a new run: verdicts of the previous one must not carry over.
     for verdict in RUN_VERDICTS:
         (agent_dir / verdict).unlink(missing_ok=True)
     initialize_later_artifacts(agent_dir)
-    # A new start is a new run: metrics from an earlier start of this ticket would be double-counted.
+    # A new start is a new run: metrics from an earlier start of this ticket would be double-counted,
+    # so they move to `earlier_runs` (kept, never added to this run's totals).
     metrics: dict[str, Any] = {"schema_version": 1, "stages": {}}
+    earlier = read_json(agent_dir / "stage-metrics.json") if (agent_dir / "stage-metrics.json").exists() else {}
+    worked = {stage: entry for stage, entry in (earlier.get("stages") or {}).items() if stage not in {"T0", "T1", "T2"}}
+    history = list(earlier.get("earlier_runs") or [])
+    if worked:
+        history.append({"stages": earlier.get("stages"), "totals": earlier.get("totals"), "ended_at": int(time.time())})
+    if history:
+        metrics["earlier_runs"] = history[-10:]
     record_stage_metrics(metrics, "T0", "completed", seconds=bootstrap_seconds)
     record_stage_metrics(metrics, "T1", "completed", seconds=time.monotonic() - started)
     write_json(agent_dir / "stage-metrics.json", metrics)
@@ -2565,6 +2803,33 @@ def run(target: Path, ticket: dict[str, Any]) -> dict[str, Any]:
         write_json(agent_dir / "run-state.json", state)
         return state
     return execute_pipeline(target, state, spec)
+
+
+PLANNER_FIELDS = ("surfaces", "acceptance_criteria", "type", "risk", "complexity", "reproduction")
+
+
+def keep_planner_decisions(agent_dir: Path, spec: dict[str, Any], ticket: dict[str, Any]) -> dict[str, Any]:
+    """Starting the same ticket again keeps what the Planner decided (surfaces, AC, type, risk,
+    complexity, reproduction) unless the new start states it: the route stays the planned one,
+    not the CLI's first guess (a restart once made a 16-file change look like an express ticket)."""
+    path = agent_dir / "ticket-spec.json"
+    previous = read_json(path) if path.exists() else {}
+    if not previous.get("planner_updated"):
+        return spec
+    explicit = {
+        "surfaces": bool(ticket.get("surfaces")), "acceptance_criteria": bool(ticket.get("acceptance_criteria")),
+        "reproduction": bool(ticket.get("reproduction")),
+        "type": "type" in (ticket.get("explicit") or []) or ticket.get("type") not in (None, "", "feature"),
+        "risk": "risk" in (ticket.get("explicit") or []) or ticket.get("risk") not in (None, "", "low"),
+        "complexity": "complexity" in (ticket.get("explicit") or []) or ticket.get("complexity") not in (None, "", "low"),
+    }
+    kept = dict(spec)
+    for field in PLANNER_FIELDS:
+        if not explicit.get(field) and previous.get(field) not in (None, "", []):
+            kept[field] = previous[field]
+    kept["route"] = route_for(kept["type"], kept["complexity"], kept["risk"], kept["surfaces"])
+    kept["planner_updated"] = True
+    return kept
 
 
 def resume(target: Path, question_id: str, answer: str) -> dict[str, Any]:
@@ -2616,10 +2881,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     start_parser.add_argument("--id")
     start_parser.add_argument("--title")
     start_parser.add_argument("--description", default="")
-    start_parser.add_argument("--type", default="feature")
+    start_parser.add_argument("--type")
     start_parser.add_argument("--surfaces", default="")
-    start_parser.add_argument("--complexity", default="low")
-    start_parser.add_argument("--risk", default="low")
+    start_parser.add_argument("--complexity")
+    start_parser.add_argument("--risk")
     start_parser.add_argument("--acceptance", default="")
     start_parser.add_argument("--reproduction")
     start_parser.add_argument("--overrides", type=Path)
@@ -2664,6 +2929,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="finish without the required Device stage; the reason is logged",
     )
     finish_parser.add_argument(
+        "--no-device", action="store_true",
+        help="the developer asked for --no-device: skip the Device stage even with a device connected",
+    )
+    finish_parser.add_argument(
         "--draft",
         metavar="REASON",
         help="the run stopped after the code was written: deliver a draft PR that lists what is unresolved",
@@ -2674,6 +2943,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     prebuild_parser.add_argument("--target", required=True, type=Path)
     prebuild_parser.add_argument("--wait", action="store_true", help="block until the build ends")
     prebuild_parser.add_argument("--status", action="store_true", help="report without starting")
+    prebuild_parser.add_argument(
+        "--if-running", action="store_true", dest="if_running",
+        help="with --wait: wait only for a base build already running; never start one (the Implementer's first edit)",
+    )
     prebuild_parser.add_argument("--force", action="store_true", help="build even if the route has no device stage")
     prebuild_parser.add_argument("--timeout", type=float, default=1800.0)
     deliver_parser = subparsers.add_parser(
@@ -2703,6 +2976,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--stale", nargs="?", type=float, const=24.0, metavar="HOURS",
         help="remove unfinished runs (awaiting_host/paused/running) idle for HOURS (default 24)",
     )
+    delta_parser = subparsers.add_parser("delta", help="what changed since the last review (RUN/review-delta.diff)")
+    delta_parser.add_argument("--target", required=True, type=Path)
     skills_parser = subparsers.add_parser("skills", help="pick the Android skills each agent reads (RUN/skills.json)")
     skills_parser.add_argument("--target", required=True, type=Path)
     skills_parser.add_argument("--add", action="append", default=[], help="a skill the Planner wants read (repeatable)")
@@ -2809,12 +3084,17 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
         return status_payload(target), 0
     if args.command == "finish":
         with run_lock(target):
-            return finish_run(target, skip_device=args.skip_device, draft=args.draft), 0
+            return finish_run(target, skip_device=args.skip_device, draft=args.draft, no_device=args.no_device), 0
     if args.command == "prebuild":
         from android_workflow.prebuild import current_status, start_prebuild, wait_prebuild
 
         if args.status:
             return current_status(target), 0
+        if args.if_running:
+            record = current_status(target)
+            if record.get("status") == "running":
+                record = wait_prebuild(target, timeout=args.timeout)
+            return {**record, "may_edit": record.get("status") != "running"}, 0
         record = start_prebuild(target, force=args.force)
         if args.wait and record.get("status") == "running":
             record = wait_prebuild(target, timeout=args.timeout)
@@ -2857,6 +3137,8 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
         if not args.no_open:
             webbrowser.open(path.as_uri())
         return {"office": str(path)}, 0
+    if args.command == "delta":
+        return review_delta(target), 0
     if args.command == "skills":
         from android_workflow.skills import select
 

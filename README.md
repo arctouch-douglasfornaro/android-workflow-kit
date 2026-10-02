@@ -46,7 +46,8 @@ Then, once:
 ```
 
 It links `~/.claude`, `~/.codex`, `~/.cursor`, `~/.gemini` and `~/.agents` to the matching folder in
-this kit and enables `multi_agent_v2` in `~/.codex/config.toml` (Codex needs it to spawn agents).
+this kit, enables `multi_agent_v2` in `~/.codex/config.toml` (Codex needs it to spawn agents) and
+allows the workflow's commands in `~/.claude/settings.json`.
 Anything already there with the same name is moved to `~/.ai-backup/`, never deleted.
 
 Everything points at one source of truth, so edits to the workflow apply at once in every tool. Run
@@ -63,12 +64,10 @@ Everything points at one source of truth, so edits to the workflow apply at once
 | Device check | A phone or emulator in `adb devices`, or just an emulator created once in Android Studio (Device Manager): the workflow opens it when nothing is connected. Maestro is installed automatically on first use |
 | Jira tickets | A Jira connector (MCP) in your coding tool, so the ticket text is fetched for you |
 
-**Claude Code in auto mode:** allow the workflow's CLI once, so its own git steps (commit, push, PR,
-all done by `CLI deliver`) never wait on a safety check. In `~/.claude/settings.json`:
-
-```json
-{ "permissions": { "allow": ["Bash(python3 ~/.ai/bin/android-workflow:*)"] } }
-```
+**Claude Code in auto mode:** `link.sh` also allows the workflow's own commands in
+`~/.claude/settings.json` (`Bash(python3 ~/.ai/bin/android-workflow:*)` and
+`feature_workspace.py`), so its git steps (commit, push, PR, all done by `CLI deliver`) never wait on a
+safety check. It only adds those two rules and keeps a backup of the file.
 
 ### 2. Run it
 

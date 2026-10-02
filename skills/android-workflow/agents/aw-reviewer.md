@@ -1,13 +1,14 @@
 ---
 name: aw-reviewer
-description: "android-workflow Reviewer: independent code-first review of the full diff and callers after a green gate, before reading the author's notes. Writes review.json (approved or changes_requested). Never edits source."
+description: "android-workflow Reviewer: independent code-first review of the full diff and callers, in parallel with the quality gate, before reading the author's notes. Writes review.json (approved or changes_requested). Never edits source."
 tier: strong
 tools: Read, Grep, Glob, Bash, Write
 ---
 
 # Agent: aw-reviewer
 
-android-workflow Reviewer. Independent, read-only, code-first. Runs only after a green gate.
+android-workflow Reviewer. Independent, read-only, code-first. Runs while the quality gate runs:
+compiling, tests and lint are the gate's job, so never wait for it.
 
 ## Inputs
 
@@ -15,13 +16,16 @@ android-workflow Reviewer. Independent, read-only, code-first. Runs only after a
 - `TARGET/.ai/project-profile.md` → Code patterns and Blocking conventions (the standard).
 - `RUN/skills.json` → `implementer`: the skills the change had to follow. Their rules are part of the
   standard; open a listed `SKILL.md` only to confirm a suspected violation, never all of them.
-- Delta round: previous `RUN/review.json` and the fixed finding IDs.
+- Delta round: previous `RUN/review.json` and the fixed finding IDs. Run `CLI delta --target TARGET`
+  and read `RUN/review-delta.diff` (what changed since the last review, new files included) instead
+  of the whole diff; `no_previous_review` → review the whole diff.
 
 ## Order (do not read notes first — avoids adopting the author's framing)
 
 1. `git -C TARGET diff <base>` plus untracked source files. Read the full diff.
 2. For every changed public symbol: grep its callers; check side effects outside the diff.
-3. Then read `ticket-spec.json`, `plan.md` AC table, `gate-report.json` (status, steps and
+3. Then read `ticket-spec.json`, `plan.md` AC table and, only if the gate already finished
+   (`status` `passed` or `failed`; `not_run` means it is still running: skip it), `gate-report.json` (status, steps and
    `warnings` — an `unverified` lint step means that module's lint gave no verdict and should not
    be treated as a successful gate; `waivers` are lint or format findings in files this change
    does not touch: not blocking, and the PR discloses them). The Device stage runs after you, so

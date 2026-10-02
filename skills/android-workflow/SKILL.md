@@ -68,7 +68,7 @@ pass it to the Planner.
 | Planner | `aw-planner` | strong | standard and full levels |
 | Tech Lead | `aw-tech-lead` | standard | only for a team (see Execute 7): splits the plan into slices, then integrates them |
 | Implementer | `aw-implementer` | standard | always: code **and** its unit tests; resumed for every fix round. A team runs up to 3 at once, one per slice |
-| Reviewer | `aw-reviewer` | strong | after a green gate |
+| Reviewer | `aw-reviewer` | strong (delta rounds: standard) | at the same time as the gate, once the Implementer is done |
 | Device | `aw-device` | standard | `before` + `after` when `device_required` |
 | Delivery | `aw-delivery` | fast | after `finish`, unless `--no-commit`: writes the PR body, runs `CLI deliver` |
 
@@ -98,10 +98,10 @@ registrations: run `~/.ai/link.sh` once (it links every host's folder to this ki
 python3 ~/.ai/bin/feature_workspace.py --repo-root T --ticket ID --title "…" [--worktree]
 CLI setup    --target T [--source-repo MAIN]        CLI start    --target T --id ID --title "…" [--type bug --reproduction "…"]
 CLI resume   --target T --question-id Q --answer "…" CLI update-spec --target T --surfaces ui --acceptance "a|b"
-CLI prebuild --target T [--wait|--status]           CLI gate     --target T
+CLI prebuild --target T [--wait [--if-running]|--status]           CLI gate     --target T
 CLI emulator --target T [--wait] [--stop]           CLI team     --target T [--check]
-CLI skills   --target T [--add NAME] [--drop NAME]
-CLI finish   --target T [--skip-device "r"] [--draft "r"] CLI deliver  --target T [--subject "ID: …"] [--no-push|--no-pr]
+CLI skills   --target T [--add NAME] [--drop NAME]    CLI delta    --target T   (since the last review)
+CLI finish   --target T [--skip-device "r"] [--no-device] [--draft "r"] CLI deliver  --target T [--subject "ID: …"] [--no-push|--no-pr]
 CLI log --target T --stage <Role> --status started --note "<what it is about to do>"
 CLI log --target T --stage <Role> --status completed --note "…" [--file P]… [--tokens N] [--wait-seconds S]
 CLI log … --stage Implementer --slice S2 …           (one Implementer of a team)
@@ -144,18 +144,22 @@ CLI status|list --target T                          CLI clean --target T [--tick
    user) or `unavailable` with the reason (no SDK or no AVD; it never creates one). Keep its
    `serial`. `connected`, `booting` or `ready` → a device counts as connected below.
    Then, with a device, run `CLI prebuild --target TARGET`. It returns at once and
-   builds the unmodified source while the Planner reads code. Nothing may edit source until it
-   ends. The Planner never edits, so spawn it now (standard/full): `aw-planner` with TARGET, RUN
+   builds the unmodified source in the background. Nothing may edit source until it ends; reading
+   is fine. The Planner never edits, so spawn it now (standard/full): `aw-planner` with TARGET, RUN
    and the ticket text. It corrects the CLI's guesses with `CLI update-spec`. `NEEDS_INPUT` →
    batch the questions to the user and STOP until answered.
-6. **Device before** (only if `device_required` and `visual`, device connected, not `--no-device`):
-   `CLI prebuild --target TARGET --wait`, then `CLI emulator --target TARGET --wait` (instant when
-   the device is ready; not `ready`/`connected` → no device: skip `before`). `passed` → spawn `aw-device` mode `before` (it installs
-   the prebuilt APK, no build) in the background and start the Implementer **in the same turn**,
-   without waiting for the capture: the capture touches only the emulator and `RUN/media`. Any
-   other status (`skipped` because the source already changed, `failed`, `tainted`) or no device →
-   no real base exists to capture: skip `before`, say why in one line, and start the Implementer
-   at once. The Implementer never waits for a `before` capture.
+6. **Implementer and Device before, at once:** as soon as the Planner is done (express: right
+   after `start`), spawn the Implementer (step 7) in the background, **without waiting for the
+   base build**: it reads first, and before its first edit it repeats
+   `CLI prebuild --target TARGET --wait --if-running --timeout 90` until `may_edit: true` (at once
+   when no base build runs). In the same turn, if `device_required` and `visual`, a device is connected and not
+   `--no-device`: `CLI prebuild --target TARGET --wait`, then `CLI emulator --target TARGET --wait`
+   (run both with a long command timeout, e.g. 30 min, or in the background; a host's 2-minute
+   default would kill them). `passed` and the device `ready`/`connected` → spawn `aw-device` mode
+   `before` (it installs the prebuilt APK, no build; it touches only the device and `RUN/media`).
+   Any other status (`skipped` because the source already changed, `failed`, `tainted`) or no
+   device → no real base exists to capture: skip `before` and say why in one line. Nobody waits
+   for the `before` capture.
 7. **Implementer:** spawn `aw-implementer` with the level. It writes the code and the unit tests
    that prove it. Keep its agent id for fix rounds.
    **Team** (standard/full only, when the plan's Parallel work lists 2+ parts and 4+ files): spawn
@@ -167,7 +171,14 @@ CLI status|list --target T                          CLI clean --target T [--tick
    that owns the file a finding names (`team-report.json`), always logged with its `--slice` (its
    `completed` hands the change back to the gate), the Tech Lead for seams or unowned files;
    slices without findings stay idle.
-8. **Quality gate:** `CLI gate --target TARGET`. It runs the project's formatter (fixing first when
+8. **Quality gate and Reviewer, in parallel:** when the Implementer is done, in the same turn run
+   `CLI gate --target TARGET` (long command timeout, e.g. 30 min) **and** spawn `aw-reviewer` in
+   the background: the review only reads code, so it does not wait for the gate. When both are
+   back, one fix round carries everything: the gate's failed steps and the review's blocking IDs
+   go to the Implementer together, then the gate and a delta review run again, in parallel. The
+   gate keeps the modules and test filters of earlier rounds, so Gradle reuses its configuration
+   cache.
+   The gate: It runs the project's formatter (fixing first when
    it can), then compile, unit tests, detekt and lint for the touched modules in one build, plus
    compile and unit tests for modules that use a changed declaration, and a secret scan. Lint or
    format findings only in files the change does not touch are **waived** and disclosed in the PR;
@@ -177,13 +188,18 @@ CLI status|list --target T                          CLI clean --target T [--tick
    defect and deliver a draft PR: no agent edits the toolkit (`~/.ai`) during a run. `start`
    fingerprints the toolkit; after any change the gate reports `blocked`
    (`toolkit_modified_during_run`) and only a draft PR can ship.
-9. **Reviewer:** spawn `aw-reviewer`. `changes_requested` → resume the Implementer with the
-   blocking IDs once, re-gate, then resume the Reviewer for a delta review. Still blocking →
-   draft PR.
+9. **Reviewer:** `changes_requested` → its blocking IDs join the fix round above (once). The
+   delta review is a **new** `aw-reviewer` at the standard tier (Claude Code: Agent `model:
+   sonnet`; Codex: reasoning `medium`) with the previous `review.json` and the fixed IDs: it runs
+   `CLI delta --target TARGET` and reads only `RUN/review-delta.diff`, what changed since the last
+   review (new files included). Still blocking → draft PR.
 10. **Device after** (if `device_required`, not `--no-device`): `CLI emulator --target TARGET
     --wait` (instant when ready). `ready` or `connected` → spawn `aw-device` mode `after` with the
     `serial`; anything else (`timed_out`, `failed`, `unauthorized`, `unavailable`, `no_device`) →
-    no device: its `reason` is the `--skip-device` reason. It verifies the AC on the device and writes `media/compare.md` (before vs after).
+    no device: its `reason` is the `--skip-device` reason. `finish` checks adb itself and refuses
+    `--skip-device` while a device is connected (only the developer's `--no-device`, passed as
+    `finish --no-device`, skips a device that is there). It verifies the AC on the device and
+    writes `media/compare.md` (before vs after).
     FAIL → Implementer once → gate → Reviewer delta → Device again. Second FAIL → draft PR.
     BLOCKED with a device connected (login, feature flag, screen unreachable) → draft PR that says
     what unblocks it. No device connected at all → skip it at Finish (`--skip-device`).
@@ -202,8 +218,9 @@ CLI status|list --target T                          CLI clean --target T [--tick
     it (`left_running` says why); a device the developer connected or opened is never closed.
 
 Overlaps that cannot race on the working tree are safe: Planner with the base build and the
-emulator boot, Implementer with the `before` capture, Implementers of a team with each other (one
-owner per file). Only the base build itself blocks source edits, and only while it runs.
+emulator boot, the Implementer's reading with the base build (it edits only after
+`prebuild --wait --if-running`), the Implementer with the `before` capture, the gate with the
+Reviewer, Implementers of a team with each other (one owner per file).
 
 ## Run files
 
@@ -236,7 +253,11 @@ Speak in **role names**, never bare T-codes. One line per stage:
 `{Role}: {result} → {artifact}`. Example: `Reviewer: approved, 0 blocking → review.json`.
 Durable log: `RUN/stage-log.md`; time and tokens per stage: `RUN/stage-metrics.json` (used to
 debug runs and find improvements). Every `log` for an agent stage passes the token total that
-agent's result reports (`--tokens N`); never estimate. `log` answers with a `warnings` entry
+agent's result reports (`--tokens N`); never estimate. When the agent already logged its own
+`completed` (with `--file`), log `completed` again with `--tokens`: a second `completed` of the same
+round merges into the first, it is not counted twice. A `log … --status started` that warns the
+toolkit changed since `start` → run `CLI start` for the ticket again before the gate (it keeps the
+Planner's decisions and archives the earlier metrics). `log` answers with a `warnings` entry
 when an agent stage has none; if the host truly exposes no count, say so once in the final
 summary. When you paused to ask the user, add `--wait-seconds S` so waiting is not counted.
 

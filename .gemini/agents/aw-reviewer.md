@@ -1,6 +1,6 @@
 ---
 name: aw-reviewer
-description: "android-workflow Reviewer: independent code-first review of the full diff and callers after a green gate, before reading the author's notes. Writes review.json (approved or changes_requested). Never edits source."
+description: "android-workflow Reviewer: independent code-first review of the full diff and callers, in parallel with the quality gate, before reading the author's notes. Writes review.json (approved or changes_requested). Never edits source."
 kind: local
 ---
 

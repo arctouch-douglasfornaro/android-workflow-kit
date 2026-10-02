@@ -68,7 +68,8 @@ def find_apks(target: Path, since: float) -> list[dict[str, Any]]:
 
 def current_status(target: Path) -> dict[str, Any]:
     record = read_record(target)
-    if record.get("status") == "running" and not pid_alive(record.get("pid")):
+    starting = record.get("pid") is None and time.time() - float(record.get("started_at") or 0) < 30
+    if record.get("status") == "running" and not starting and not pid_alive(record.get("pid")):
         record = {**record, "status": "failed", "reason": "build process ended without a result"}
         write_record(target, record)
     return record or {"status": "not_started"}

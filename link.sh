@@ -3,7 +3,7 @@
 #
 # Each tool reads its own folder in your home (~/.claude, ~/.codex, ~/.cursor, ~/.gemini, ~/.agents).
 # This creates links from those folders to the matching folder in this kit, so every tool reads the
-# same source of truth. Edits to the kit apply at once; re-run only after the kit adds or removes an
+# same source of truth, and allows the workflow's own commands in Claude Code. Edits to the kit apply at once; re-run only after the kit adds or removes an
 # agent or skill. Safe to run again.
 set -euo pipefail
 
@@ -70,6 +70,44 @@ else:
 config.parent.mkdir(parents=True, exist_ok=True)
 config.write_text(text, encoding="utf-8")
 print(f"codex: enabled multi_agent_v2 in {config}")
+PY
+
+# Claude Code: allow the workflow's own commands, so auto mode never stops its steps (the CLI does
+# the git work for commit, push and PR itself). Only adds the rules; the rest of the file is kept.
+python3 - "$BACKUP" <<'PY'
+import json
+import shutil
+import sys
+from pathlib import Path
+
+settings = Path.home() / ".claude" / "settings.json"
+rules = ["Bash(python3 ~/.ai/bin/android-workflow:*)", "Bash(python3 ~/.ai/bin/feature_workspace.py:*)"]
+try:
+    data = json.loads(settings.read_text(encoding="utf-8")) if settings.exists() else {}
+except ValueError:
+    print(f"claude: {settings} is not valid JSON; add these permissions by hand: {', '.join(rules)}")
+    raise SystemExit(0)
+if not isinstance(data, dict) or not isinstance(data.get("permissions", {}), dict):
+    print(f"claude: unexpected shape in {settings}; add these permissions by hand: {', '.join(rules)}")
+    raise SystemExit(0)
+allow = data.setdefault("permissions", {}).setdefault("allow", [])
+if allow is None:
+    allow = data["permissions"]["allow"] = []
+if not isinstance(allow, list):
+    print(f"claude: permissions.allow in {settings} is not a list; add these permissions by hand: {', '.join(rules)}")
+    raise SystemExit(0)
+missing = [rule for rule in rules if rule not in allow]
+if not missing:
+    print("claude: workflow commands already allowed")
+    raise SystemExit(0)
+if settings.exists():
+    backup = Path(sys.argv[1]) / ".claude"
+    backup.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(settings, backup / "settings.json")
+allow.extend(missing)
+settings.parent.mkdir(parents=True, exist_ok=True)
+settings.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+print(f"claude: allowed the workflow commands in {settings}")
 PY
 
 echo "done: Claude Code, Codex, Cursor and Gemini now read the android-workflow kit from $KIT"

@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 
 os.environ["ANDROID_WORKFLOW_NO_WATCH"] = "1"
+# The developer's own emulator may be connected; tests never ask adb.
+os.environ["ANDROID_WORKFLOW_NO_DEVICE_CHECK"] = "1"
 
 import contextlib
 import io
