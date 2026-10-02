@@ -115,7 +115,8 @@ Everything under `.ai/workflow/` stays on your machine; it is git-ignored and ne
 
 The workflow keeps a page that shows the run as an isometric office, Habbo style: one desk per agent,
 a corridor and a coffee room. Only the agents doing work sit at their desk; the others follow a
-deterministic routine — coffee, a chat in the corridor, the sofa, the window, a game at their desk —
+deterministic routine — coffee, a chat in the corridor, the console in front of the TV, the window,
+a game at their desk —
 and walk back as soon as they get work. The page also shows who sent work back for a fix, time and
 tokens per agent, the run's activity as a chat and every past run of the app. **Click any desk,
 agent, file card or message** to read what that agent produced, formatted: the plan and acceptance

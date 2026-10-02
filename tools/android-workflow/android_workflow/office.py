@@ -331,13 +331,14 @@ const SIM = (() => {
   for (const [id, x, y] of [["N", 14.55, 2.75], ["S", 14.55, 4.55], ["W", 13.65, 3.65], ["E", 15.5, 3.65]]) {
     add({ id: `stool:${id}`, kind: "stool", x, y, w: 0.45, d: 0.45, h: 10, walkable: true });
   }
-  add({ id: "sofa", kind: "sofa", x: 13.4, y: 6.3, w: 2.6, d: 0.75, h: 22 });
+  add({ id: "tv", kind: "tv", x: 13.7, y: 5.95, w: 2.0, d: 0.5, h: 46 });
+  add({ id: "sofa", kind: "sofa", x: 13.4, y: 7.6, w: 2.6, d: 0.75, h: 22 });
   // Where agents go when idle. `at` is where they stand to arrive; `pose` is where they are drawn.
   const p = (x, y, face, pose) => ({ x, y, face, pose: pose || { x, y } });
   const POIS = {
     coffee: [p(13.6, 1.15, "-y"), p(14.4, 1.15, "-y")],
     copa: [p(14.77, 2.97, "+y"), p(14.77, 4.77, "-y"), p(13.87, 3.87, "+x"), p(15.72, 3.87, "-x")],
-    sofa: [p(14.1, 7.4, "+y", { x: 14.1, y: 6.85 }), p(15.3, 7.4, "+y", { x: 15.3, y: 6.85 })],
+    sofa: [p(14.1, 7.1, "-y", { x: 14.1, y: 7.88 }), p(15.3, 7.1, "-y", { x: 15.3, y: 7.88 })],
     chat: [[p(12.5, 4.4, "+y"), p(12.5, 5.4, "-y")], [p(12.5, 7.6, "+y"), p(12.5, 8.6, "-y")], [p(6.1, 6.1, "+x"), p(7.1, 6.1, "-x")]],
     window: [p(2.3, 0.75, "-y"), p(9.9, 0.75, "-y")],
     cooler: [p(12.35, 3.1, "-y")],
@@ -732,7 +733,7 @@ function floorTiles() {
     else out += tile(x, y, (x + y) % 2 ? "#cfe3e6" : "#eef6f7", "#b5cdd1");                // copa tiles
   }
   out += poly([iso(5.0, 0.5), iso(9.2, 0.5), iso(9.2, 2.6), iso(5.0, 2.6)], "#7a4e9c", 'opacity=".5"');
-  out += poly([iso(13.4, 7.25), iso(16.2, 7.25), iso(16.2, 8.6), iso(13.4, 8.6)], "#d98b5f", 'opacity=".55"');
+  out += poly([iso(13.5, 6.55), iso(16.0, 6.55), iso(16.0, 7.55), iso(13.5, 7.55)], "#d98b5f", 'opacity=".55"');
   return out;
 }
 function walls() {
@@ -803,7 +804,7 @@ const EXTRAS = {
 const floorShadow = (f, spread = 0.22) => poly([iso(f.x + 0.06, f.y + 0.06), iso(f.x + f.w + spread, f.y + 0.06), iso(f.x + f.w + spread, f.y + f.d + spread), iso(f.x + 0.06, f.y + f.d + spread)], "rgba(25,20,35,.16)", 'stroke="none"');
 // One drawing per furniture kind, from the SIM plan (the single source of positions).
 function drawFurniture(f, ctx) {
-  const shadowed = ["desk", "machine", "counter", "fridge", "table", "sofa", "plant", "cooler"].includes(f.kind);
+  const shadowed = ["desk", "machine", "counter", "fridge", "table", "sofa", "plant", "cooler", "tv"].includes(f.kind);
   return (shadowed ? floorShadow(f) : "") + drawFurnitureBody(f, ctx);
 }
 function drawFurnitureBody(f, ctx) {
@@ -812,12 +813,17 @@ function drawFurnitureBody(f, ctx) {
   if (f.kind === "desk") {
     const { x: tx, y: ty, w: wide } = f, screen = ctx.screenFor(f.role);
     let d = box(tx, ty, 0, wide, 0.9, 17, f.role === "Orchestrator" ? "#6d3f22" : "#9a6a3f", dim);
-    d += box(tx + 0.2, ty + 0.25, 17, 0.62, 0.14, 15, "#23262f", dim);
-    d += poly([iso(tx + 0.26, ty + 0.39, 30), iso(tx + 0.76, ty + 0.39, 30), iso(tx + 0.76, ty + 0.39, 19), iso(tx + 0.26, ty + 0.39, 19)], screen.fill, screen.cls);
-    if (screen.lines) for (let i = 0; i < 3; i++) {
-      const end = tx + 0.51 + (i % 2) * 0.15;
-      d += poly([iso(tx + 0.31, ty + 0.39, 27 - i * 3), iso(end, ty + 0.39, 27 - i * 3), iso(end, ty + 0.39, 26 - i * 3), iso(tx + 0.31, ty + 0.39, 26 - i * 3)], screen.lines);
+    // The monitor faces its owner, who faces the front of the room: we see its back, Habbo style.
+    // A screen in use lights the monitor's edges and the desk around it.
+    const mx = tx + wide / 2 - 0.27, my = ty + 0.06;
+    if (screen.lines) {
+      const [gx, gy] = iso(mx + 0.27, my + 0.06, 24);
+      d += `<ellipse cx="${gx.toFixed(1)}" cy="${gy.toFixed(1)}" rx="24" ry="13" fill="${screen.fill}" opacity=".22" ${screen.cls}/>`;
     }
+    d += box(mx + 0.2, my + 0.04, 17, 0.14, 0.08, 4, "#2b2e38", dim);
+    d += box(mx, my, 21, 0.54, 0.12, 12, "#2b2e38", dim);
+    d += poly([iso(mx + 0.2, my + 0.12, 28.5), iso(mx + 0.34, my + 0.12, 28.5), iso(mx + 0.34, my + 0.12, 26.5), iso(mx + 0.2, my + 0.12, 26.5)], "#6b7080");
+    if (screen.lines) d += poly([iso(mx, my, 33), iso(mx + 0.54, my, 33), iso(mx + 0.54, my + 0.12, 33), iso(mx, my + 0.12, 33)], screen.fill, screen.cls);
     if (EXTRAS[f.role] && !dim) d += EXTRAS[f.role](tx, ty, wide, working);
     return d;
   }
@@ -848,7 +854,27 @@ function drawFurnitureBody(f, ctx) {
   if (f.kind === "fridge") return box(f.x, f.y, 0, f.w, f.d, 54, "#dfe6ee") + poly([iso(f.x + 0.1, f.y + f.d, 46), iso(f.x + 0.14, f.y + f.d, 46), iso(f.x + 0.14, f.y + f.d, 32), iso(f.x + 0.1, f.y + f.d, 32)], "#8a96a3");
   if (f.kind === "table") return box(f.x + 0.5, f.y + 0.4, 0, 0.2, 0.2, 14, "#5c4033") + box(f.x, f.y, 14, f.w, f.d, 3, "#c98d5a") + box(f.x + 0.3, f.y + 0.35, 17, 0.14, 0.14, 4, "#fff");
   if (f.kind === "stool") return box(f.x + 0.16, f.y + 0.16, 0, 0.12, 0.12, 8, "#555") + box(f.x, f.y, 8, f.w, f.d, 3, "#e67e22");
-  if (f.kind === "sofa") return box(f.x, f.y + 0.2, 0, f.w, 0.55, 10, "#3f6fb5") + box(f.x, f.y, 0, f.w, 0.22, 22, "#355f9c") + box(f.x - 0.15, f.y, 0, 0.15, 0.75, 15, "#355f9c") + box(f.x + f.w, f.y, 0, 0.15, 0.75, 15, "#355f9c");
+  if (f.kind === "sofa") {  // faces the TV (-y): seat at the front, backrest at the back
+    return box(f.x - 0.15, f.y, 0, 0.15, 0.75, 15, "#355f9c") + box(f.x, f.y, 0, f.w, 0.55, 10, "#3f6fb5")
+      + box(f.x, f.y + 0.53, 0, f.w, 0.22, 24, "#355f9c") + box(f.x + f.w, f.y, 0, 0.15, 0.75, 15, "#355f9c");
+  }
+  if (f.kind === "tv") {  // low stand, console and a TV whose screen faces the room (+y)
+    const playing = Object.values(PLACED).some(pl => pl && pl.mode === "sofa");
+    let tv = box(f.x, f.y, 0, f.w, f.d, 12, "#5d4037") + box(f.x + 0.15, f.y + 0.1, 12, 0.45, 0.3, 4, "#1c1c22");
+    tv += poly([iso(f.x + 0.22, f.y + 0.4, 14.5), iso(f.x + 0.32, f.y + 0.4, 14.5), iso(f.x + 0.32, f.y + 0.4, 13.5), iso(f.x + 0.22, f.y + 0.4, 13.5)], playing ? "#2ecc71" : "#555");
+    tv += box(f.x + 0.95, f.y + 0.28, 12, 0.22, 0.12, 2, "#2d3436") + box(f.x + 1.35, f.y + 0.2, 12, 0.14, 0.1, 4, "#2d3436");
+    tv += box(f.x + 0.75, f.y + 0.15, 12, 0.5, 0.15, 6, "#111");
+    tv += box(f.x + 0.05, f.y + 0.12, 18, 1.9, 0.12, 28, "#15151b");
+    const sy = f.y + 0.24, screen = [iso(f.x + 0.14, sy, 44), iso(f.x + 1.86, sy, 44), iso(f.x + 1.86, sy, 20), iso(f.x + 0.14, sy, 20)];
+    tv += poly(screen, playing ? "#2c3e8f" : "#20232b", playing ? 'class="screen-on"' : "");
+    if (playing) {  // a little platform game
+      tv += poly([iso(f.x + 0.14, sy, 25), iso(f.x + 1.86, sy, 25), iso(f.x + 1.86, sy, 20), iso(f.x + 0.14, sy, 20)], "#27ae60");
+      tv += poly([iso(f.x + 0.55, sy, 31), iso(f.x + 0.75, sy, 31), iso(f.x + 0.75, sy, 25), iso(f.x + 0.55, sy, 25)], "#e74c3c", 'class="zz"');
+      tv += poly([iso(f.x + 1.2, sy, 36), iso(f.x + 1.5, sy, 36), iso(f.x + 1.5, sy, 33), iso(f.x + 1.2, sy, 33)], "#f1c40f");
+      tv += poly([iso(f.x + 1.6, sy, 41), iso(f.x + 1.72, sy, 41), iso(f.x + 1.72, sy, 39), iso(f.x + 1.6, sy, 39)], "#fff");
+    }
+    return tv;
+  }
   return "";
 }
 // Painter's order for an isometric scene: a dependency sort on footprints, so a walking agent can be
@@ -889,91 +915,101 @@ function placements(now) {
   for (const role of SIM.AGENTS) out[role] = { role, ...SIM.stateAt(seed, role, now, work) };
   return out;
 }
-/* ---------- characters: vector people with volume (v4) ---------- */
-const STYLE = {  // per agent: accessory and hair shape, so each one is recognisable anywhere in the room
+/* ---------- characters: Habbo-style people seen three-quarters ---------- */
+// Drawn facing the room's diagonals like Habbo: south-west (+y) is the base drawing, south-east (+x)
+// mirrors it, and north-east (-y) / north-west (-x) are the back views. Flat two-tone colours, dark outline.
+const STYLE = {  // per agent: accessory and hair, so each one is recognisable anywhere in the room
   Orchestrator: { acc: "tie", hair: "short" }, Setup: { acc: "beanie", hair: "short" }, Planner: { acc: "glasses", hair: "side" },
   Implementer: { acc: "headphones", hair: "messy" }, Reviewer: { acc: "glasses", hair: "long" }, Device: { acc: "bun", hair: "bun" },
   Delivery: { acc: "cap", hair: "short" },
 };
-const GRAD = {};
-// Gradients are defined once per colour in the room's <defs>; shapes refer to them by id.
-function grad(kind, colour) {
-  const id = `g-${kind}-${colour.replace("#", "")}`;
-  if (!GRAD[id]) {
-    GRAD[id] = kind === "skin"
-      ? `<radialGradient id="${id}" cx="40%" cy="35%" r="70%"><stop offset="0" stop-color="${shade(colour, 1.12)}"/><stop offset="1" stop-color="${shade(colour, .82)}"/></radialGradient>`
-      : `<linearGradient id="${id}" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${shade(colour, 1.18)}"/><stop offset=".55" stop-color="${colour}"/><stop offset="1" stop-color="${shade(colour, .7)}"/></linearGradient>`;
-    const defs = document.getElementById("roomDefs");
-    if (defs) defs.insertAdjacentHTML("beforeend", GRAD[id]);
-  }
-  return `url(#${id})`;
+const OL = "#24242c", OW = 0.9;  // outline colour and width
+const LIGHT_PANTS = "#3d5875", SHOE = "#1d1f24";
+function palette(desk) {
+  const [hair, skin] = LOOK[desk.role] || ["#3b2a20", "#f2c39b"];
+  return { hair, hairD: shade(hair, .72), skin, skinD: shade(skin, .84), shirt: desk.colour, shirtD: shade(desk.colour, .74),
+    pants: LIGHT_PANTS, pantsD: shade(LIGHT_PANTS, .78) };
 }
-function head(desk, back, y) {
-  const [hair, skin] = LOOK[desk.role] || ["#3b2a20", "#f2c39b"], st = STYLE[desk.role] || {};
-  let h = `<ellipse cx="0" cy="${y}" rx="6.8" ry="7.4" fill="${grad("skin", skin)}" stroke="rgba(0,0,0,.35)" stroke-width=".7"/>`;
-  if (back) h += `<path d="M-7 ${y + 1} C-7.5 ${y - 9} 7.5 ${y - 9} 7 ${y + 1} C6 ${y + 6} -6 ${y + 6} -7 ${y + 1} Z" fill="${grad("cloth", hair)}"/>`;
-  else {
-    const fringe = { side: `M-7 ${y - 1} C-6 ${y - 10} 7 ${y - 10} 7.2 ${y - 1} C3 ${y - 6} -2 ${y - 6} -7 ${y - 1} Z`,
-      messy: `M-7.4 ${y} L-6 ${y - 8} L-3 ${y - 6} L-1 ${y - 10} L2 ${y - 7} L4.5 ${y - 9.5} L7.4 ${y} C3 ${y - 5} -3 ${y - 5} -7.4 ${y} Z`,
-      long: `M-7.4 ${y + 6} C-9 ${y - 10} 9 ${y - 10} 7.4 ${y + 6} L6 ${y + 6} C6 ${y - 3} -6 ${y - 3} -6 ${y + 6} Z`,
-      bun: `M-7 ${y - 1} C-6.5 ${y - 9.5} 6.5 ${y - 9.5} 7 ${y - 1} C3 ${y - 5} -3 ${y - 5} -7 ${y - 1} Z`,
-      short: `M-7 ${y - 1.5} C-6.5 ${y - 9.5} 6.5 ${y - 9.5} 7 ${y - 1.5} C3 ${y - 5.5} -3 ${y - 5.5} -7 ${y - 1.5} Z` }[st.hair] || "";
-    h += `<path d="${fringe}" fill="${grad("cloth", hair)}"/>`;
-    h += `<ellipse cx="-2.4" cy="${y + 0.6}" rx=".95" ry="1.2" fill="#1d1d1d"/><ellipse cx="2.4" cy="${y + 0.6}" rx=".95" ry="1.2" fill="#1d1d1d"/>`;
-    h += `<path d="M-1.8 ${y + 3.6} Q0 ${y + 5} 1.8 ${y + 3.6}" stroke="#7a3b2e" stroke-width=".8" fill="none" stroke-linecap="round"/>`;
-    h += `<ellipse cx="-4" cy="${y + 2.8}" rx="1.2" ry=".7" fill="#e88" opacity=".45"/><ellipse cx="4" cy="${y + 2.8}" rx="1.2" ry=".7" fill="#e88" opacity=".45"/>`;
-    if (st.acc === "glasses") h += `<g fill="none" stroke="#222" stroke-width=".8"><circle cx="-2.4" cy="${y + 0.6}" r="2"/><circle cx="2.4" cy="${y + 0.6}" r="2"/><path d="M-.4 ${y + 0.5} h.8"/></g>`;
+const el = (cx, cy, rx, ry, fill, extra = "") => `<ellipse cx="${cx}" cy="${cy}" rx="${rx}" ry="${ry}" fill="${fill}" stroke="${OL}" stroke-width="${OW}" ${extra}/>`;
+const pth = (d, fill, extra = "") => `<path d="${d}" fill="${fill}" stroke="${OL}" stroke-width="${OW}" stroke-linejoin="round" ${extra}/>`;
+function habHead(desk, pal, back, cx, cy) {
+  const st = STYLE[desk.role] || {};
+  let h = "";
+  if (st.acc === "bun") h += el(cx + 5.2, cy - 6.6, 3.1, 3, pal.hair);  // behind the head
+  h += el(cx, cy, 7.8, 7.3, pal.skin);
+  if (back) {  // seen from behind: hair over the back of the head, the left ear peeking out
+    h += el(cx - 6.2, cy + 1.2, 1.6, 2.2, pal.skinD);
+    h += pth(`M${cx - 7.8} ${cy + 1} C${cx - 8.4} ${cy - 9.5} ${cx + 8.4} ${cy - 9.5} ${cx + 7.8} ${cy + 1.5} C${cx + 6.5} ${cy + 6.5} ${cx - 5.5} ${cy + 7} ${cx - 7.8} ${cy + 1} Z`, pal.hair);
+    if (st.hair === "long") h += pth(`M${cx - 6} ${cy + 4} L${cx - 6.5} ${cy + 11} L${cx + 6.5} ${cy + 11} L${cx + 6.5} ${cy + 3} Z`, pal.hairD);
+  } else {  // three-quarters toward south-west: face on the left, ear on the right
+    h += pth(`M${cx + 2.5} ${cy - 6} C${cx + 8.8} ${cy - 4} ${cx + 8.8} ${cy + 4} ${cx + 2.8} ${cy + 6.9} C${cx + 5.6} ${cy + 2} ${cx + 5.6} ${cy - 2} ${cx + 2.5} ${cy - 6} Z`, pal.skinD, 'stroke="none"');
+    h += el(cx + 4.8, cy + 1, 1.5, 2.1, pal.skinD);
+    const fringe = {
+      side: `M${cx - 8} ${cy - 0.5} C${cx - 8.2} ${cy - 10} ${cx + 8.5} ${cy - 10.5} ${cx + 8} ${cy + 0.5} L${cx + 7.6} ${cy + 3} C${cx + 6} ${cy + 1} ${cx + 5.4} ${cy - 1} ${cx + 4.6} ${cy - 3} C${cx + 1} ${cy - 5.2} ${cx - 4} ${cy - 3.2} ${cx - 8} ${cy - 0.5} Z`,
+      messy: `M${cx - 8.2} ${cy} L${cx - 7} ${cy - 8} L${cx - 4} ${cy - 6} L${cx - 2} ${cy - 10.5} L${cx + 1} ${cy - 7.5} L${cx + 4} ${cy - 10} L${cx + 8.3} ${cy + 1} L${cx + 7.6} ${cy + 3} C${cx + 6} ${cy} ${cx + 5} ${cy - 2} ${cx + 4} ${cy - 3.5} C${cx} ${cy - 4.5} ${cx - 4} ${cy - 3} ${cx - 8.2} ${cy} Z`,
+      long: `M${cx - 8} ${cy - 0.5} C${cx - 8.4} ${cy - 10.5} ${cx + 8.6} ${cy - 10.5} ${cx + 8.2} ${cy + 1} L${cx + 7.8} ${cy + 11} L${cx + 4.5} ${cy + 10} C${cx + 5.5} ${cy + 3} ${cx + 5} ${cy - 1} ${cx + 4.2} ${cy - 3.2} C${cx} ${cy - 4.8} ${cx - 4} ${cy - 3} ${cx - 8} ${cy - 0.5} Z`,
+    }[st.hair] || `M${cx - 8} ${cy - 1} C${cx - 8.2} ${cy - 10} ${cx + 8.4} ${cy - 10.2} ${cx + 8} ${cy} L${cx + 7.4} ${cy + 2.6} C${cx + 6.2} ${cy + 0.5} ${cx + 5.4} ${cy - 1.5} ${cx + 4.4} ${cy - 3.4} C${cx + 1} ${cy - 5} ${cx - 4} ${cy - 3.6} ${cx - 8} ${cy - 1} Z`;
+    h += pth(fringe, pal.hair);
+    h += `<ellipse cx="${cx - 4.6}" cy="${cy + 0.6}" rx="1" ry="1.45" fill="#16161a"/><ellipse cx="${cx - 1.1}" cy="${cy + 0.6}" rx="1" ry="1.45" fill="#16161a"/>`;
+    h += `<path d="M${cx - 5.2} ${cy + 4} Q${cx - 3.6} ${cy + 5} ${cx - 2} ${cy + 4}" stroke="${OL}" stroke-width=".8" fill="none" stroke-linecap="round"/>`;
+    h += `<ellipse cx="${cx - 6.2}" cy="${cy + 2.7}" rx="1.1" ry=".65" fill="#e77" opacity=".45"/>`;
+    if (st.acc === "glasses") h += `<g fill="none" stroke="${OL}" stroke-width=".8"><circle cx="${cx - 4.6}" cy="${cy + 0.6}" r="2"/><circle cx="${cx - 1.1}" cy="${cy + 0.6}" r="2"/><path d="M${cx - 2.6} ${cy + 0.5} h-.1 M${cx + 0.9} ${cy + 0.5} L${cx + 4.4} ${cy}"/></g>`;
   }
-  if (st.acc === "bun") h += `<circle cx="0" cy="${y - 8.6}" r="3" fill="${grad("cloth", hair)}" stroke="rgba(0,0,0,.3)" stroke-width=".5"/>`;
-  if (st.acc === "beanie") h += `<path d="M-7.2 ${y - 2} C-7 ${y - 12} 7 ${y - 12} 7.2 ${y - 2} Z" fill="${grad("cloth", "#d35400")}"/><rect x="-7.4" y="${y - 3.4}" width="14.8" height="2.6" rx="1.2" fill="#a04000"/>`;
-  if (st.acc === "cap") h += `<path d="M-7 ${y - 2.5} C-6.8 ${y - 11} 6.8 ${y - 11} 7 ${y - 2.5} Z" fill="${grad("cloth", "#16a085")}"/>${back ? "" : `<ellipse cx="0" cy="${y - 2.4}" rx="8.5" ry="1.8" fill="#117a65"/>`}`;
-  if (st.acc === "headphones") h += `<path d="M-7.4 ${y} C-8 ${y - 12} 8 ${y - 12} 7.4 ${y}" fill="none" stroke="#2d3436" stroke-width="1.6"/><rect x="-9" y="${y - 2}" width="3" height="5" rx="1.2" fill="#2d3436"/><rect x="6" y="${y - 2}" width="3" height="5" rx="1.2" fill="#2d3436"/>`;
+  if (st.acc === "beanie") h += pth(`M${cx - 8} ${cy - 2} C${cx - 7.6} ${cy - 12.5} ${cx + 7.6} ${cy - 12.5} ${cx + 8} ${cy - 2} Z`, "#d35400") + `<rect x="${cx - 8.2}" y="${cy - 3.4}" width="16.4" height="2.8" rx="1.3" fill="#a04000" stroke="${OL}" stroke-width="${OW}"/>`;
+  if (st.acc === "cap") h += pth(`M${cx - 7.8} ${cy - 2.5} C${cx - 7.6} ${cy - 11.5} ${cx + 7.6} ${cy - 11.5} ${cx + 7.8} ${cy - 2.5} Z`, "#16a085")
+    + (back ? "" : pth(`M${cx - 7.6} ${cy - 3} L${cx - 13} ${cy - 1.5} L${cx - 12} ${cy} L${cx - 6.5} ${cy - 1.2} Z`, "#117a65"));
+  if (st.acc === "headphones") h += `<path d="M${cx - 7.6} ${cy} C${cx - 8} ${cy - 12.5} ${cx + 8} ${cy - 12.5} ${cx + 7.6} ${cy}" fill="none" stroke="${OL}" stroke-width="2"/>` + el(back ? cx - 6.6 : cx + 5.6, cy + 0.5, 2, 2.8, "#2d3436");
   return h;
 }
-function torso(desk, y0, back) {
+function habTorso(desk, pal, back, y) {
   const st = STYLE[desk.role] || {};
-  let t = `<path d="M-8 ${y0 + 15} C-8.5 ${y0 + 4} -6.5 ${y0} 0 ${y0} C6.5 ${y0} 8.5 ${y0 + 4} 8 ${y0 + 15} Z" fill="${grad("cloth", desk.colour)}" stroke="rgba(0,0,0,.35)" stroke-width=".7"/>`;
-  if (!back) t += `<path d="M-2.6 ${y0 + .3} L0 ${y0 + 3} L2.6 ${y0 + .3}" fill="none" stroke="${shade(desk.colour, .6)}" stroke-width=".9"/>`;
-  if (!back && st.acc === "tie") t += `<path d="M0 ${y0 + 2.6} L-1.4 ${y0 + 5} L0 ${y0 + 12} L1.4 ${y0 + 5} Z" fill="#c0392b"/>`;
+  // front (or back) face on the left, the shaded side on the right: a box turned toward the viewer
+  let t = pth(`M${-7.4} ${y + 2} Q${-7.4} ${y} ${-5} ${y} L${3.4} ${y} L${3.4} ${y + 12.5} L${-7.4} ${y + 12.5} Z`, back ? pal.shirtD : pal.shirt);
+  t += pth(`M${3.4} ${y} L${5.4} ${y} Q${7} ${y} ${7} ${y + 2} L${7} ${y + 11.5} L${3.4} ${y + 12.5} Z`, back ? pal.shirt : pal.shirtD);
+  if (!back) t += `<path d="M${-4.4} ${y + 0.4} L${-2} ${y + 3} L${0.4} ${y + 0.4}" fill="none" stroke="${OL}" stroke-width=".8"/>`;
+  if (!back && st.acc === "tie") t += pth(`M${-2} ${y + 2.8} L${-3.3} ${y + 5} L${-2} ${y + 11} L${-0.7} ${y + 5} Z`, "#c0392b");
   return t;
 }
-const arm = (desk, x, y0, swing, cls) => {
-  const [, skin] = LOOK[desk.role] || ["", "#f2c39b"];
-  return `<g class="arm ${cls}" transform="rotate(${swing} ${x} ${y0 + 1})"><rect x="${x - 1.9}" y="${y0}" width="3.8" height="11" rx="1.9" fill="${grad("cloth", shade(desk.colour, .9))}" stroke="rgba(0,0,0,.3)" stroke-width=".5"/><circle cx="${x}" cy="${y0 + 11.2}" r="1.9" fill="${grad("skin", skin)}"/></g>`;
-};
-const legs = (pose, step) => {
-  const pants = grad("cloth", "#34495e"), shoe = "#1e272e";
-  if (pose === "sit") return `<rect x="-6.5" y="-6" width="13" height="5" rx="2.4" fill="${pants}"/><rect x="-6.2" y="-2" width="4" height="7" rx="1.8" fill="${pants}"/><rect x="2.2" y="-2" width="4" height="7" rx="1.8" fill="${pants}"/><ellipse cx="-4.2" cy="5.2" rx="2.8" ry="1.4" fill="${shoe}"/><ellipse cx="4.2" cy="5.2" rx="2.8" ry="1.4" fill="${shoe}"/>`;
-  const a = pose === "walk" ? (step ? 2.6 : -2.6) : 0;
-  const leg = (x, dx, lift) => `<rect x="${x + dx - 2.1}" y="${-16 + lift}" width="4.2" height="${15 - lift}" rx="2" fill="${pants}" stroke="rgba(0,0,0,.25)" stroke-width=".5"/><ellipse cx="${x + dx}" cy="${-0.8}" rx="2.9" ry="1.5" fill="${shoe}"/>`;
-  return leg(-2.7, a, a > 0 ? 1 : 0) + leg(2.7, -a, a < 0 ? 1 : 0);
-};
-// A standing/walking/sitting person with the feet at (fx, fy). Faces the viewer for +x/+y, away for -x/-y.
-function figure(desk, fx, fy, face, pose, s = 1.15) {
-  const back = face === "-x" || face === "-y", flip = face === "+x" || face === "-x" ? -1 : 1;
-  const walking = pose === "stepA" || pose === "stepB", sitting = pose === "sit";
-  const swing = walking ? (pose === "stepA" ? 18 : -18) : 0, bodyY = sitting ? -21 : -31;
-  let g = `<ellipse cx="0" cy="0" rx="9.5" ry="3.6" fill="url(#g-shadow)"/>`;
-  g += legs(sitting ? "sit" : walking ? "walk" : "stand", pose === "stepA");
-  if (back) g += torso(desk, bodyY, true) + arm(desk, -8.4, bodyY + 2, -swing, "l") + arm(desk, 8.4, bodyY + 2, swing, "r");
-  else g += arm(desk, -8.4, bodyY + 2, swing, "l") + arm(desk, 8.4, bodyY + 2, -swing, "r") + torso(desk, bodyY, false);
-  g += head(desk, back, bodyY - 7.5);
-  return { svg: `<g transform="translate(${fx.toFixed(1)} ${fy.toFixed(1)}) scale(${(flip * s).toFixed(2)} ${s})">${g}</g>`, top: fy + (bodyY - 17) * s };
+const habArm = (pal, x, y, swing, cls, far) => `<g class="arm ${cls}" transform="rotate(${swing} ${x} ${y + 1.5})"><rect x="${x - 1.8}" y="${y}" width="3.6" height="10.5" rx="1.8" fill="${far ? pal.shirtD : pal.shirt}" stroke="${OL}" stroke-width="${OW}"/>${el(x, y + 11, 1.9, 1.9, far ? pal.skinD : pal.skin)}</g>`;
+function habLegs(pal, pose, step, back) {
+  if (pose === "sit") {  // thighs forward toward the face, shins down
+    const leg = (dx, dy, fill) => pth(`M${-1.5 + dx} ${-14 + dy} L${-8 + dx} ${-11 + dy} L${-8.4 + dx} ${-3 + dy} L${-5.2 + dx} ${-3 + dy} L${-5 + dx} ${-8.5 + dy} L${2 + dx} ${-10.5 + dy} Z`, fill)
+      + el(-9 + dx, -2.4 + dy, 3, 1.5, SHOE);
+    return leg(4, -1.6, pal.pantsD) + leg(0, 0, pal.pants);
+  }
+  const a = pose === "walk" ? (step ? 1 : -1) : 0;
+  const leg = (x, dx, dy, fill) => `<rect x="${x + dx - 2}" y="${-15 + dy}" width="4" height="${14}" rx="1.9" fill="${fill}" stroke="${OL}" stroke-width="${OW}"/>` + el(x + dx - (back ? -1.2 : 1.2), -1 + dy, 2.9, 1.5, SHOE);
+  return leg(2.4, -2 * a, -1.2 * a - 0.6, pal.pantsD) + leg(-2.4, 2 * a, 1.2 * a, pal.pants);
 }
-// Seated at a desk: only the upper body shows above the desktop; the arms type when working.
-function person(desk, ax, ay, s = 1.15) {
-  const y0 = -16;
-  let g = arm(desk, -8.4, y0 + 2, -28, "l") + arm(desk, 8.4, y0 + 2, 28, "r") + torso(desk, y0, false) + head(desk, false, y0 - 7.5);
-  return { svg: `<g transform="translate(${ax.toFixed(1)} ${(ay + 2).toFixed(1)}) scale(${s})">${g}</g>`, top: ay + 2 + (y0 - 17) * s };
+// A person with the feet (or the seat, when sitting) at (fx, fy).
+function figure(desk, fx, fy, face, pose, s = 1.12) {
+  const pal = palette(desk), back = face === "-x" || face === "-y", flip = face === "+x" || face === "-x" ? -1 : 1;
+  const walking = pose === "stepA" || pose === "stepB", sitting = pose === "sit";
+  const swing = walking ? (pose === "stepA" ? 22 : -22) : 0, y = sitting ? -25 : -29;
+  let g = `<ellipse cx="0" cy="0" rx="10" ry="3.8" fill="url(#g-shadow)"/>`;
+  g += habLegs(pal, sitting ? "sit" : walking ? "walk" : "stand", pose === "stepA", back);
+  g += habArm(pal, 6.4, y + 1.5, -swing, "r", true);
+  g += habTorso(desk, pal, back, y);
+  g += habArm(pal, -7.6, y + 1.5, sitting ? 18 : swing, "l", false);
+  g += habHead(desk, pal, back, -0.8, y - 7.2);
+  const hand = [fx + flip * (-7.6 - (sitting ? 3 : 0)) * s, fy + (y + 12) * s];
+  return { svg: `<g transform="translate(${fx.toFixed(1)} ${fy.toFixed(1)}) scale(${(flip * s).toFixed(2)} ${s})">${g}</g>`, top: fy + (y - 17) * s, hand };
+}
+// Seated at a desk, facing the front of the room; the desk in front hides the legs. Arms type when working.
+function person(desk, ax, ay, s = 1.12) {
+  const pal = palette(desk), y = -25;
+  let g = habLegs(pal, "sit", false, false);
+  g += habArm(pal, 6.4, y + 1.5, 30, "r", true) + habTorso(desk, pal, false, y) + habArm(pal, -7.6, y + 1.5, 34, "l", false);
+  g += habHead(desk, pal, false, -0.8, y - 7.2);
+  return { svg: `<g transform="translate(${ax.toFixed(1)} ${(ay + 9).toFixed(1)}) scale(${s})">${g}</g>`, top: ay + 9 + (y - 17) * s };
 }
 
 // Small pictograms for what an idle agent is doing (drawn, so they look the same in every browser).
 function icon(mode, x, y) {
   const g = body => `<g transform="translate(${x.toFixed(1)} ${y.toFixed(1)})">${body}</g>`;
   if (mode === "coffee" || mode === "copa") return g('<rect x="-4" y="-3" width="7" height="6" rx="1" fill="#fff" stroke="#5b3a29" stroke-width="1"/><path d="M3 -1.5 h1.6 v3 h-1.6" fill="none" stroke="#5b3a29" stroke-width="1"/><path d="M-2 -5 q1 -1.5 0 -3 M1 -5 q1 -1.5 0 -3" stroke="#ddd" stroke-width=".8" fill="none"/>');
-  if (mode === "game") return g('<rect x="-6" y="-3" width="12" height="6" rx="3" fill="#2c3e50" stroke="#111" stroke-width=".8"/><rect x="-4" y="-.5" width="3" height="1" fill="#fff"/><rect x="-3" y="-1.5" width="1" height="3" fill="#fff"/><circle cx="3" cy="-1" r=".9" fill="#e74c3c"/><circle cx="4.4" cy=".6" r=".9" fill="#f1c40f"/>');
+  if (mode === "game" || mode === "sofa") return g('<rect x="-6" y="-3" width="12" height="6" rx="3" fill="#2c3e50" stroke="#111" stroke-width=".8"/><rect x="-4" y="-.5" width="3" height="1" fill="#fff"/><rect x="-3" y="-1.5" width="1" height="3" fill="#fff"/><circle cx="3" cy="-1" r=".9" fill="#e74c3c"/><circle cx="4.4" cy=".6" r=".9" fill="#f1c40f"/>');
   if (mode === "cooler") return g('<path d="M0 -5 C3 -1 3.5 1 0 3.5 C-3.5 1 -3 -1 0 -5 Z" fill="#5dade2" stroke="#1f618d" stroke-width=".8"/>');
-  if (mode === "sofa") return g('<rect x="-6" y="-2" width="12" height="4" rx="1" fill="#3f6fb5" stroke="#1d3557" stroke-width=".8"/><rect x="-6" y="-4.5" width="12" height="3" rx="1" fill="#355f9c" stroke="#1d3557" stroke-width=".8"/>');
   if (mode === "window") return g('<circle r="3.4" fill="#f9d342" stroke="#c9a227" stroke-width=".8"/><path d="M0 -6 v1.6 M0 4.4 v1.6 M-6 0 h1.6 M4.4 0 h1.6" stroke="#f9d342" stroke-width="1"/>');
   return "";
 }
@@ -996,7 +1032,11 @@ function agentItem(desk, pl) {
   const legs = pl.mode === "walk" ? (pl.step ? "stepA" : "stepB") : seated ? "sit" : "stand";
   const f = figure(desk, fx, fy, pl.face, legs);
   let props = "";
-  if (pl.mode === "coffee" || pl.mode === "copa") props += `<rect x="${(fx + 7).toFixed(1)}" y="${(f.top + 30).toFixed(1)}" width="5" height="5" fill="#fff" stroke="#6b4f3a" stroke-width=".8"/><path d="M${(fx + 8.5).toFixed(1)} ${(f.top + 27).toFixed(1)} q1.5 -2 0 -4" stroke="#fff" stroke-width=".8" fill="none" class="zz"/>`;
+  const back = pl.face === "-x" || pl.face === "-y";
+  if ((pl.mode === "coffee" || pl.mode === "copa") && !back) {
+    const [hx, hy] = f.hand;
+    props += `<rect x="${(hx - 2.5).toFixed(1)}" y="${(hy - 5).toFixed(1)}" width="5" height="5.2" rx="1" fill="#fff" stroke="${OL}" stroke-width=".8"/><path d="M${(hx - 1).toFixed(1)} ${(hy - 7).toFixed(1)} q1.5 -2 0 -4" stroke="#fff" stroke-width=".8" fill="none" class="zz"/>`;
+  }
   if (pl.mode === "chat") props += `<g class="zz"><rect x="${(fx + 4).toFixed(1)}" y="${(f.top - 13).toFixed(1)}" width="17" height="10" rx="3" fill="#fff" stroke="#222" stroke-width=".8"/><text x="${(fx + 12.5).toFixed(1)}" y="${(f.top - 6).toFixed(1)}" font-size="6" text-anchor="middle" fill="#111">\u2026</text></g>`;
   return { ...base, svg: f.svg + props, anchor: [fx, fy], top: f.top - (pl.mode === "chat" ? 14 : 0) };
 }
@@ -1044,7 +1084,6 @@ function renderRoom() {
       deskHits.push(hitArea(desk, sx, sy));
     }
   }
-  for (const key of Object.keys(GRAD)) delete GRAD[key];
   svg.innerHTML = `<defs id="roomDefs"><radialGradient id="g-shadow"><stop offset="0" stop-color="#000" stop-opacity=".32"/><stop offset="1" stop-color="#000" stop-opacity="0"/></radialGradient><linearGradient id="g-wall" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".16"/><stop offset="1" stop-color="#000" stop-opacity=".12"/></linearGradient></defs><g id="bg">${walls()}${floorTiles()}${rings.join("")}</g><g id="scene"></g><g id="overlay"></g><g id="deskHits">${deskHits.join("")}</g><g id="agentHits"></g>`;
   bindRoomEvents(svg);
   FURNITURE_ITEMS = null; SCENE_KEY = "";
