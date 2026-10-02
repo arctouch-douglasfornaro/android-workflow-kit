@@ -361,10 +361,13 @@ const SIM = (() => {
   const centre = (c, r) => ({ x: (c + 0.5) * CELL, y: (r + 0.5) * CELL });
   const walkable = (x, y) => { const [c, r] = cellOf(x, y); return x >= 0 && y >= 0 && x < W && y < D && !blocked[r * COLS + c]; };
   // Shortest walk between two points over the cell grid (4 directions, the isometric axes). Deterministic.
+  const routes = new Map();
   function path(from, to) {
     const [sc, sr] = cellOf(from.x, from.y), [gc, gr] = cellOf(to.x, to.y);
     const start = sr * COLS + sc, goal = gr * COLS + gc;
     if (start === goal) return [{ x: from.x, y: from.y }, { x: to.x, y: to.y }];
+    const cached = routes.get(start * 100000 + goal);
+    if (cached !== undefined) return cached && [{ x: from.x, y: from.y }, ...cached, { x: to.x, y: to.y }];
     const prev = new Int32Array(COLS * ROWS).fill(-1), queue = [start];
     prev[start] = start;
     for (let i = 0; i < queue.length && prev[goal] < 0; i++) {
@@ -376,14 +379,14 @@ const SIM = (() => {
         prev[n] = cur; queue.push(n);
       }
     }
-    if (prev[goal] < 0) return null;
+    if (prev[goal] < 0) { routes.set(start * 100000 + goal, null); return null; }
     const cells = [];
     for (let n = goal; n !== start; n = prev[n]) cells.push(n);
     cells.reverse();
-    const out = [{ x: from.x, y: from.y }];
-    for (const n of cells.slice(0, -1)) { const c = n % COLS; out.push(centre(c, (n - c) / COLS)); }
-    out.push({ x: to.x, y: to.y });
-    return out;
+    const middle = cells.slice(0, -1).map(n => { const c = n % COLS; return centre(c, (n - c) / COLS); });
+    if (routes.size > 4000) routes.clear();
+    routes.set(start * 100000 + goal, middle);
+    return [{ x: from.x, y: from.y }, ...middle, { x: to.x, y: to.y }];
   }
   const pathLength = pts => pts.slice(1).reduce((sum, q, i) => sum + Math.abs(q.x - pts[i].x) + Math.abs(q.y - pts[i].y), 0);
 
@@ -953,9 +956,9 @@ function agentItem(desk, pl) {
   if (pl.mode === "chat") props += `<g class="zz"><rect x="${(fx + 4).toFixed(1)}" y="${(f.top - 13).toFixed(1)}" width="17" height="10" rx="3" fill="#fff" stroke="#222" stroke-width=".8"/><text x="${(fx + 12.5).toFixed(1)}" y="${(f.top - 6).toFixed(1)}" font-size="6" text-anchor="middle" fill="#111">\u2026</text></g>`;
   return { ...base, svg: f.svg + props, anchor: [fx, fy], top: f.top - (pl.mode === "chat" ? 14 : 0) };
 }
-function overlayFor(desk, anchor, top, pl) {
+function overlayFor(desk, anchor, top, pl, lifted) {
   const [ax, ay] = anchor, working = desk.state === "working";
-  const above = Math.min(top, ay - 30) - 6, floating = ["idle", "waiting"].includes(desk.state);
+  const above = lifted != null ? lifted : Math.min(top, ay - 30) - 6, floating = ["idle", "waiting"].includes(desk.state);
   if (pl && pl.mode !== "desk") {  // away from the desk: a light name tag and what they are up to
     return tag(ax, above, desk) + icon(pl.mode, ax, above - 20);
   }
@@ -964,55 +967,109 @@ function overlayFor(desk, anchor, top, pl) {
   if (desk.state === "failed" && desk.note) over += bubble(ax, above - 16, desk.note, true);
   return over;
 }
+// Two walkers about to bump into each other each step aside, across the way they are going (drawing only).
+function separateWalkers(placed) {
+  const walkers = SIM.AGENTS.filter(r => placed[r] && placed[r].mode === "walk");
+  for (let i = 0; i < walkers.length; i++) for (let j = i + 1; j < walkers.length; j++) {
+    const a = placed[walkers[i]], b = placed[walkers[j]];
+    if (Math.abs(a.x - b.x) + Math.abs(a.y - b.y) >= 0.4) continue;
+    for (const [w, side] of [[a, 1], [b, -1]]) {
+      if (w.face === "+x" || w.face === "-x") w.y += 0.18 * side; else w.x += 0.18 * side;
+    }
+  }
+  return placed;
+}
+// The room is layered: walls, floor, hover rings and desk hit areas are built once; furniture and agents
+// (depth-sorted), overlays and the agents' own hit areas are redrawn only when someone moved.
+let FURNITURE_ITEMS = null, FURNITURE_KEY = "", SCENE_KEY = "", animTimer = null;
 function renderRoom() {
   const svg = document.getElementById("room");
   svg.setAttribute("viewBox", `0 0 ${VW} ${VH}`);
-  PLACED = placements(Date.now() / 1000);
-  const items = [], overlays = [], hits = [], rings = [];
-  const present = new Set(desks().map(d => d.role));
+  const present = new Set(desks().map(d => d.role)), rings = [], deskHits = [];
   for (const f of SIM.FURNITURE) {
-    if (f.role && !present.has(f.role)) continue;
-    items.push({ ...f, prio: f.kind === "chair" || f.kind === "stool" ? 0 : 2, svg: drawFurniture(f, { screenFor }) });
-    if (f.kind === "desk" || f.kind === "machine") {
-      const ring = [iso(f.x - 0.2, f.y - 1.05), iso(f.x + f.w + 0.2, f.y - 1.05), iso(f.x + f.w + 0.2, f.y + f.d + 0.3), iso(f.x - 0.2, f.y + f.d + 0.3)];
-      rings.push(`<polygon class="ring" data-ring="${esc(f.role)}" points="${pts(ring)}"/>`);
+    if (!(f.kind === "desk" || f.kind === "machine") || !present.has(f.role)) continue;
+    const ring = [iso(f.x - 0.2, f.y - 1.05), iso(f.x + f.w + 0.2, f.y - 1.05), iso(f.x + f.w + 0.2, f.y + f.d + 0.3), iso(f.x - 0.2, f.y + f.d + 0.3)];
+    rings.push(`<polygon class="ring" data-ring="${esc(f.role)}" points="${pts(ring)}"/>`);
+  }
+  for (const desk of desks()) {
+    if (desk.kind === "machine") {
+      const f = SIM.FURNITURE.find(x => x.id === "gate"), [hx, hy] = iso(f.x + 0.55, f.y + 0.45, 54);
+      deskHits.push(hitArea(desk, hx, hy + 30));
+    } else {
+      const seat = SIM.SEATS[desk.role], [sx, sy] = iso(seat.x, seat.y, 12);
+      deskHits.push(hitArea(desk, sx, sy));
     }
   }
+  svg.innerHTML = `<g id="bg">${walls()}${floorTiles()}${rings.join("")}</g><g id="scene"></g><g id="overlay"></g><g id="deskHits">${deskHits.join("")}</g><g id="agentHits"></g>`;
+  bindRoomEvents(svg);
+  FURNITURE_ITEMS = null; SCENE_KEY = "";
+  drawScene();
+  clearTimeout(animTimer);
+  const tick = () => { if (!document.hidden) drawScene(); animTimer = setTimeout(() => requestAnimationFrame(tick), 80); };
+  animTimer = setTimeout(() => requestAnimationFrame(tick), 80);
+}
+function drawScene() {
+  const svg = document.getElementById("room");
+  PLACED = separateWalkers(placements(Date.now() / 1000));
+  const key = SIM.AGENTS.map(r => { const p = PLACED[r]; return p ? `${p.mode}:${p.x.toFixed(2)}:${p.y.toFixed(2)}:${p.face}:${p.step || 0}:${p.working ? 1 : 0}` : ""; }).join("|");
+  if (key === SCENE_KEY) return;  // nobody moved: keep the DOM as it is
+  SCENE_KEY = key;
+  const furnitureKey = SIM.AGENTS.map(r => PLACED[r] ? `${PLACED[r].mode}${PLACED[r].working ? 1 : 0}` : "").join();
+  if (!FURNITURE_ITEMS || furnitureKey !== FURNITURE_KEY) {
+    const present = new Set(desks().map(d => d.role));
+    FURNITURE_ITEMS = SIM.FURNITURE.filter(f => !f.role || present.has(f.role))
+      .map(f => ({ ...f, prio: f.kind === "chair" || f.kind === "stool" ? 0 : 2, svg: drawFurniture(f, { screenFor }) }));
+    FURNITURE_KEY = furnitureKey;
+  }
+  const items = [...FURNITURE_ITEMS], overlays = [], agentHits = [], labels = [], placedTags = [];
   for (const desk of desks()) {
     if (desk.kind === "machine") {
       const f = SIM.FURNITURE.find(x => x.id === "gate"), [hx, hy] = iso(f.x + 0.55, f.y + 0.45, 54);
       let over = tag(hx, hy - 8, desk) + statusMark(hx + desk.role.length * 3 + 17, hy - 14, desk);
       if (desk.note && (desk.state === "failed" || desk.state === "working")) over += bubble(hx, hy - 24, desk.note, desk.state === "failed");
       overlays.push(over);
-      hits.push(hitArea(desk, hx, hy + 30));
       continue;
     }
-    const pl = PLACED[desk.role], seat = SIM.SEATS[desk.role], [sx, sy] = iso(seat.x, seat.y, 12);
-    if (!pl) { hits.push(hitArea(desk, sx, sy)); continue; }
+    const pl = PLACED[desk.role];
+    if (!pl) continue;
     const it = agentItem(desk, pl);
     items.push(it);
-    overlays.push(overlayFor(desk, it.anchor, it.top, pl));
-    hits.push(hitArea(desk, sx, sy));
-    if (pl.mode !== "desk" && pl.mode !== "game") hits.push(agentHit(desk, it.anchor[0], it.anchor[1]));
+    labels.push({ desk, it, pl });
+    if (pl.mode !== "desk" && pl.mode !== "game") agentHits.push(agentHit(desk, it.anchor[0], it.anchor[1]));
   }
-  svg.innerHTML = walls() + floorTiles() + rings.join("") + depthSort(items).map(i => i.svg).join("") + overlays.join("") + hits.join("");
-  bindSpots(svg);
+  // Name tags must not cover each other: the ones further back move up until they are clear.
+  labels.sort((a, b) => b.it.anchor[1] - a.it.anchor[1]);
+  for (const { desk, it, pl } of labels) {
+    const width = desk.role.length * 6 + 18;
+    let above = Math.min(it.top, it.anchor[1] - 30) - 6;
+    const hits = () => placedTags.some(b => Math.abs(b.x - it.anchor[0]) < (b.w + width) / 2 + 2 && Math.abs(b.y - above) < 14);
+    for (let i = 0; i < 6 && hits(); i++) above -= 14;
+    placedTags.push({ x: it.anchor[0], y: above, w: width });
+    overlays.push(overlayFor(desk, it.anchor, it.top, pl, above));
+  }
+  svg.querySelector("#scene").innerHTML = depthSort(items).map(i => i.svg).join("");
+  svg.querySelector("#overlay").innerHTML = overlays.join("");
+  svg.querySelector("#agentHits").innerHTML = agentHits.join("");
 }
 function hitArea(desk, hx, hy) {
   return `<g class="spot" data-role="${esc(desk.role)}" tabindex="0" role="button" aria-label="${esc(desk.role)}: ${esc(STATE_LABEL[desk.state] || desk.state)}. Open details."><rect class="hit" x="${(hx - 64).toFixed(1)}" y="${(hy - 96).toFixed(1)}" width="128" height="132" rx="10"/></g>`;
 }
 function agentHit(desk, x, y) {
-  return `<g class="spot" data-role="${esc(desk.role)}" tabindex="-1" aria-label="${esc(desk.role)}"><rect class="hit" x="${(x - 16).toFixed(1)}" y="${(y - 52).toFixed(1)}" width="32" height="56" rx="6"/></g>`;
+  return `<g class="spot" data-role="${esc(desk.role)}" aria-label="${esc(desk.role)}"><rect class="hit" x="${(x - 16).toFixed(1)}" y="${(y - 52).toFixed(1)}" width="32" height="56" rx="6"/></g>`;
 }
-function bindSpots(svg) {
-  svg.querySelectorAll(".spot").forEach(el => {
-    const ring = svg.querySelector(`.ring[data-ring="${CSS.escape(el.dataset.role)}"]`);
-    const on = () => ring && ring.classList.add("hover"), off = () => ring && ring.classList.remove("hover");
-    el.addEventListener("mouseenter", on); el.addEventListener("mouseleave", off);
-    el.addEventListener("focus", on); el.addEventListener("blur", off);
-    el.addEventListener("click", () => openDrawer(el.dataset.role));
-    el.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openDrawer(el.dataset.role); } });
-  });
+// One set of listeners on the room (delegation), so redrawing the scene never drops them or the focus.
+function bindRoomEvents(svg) {
+  if (svg.dataset.bound) return;
+  svg.dataset.bound = "1";
+  const spotOf = e => e.target && e.target.closest ? e.target.closest(".spot") : null;
+  const ringOf = role => svg.querySelector(`.ring[data-ring="${CSS.escape(role)}"]`);
+  const clear = () => svg.querySelectorAll(".ring.hover").forEach(r => r.classList.remove("hover"));
+  svg.addEventListener("click", e => { const s = spotOf(e); if (s) openDrawer(s.dataset.role); });
+  svg.addEventListener("keydown", e => { const s = spotOf(e); if (s && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); openDrawer(s.dataset.role); } });
+  svg.addEventListener("mouseover", e => { const s = spotOf(e); clear(); const r = s && ringOf(s.dataset.role); if (r) r.classList.add("hover"); });
+  svg.addEventListener("mouseleave", clear);
+  svg.addEventListener("focusin", e => { const s = spotOf(e); const r = s && ringOf(s.dataset.role); if (r) r.classList.add("hover"); });
+  svg.addEventListener("focusout", clear);
 }
 
 /* ---------- side panel ---------- */

@@ -121,3 +121,14 @@ class OfficeRoutineTests(unittest.TestCase):
           for (let k = 0; k < 400; k++) for (const r of SIM.AGENTS) { const m = SIM.stateAt("X", r, NOW + k * SIM.SLOT + 20, {}).mode; modes[m] = (modes[m] || 0) + 1; }
           console.log(JSON.stringify(Object.keys(modes).sort()));""")
         self.assertEqual(result, sorted(["chat", "coffee", "copa", "cooler", "desk", "game", "sofa", "window"]))
+
+    def test_cached_routes_match_fresh_ones_and_stay_untouched(self) -> None:
+        result = run_sim(OfficePlanTests.SPOTS + """
+          const a = SIM.path(SIM.SEATS.Planner, SIM.POIS.coffee[0]);
+          a.push({ x: 99, y: 99 });  // a caller changing its copy must not change the cache
+          const b = SIM.path(SIM.SEATS.Planner, SIM.POIS.coffee[0]);
+          const shifted = SIM.path({ x: SIM.SEATS.Planner.x + 0.1, y: SIM.SEATS.Planner.y }, SIM.POIS.coffee[0]);
+          console.log(JSON.stringify({ sameLength: a.length - 1 === b.length, last: b[b.length - 1], start: shifted[0] }));""")
+        self.assertTrue(result["sameLength"])
+        self.assertEqual(result["last"], {"x": 13.6, "y": 1.15})
+        self.assertAlmostEqual(result["start"]["x"], 5.5, places=6)
