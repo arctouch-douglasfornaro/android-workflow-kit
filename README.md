@@ -113,15 +113,17 @@ Everything under `.ai/workflow/` stays on your machine; it is git-ignored and ne
 
 ### 5. Watch the agents work
 
-The workflow keeps a page that shows the run as an isometric pixel-art office: one desk per agent,
-who is working right now and what on, who finished, who sent work back for a fix, plus time and
-tokens per agent and the run's activity as a chat. **Click any desk, file card or message** to read
-what that agent produced, formatted: the plan and acceptance criteria, the implementation notes and
-changed files, every quality-gate check (with the Gradle logs), the review's blocking points and
-suggestions, the device report with before/after screenshots, and the PR description. It is on by default, costs nothing (it is
-built from the run's own files, no AI involved) and refreshes itself every few seconds.
+The workflow keeps a page that shows the run as an isometric office, Habbo style: one desk per agent,
+a corridor and a coffee room. Only the agents doing work sit at their desk; the others follow a
+deterministic routine — coffee, a chat in the corridor, the sofa, the window, a game at their desk —
+and walk back as soon as they get work. The page also shows who sent work back for a fix, time and
+tokens per agent, the run's activity as a chat and every past run of the app. **Click any desk,
+agent, file card or message** to read what that agent produced, formatted: the plan and acceptance
+criteria, the implementation notes and changed files, every quality-gate check (with the Gradle
+logs), the review's blocking points and suggestions, the device report with before/after
+screenshots (side by side or with a slider), and the PR description.
 
-![The agent office while the Device agent works](docs/office.png)
+![The agent office: the Orchestrator and the Device agent work, the others take a break](docs/office.png)
 
 ![Clicking the Planner's desk opens its plan](docs/office-panel.png)
 
