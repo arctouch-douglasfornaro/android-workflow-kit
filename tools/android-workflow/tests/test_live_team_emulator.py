@@ -244,6 +244,34 @@ class LiveChangesTests(unittest.TestCase):
         self.assertIn("core/domain/src/main/java/com/example/Far.kt", after_full)
         self.assertNotIn("core/domain/src/main/java/com/example/Far.kt", gone)
 
+    def test_patches_show_each_changed_file_like_a_pull_request(self) -> None:
+        with GitProject() as root:
+            start(root)
+            screen = root / "app/src/main/java/com/example/ProfileScreen.kt"
+            screen.write_text("package com.example\nclass ProfileScreen { val a = 1 }\n", encoding="utf-8")
+            (root / "app/src/main/java/com/example/Fresh.kt").write_text("package com.example\nobject Fresh\n", encoding="utf-8")
+            (root / "app/src/main/java/com/example/Old.kt").unlink()
+            changes = live.live_changes(root, full=True)
+            patches = live.live_patches(root, changes)
+            page = office.collect(root)
+        modified = patches["app/src/main/java/com/example/ProfileScreen.kt"]["lines"]
+        self.assertTrue(modified[0].startswith("@@ "))
+        self.assertIn("-class ProfileScreen", modified)
+        self.assertIn("+class ProfileScreen { val a = 1 }", modified)
+        self.assertEqual(patches["app/src/main/java/com/example/Fresh.kt"]["lines"],
+                         ["@@ -0,0 +1,2 @@", "+package com.example", "+object Fresh"])
+        self.assertIn("-class Old", patches["app/src/main/java/com/example/Old.kt"]["lines"])
+        self.assertEqual(set(page["patches"]), {item["path"] for item in page["changes"]})
+
+    def test_a_huge_change_is_capped(self) -> None:
+        with GitProject() as root:
+            start(root)
+            (root / "app/src/main/java/com/example/Big.kt").write_text("".join(f"val v{i} = {i}\n" for i in range(5000)), encoding="utf-8")
+            patches = live.live_patches(root, live.live_changes(root, full=True))
+        big = patches["app/src/main/java/com/example/Big.kt"]
+        self.assertTrue(big["truncated"])
+        self.assertLessEqual(len(big["lines"]), live.MAX_PATCH_LINES)
+
     def test_git_is_read_without_taking_the_index_lock(self) -> None:
         calls = []
         real = subprocess.run

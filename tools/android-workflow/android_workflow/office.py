@@ -348,10 +348,12 @@ def collect(target: Path, ticket: str | None = None, page_dir: Path | None = Non
         # Opened while the run is still going: send the reader to the live page instead.
         data["redirect"] = Path(os.path.relpath(office_path(target), page_dir)).as_posix()
     changes: list[dict[str, Any]] = []
+    patches: dict[str, Any] = {}
     if live:
-        from android_workflow.live import live_changes
+        from android_workflow.live import live_changes, live_patches
 
         changes = live_changes(target, full=full_scan)
+        patches = live_patches(target, changes)
     data.update({
         "title": (spec.get("ticket") or {}).get("title") or "",
         "status": state.get("status") or "idle",
@@ -365,6 +367,7 @@ def collect(target: Path, ticket: str | None = None, page_dir: Path | None = Non
         "desks": desks,
         "team": team,
         "changes": changes,
+        "patches": patches,
         "timeline": _timeline(run),
         "media": _media(run, page_dir),
         "artifacts": _artifacts(run, page_dir),
@@ -714,6 +717,7 @@ aside.side { background: var(--panel); border-left: 1px solid var(--line); displ
 .filebtn { display: flex; align-items: center; gap: 10px; text-align: left; padding: 10px; border-radius: 10px;
   border: 1px solid var(--line); background: var(--panel-2); cursor: pointer; min-width: 0; }
 .filebtn:hover, .filebtn:focus-visible { border-color: var(--accent); outline: none; }
+.filebtn.busy { border-color: var(--warn); box-shadow: 0 0 0 1px var(--warn) inset, 0 0 14px rgba(255, 201, 77, .22); }
 .filebtn.fresh { border-color: var(--warn); box-shadow: 0 0 0 1px var(--warn) inset; animation: freshglow 1s ease-in-out infinite; }
 @keyframes freshglow { 50% { box-shadow: 0 0 0 1px rgba(255, 201, 77, .25) inset; } }
 .pulse { animation: pulse .9s ease-in-out infinite; }
@@ -725,6 +729,21 @@ aside.side { background: var(--panel); border-left: 1px solid var(--line); displ
 .change .plus { color: var(--ok); font-variant-numeric: tabular-nums; } .change .minus { color: var(--bad); font-variant-numeric: tabular-nums; }
 .change .ago { color: var(--muted); font-size: 11px; white-space: nowrap; }
 .change.fresh code { color: var(--warn); }
+details.file { margin: 0; border-bottom: 1px dashed var(--line); }
+details.file > summary { list-style: none; cursor: pointer; border-bottom: 0; }
+details.file > summary::-webkit-details-marker { display: none; }
+details.file > summary:hover code { color: var(--info); }
+details.file[open] > summary { position: sticky; top: -18px; background: var(--panel); z-index: 1; }
+.caret { display: inline-block; width: 10px; color: var(--muted); transition: transform .1s; }
+details.file[open] .caret { transform: rotate(90deg); }
+.diff { width: 100%; border-collapse: collapse; font-family: ui-monospace, Menlo, monospace; font-size: 12px; line-height: 1.5;
+  margin: 4px 0 14px; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; table-layout: fixed; }
+.diff td { padding: 0 8px; border: 0; vertical-align: top; white-space: pre-wrap; overflow-wrap: anywhere; }
+.diff td.n { width: 46px; text-align: right; color: #6b7290; user-select: none; padding: 0 6px; }
+.diff tr.add td { background: rgba(46, 160, 67, .16); } .diff tr.add td.n { background: rgba(46, 160, 67, .26); color: #9fe0ae; }
+.diff tr.del td { background: rgba(248, 81, 73, .14); } .diff tr.del td.n { background: rgba(248, 81, 73, .24); color: #ffb3ae; }
+.diff tr.hunk td { background: rgba(108, 183, 255, .12); color: #8fb8e8; padding: 2px 8px; }
+.diff .s { color: var(--muted); user-select: none; }
 .filebtn .who { font-weight: 600; font-size: 13px; }
 .filebtn .what { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .filebtn > div { min-width: 0; }
@@ -886,6 +905,11 @@ function changesFor(role) {
     const owner = owners[c.path] ? sliceRole(owners[c.path]) : (present.has("Tech Lead") && Object.keys(owners).length ? "Tech Lead" : "Implementer");
     return owner === role;
   });
+}
+// The card of an agent at work is always highlighted; it also pulses right after it wrote something.
+function cardMarks(role, t) {
+  const busy = live() && deskOf(role).state === "working";
+  return { busy, fresh: live() && t - lastTouch(role) < 10 };
 }
 function lastTouch(role) {
   let t = 0;
@@ -1412,7 +1436,11 @@ function tickClocks() {
   if (out !== CLOCKS_KEY) { svg.querySelector("#clocks").innerHTML = out; CLOCKS_KEY = out; }
   document.querySelectorAll("[data-clock]").forEach(el => { const v = fmtS(liveSeconds(deskOf(el.dataset.clock))); if (el.textContent !== v) el.textContent = v; });
   document.querySelectorAll("[data-ago]").forEach(el => { const v = ago(t - Number(el.dataset.ago)); if (el.textContent !== v) el.textContent = v; });
-  document.querySelectorAll(".filebtn").forEach(b => b.classList.toggle("fresh", live() && t - lastTouch(b.dataset.role) < 10));
+  document.querySelectorAll(".filebtn").forEach(b => {
+    const marks = cardMarks(b.dataset.role, t);
+    b.classList.toggle("busy", marks.busy);
+    b.classList.toggle("fresh", marks.fresh);
+  });
 }
 function deskHitAreas() {
   const hits = [];
@@ -1474,7 +1502,8 @@ function renderSide() {
     if (role === "Quality gate" && (DATA.logs || []).length) bits.push(`${DATA.logs.length} log(s)`);
     const edits = role === "Tech Lead" ? 0 : changesFor(role).length;
     if (edits) bits.unshift(`${edits} changed file(s)`);
-    return `<button class="filebtn" data-role="${esc(role)}">${avatar(role, desk.state)}<div><div class="who">${esc(role)}</div><div class="what">${esc(bits.join(" · ") || "nothing yet")}</div></div></button>`;
+    const marks = cardMarks(role, now());
+    return `<button class="filebtn${marks.busy ? " busy" : ""}${marks.fresh ? " fresh" : ""}" data-role="${esc(role)}">${avatar(role, desk.state)}<div><div class="who">${esc(role)}</div><div class="what">${esc(bits.join(" · ") || "nothing yet")}</div></div></button>`;
   }).join("") : "");
   const rows = (DATA.timeline || []).slice().reverse();
   const feed = document.getElementById("feed"), scroll = feed.scrollTop;
@@ -1637,16 +1666,37 @@ function mediaView() {
     return `<div class="pair">${cell("before", n)}${cell("after", n)}</div>`;
   }).join("");
 }
+// GitHub-like view of one file's change: old and new line numbers, added in green, removed in red.
+const OPEN_DIFFS = new Set();
+function diffView(path) {
+  const patch = (DATA.patches || {})[path];
+  if (!patch) return `<p class="muted">No diff for this file yet.</p>`;
+  if (patch.binary) return `<p class="muted">Binary file: no text diff.</p>`;
+  if (!(patch.lines || []).length) return `<p class="muted">${patch.truncated ? "Too large to show here; open it in your editor." : "No text change."}</p>`;
+  let oldNo = 0, newNo = 0, rows = "";
+  for (const line of patch.lines) {
+    const hunk = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$/);
+    if (hunk) { oldNo = +hunk[1]; newNo = +hunk[2]; rows += `<tr class="hunk"><td class="n"></td><td class="n"></td><td>${esc(line)}</td></tr>`; continue; }
+    if (line.startsWith("\\")) continue;  // "\ No newline at end of file"
+    const sign = line[0], text = esc(line.slice(1));
+    if (sign === "+") rows += `<tr class="add"><td class="n"></td><td class="n">${newNo++}</td><td><span class="s">+</span>${text}</td></tr>`;
+    else if (sign === "-") rows += `<tr class="del"><td class="n">${oldNo++}</td><td class="n"></td><td><span class="s">-</span>${text}</td></tr>`;
+    else rows += `<tr><td class="n">${oldNo++}</td><td class="n">${newNo++}</td><td><span class="s"> </span>${text}</td></tr>`;
+  }
+  return `<table class="diff">${rows}</table>${patch.truncated ? `<p class="muted">Only the first lines are shown.</p>` : ""}`;
+}
 function changesView(role) {
   const items = changesFor(role), t = now();
   if (!items.length) return `<p class="muted">No file changed yet.</p>`;
   const owners = (DATA.team && DATA.team.owners) || {};
-  const intro = role === "Tech Lead" ? "Every file the team's change touches, with the slice that owns it." : "Files this agent is changing, newest edit first. The list updates by itself.";
+  const intro = (role === "Tech Lead" ? "Every file the team's change touches, with the slice that owns it." : "Files this agent is changing, newest edit first. The list updates by itself.")
+    + " Click a file to see its diff.";
   return `<p class="muted">${intro}</p>` + items.map(c => {
     const delta = c.status === "??" || c.status === "A" ? `<span class="plus">new${c.added != null ? ` +${c.added}` : ""}</span>` : c.status === "D" ? `<span class="minus">deleted</span>`
       : `<span><span class="plus">+${c.added ?? "?"}</span> <span class="minus">−${c.removed ?? "?"}</span></span>`;
     const owner = role === "Tech Lead" ? `<span class="ago">${esc(owners[c.path] || "unowned")}</span>` : "";
-    return `<div class="change ${c.mtime && t - c.mtime < 6 ? "fresh" : ""}"><span class="chip">${esc(c.status === "??" ? "new" : c.status)}</span><code>${esc(c.path)}</code>${delta}${owner || `<span class="ago" ${c.mtime ? `data-ago="${c.mtime}"` : ""}>${c.mtime ? ago(t - c.mtime) : ""}</span>`}</div>`;
+    const row = `<span class="chip">${esc(c.status === "??" ? "new" : c.status)}</span><code><span class="caret">›</span> ${esc(c.path)}</code>${delta}${owner || `<span class="ago" ${c.mtime ? `data-ago="${c.mtime}"` : ""}>${c.mtime ? ago(t - c.mtime) : ""}</span>`}`;
+    return `<details class="file" data-path="${esc(c.path)}" ${OPEN_DIFFS.has(c.path) ? "open" : ""}><summary class="change ${c.mtime && t - c.mtime < 6 ? "fresh" : ""}">${row}</summary>${OPEN_DIFFS.has(c.path) ? diffView(c.path) : `<div class="lazy"></div>`}</details>`;
   }).join("");
 }
 function tabsFor(role) {
@@ -1695,6 +1745,16 @@ function closeDrawer() {
 // A page with no data script (a past run's own page) falls back to reloading while its run is live.
 function scheduleRefresh() { clearTimeout(refreshTimer); if (live() && !DATA.live_src) refreshTimer = setTimeout(() => location.reload(), 3000); }
 scrim.onclick = closeDrawer;
+document.getElementById("dbody").addEventListener("toggle", e => {
+  const box = e.target;
+  if (!box.matches || !box.matches("details.file")) return;
+  const path = box.dataset.path;
+  if (box.open) {
+    OPEN_DIFFS.add(path);
+    const lazy = box.querySelector(".lazy");
+    if (lazy) lazy.outerHTML = diffView(path);
+  } else OPEN_DIFFS.delete(path);
+}, true);
 document.addEventListener("keydown", e => { if (e.key === "Escape" && drawerOpen()) closeDrawer(); });
 
 /* ---------- live updates: load the data script, redraw in place ---------- */

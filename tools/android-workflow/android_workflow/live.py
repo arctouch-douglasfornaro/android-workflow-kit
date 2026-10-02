@@ -171,6 +171,60 @@ def live_changes(target: Path, limit: int = MAX_CHANGES, full: bool = False) -> 
     return items[:limit]
 
 
+MAX_PATCH_LINES = 600
+MAX_PATCH_BYTES = 400_000
+
+
+def live_patches(target: Path, changes: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Unified diffs of the changed files for the office's GitHub-like view: tracked files from the run's
+    base commit, new files as all-added. Capped per file and in total, so the page stays light."""
+    patches: dict[str, dict[str, Any]] = {}
+    budget = MAX_PATCH_BYTES
+
+    def keep(path: str, lines: list[str]) -> None:
+        nonlocal budget
+        truncated = len(lines) > MAX_PATCH_LINES
+        lines = lines[:MAX_PATCH_LINES]
+        size = sum(len(line) + 1 for line in lines)
+        if size > budget:
+            patches[path] = {"lines": [], "truncated": True}
+            return
+        budget -= size
+        patches[path] = {"lines": lines, "truncated": truncated}
+
+    tracked = [item["path"] for item in changes if item.get("status") != "??"]
+    if tracked:
+        raw = _git(target, "diff", "--no-color", "--no-renames", "--relative", "-U3", _base(target), "--", *tracked) or ""
+        for block in raw.split("\ndiff --git ")[0:]:
+            lines = block.splitlines()
+            path = None
+            for line in lines[:8]:
+                if line.startswith("+++ ") and line[4:] != "/dev/null":
+                    path = line[6:] if line.startswith("+++ b/") else line[4:]
+                elif line.startswith("--- ") and line[4:] != "/dev/null" and path is None:
+                    path = line[6:] if line.startswith("--- a/") else line[4:]
+            if not path:
+                continue
+            if any(line.startswith("Binary files") for line in lines[:8]):
+                patches[path] = {"lines": [], "binary": True}
+                continue
+            start = next((index for index, line in enumerate(lines) if line.startswith("@@")), len(lines))
+            keep(path, lines[start:])
+    for item in changes:
+        if item.get("status") != "??" or item["path"] in patches:
+            continue
+        try:
+            data = (target / item["path"]).read_bytes()[:200_000]
+        except OSError:
+            continue
+        if b"\0" in data:
+            patches[item["path"]] = {"lines": [], "binary": True}
+            continue
+        body = data.decode("utf-8", errors="replace").splitlines()
+        keep(item["path"], [f"@@ -0,0 +1,{len(body)} @@", *("+" + line for line in body)])
+    return patches
+
+
 def _line_count(path: Path) -> int | None:
     try:
         with path.open("rb") as handle:

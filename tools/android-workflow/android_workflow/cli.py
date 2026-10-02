@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from android_workflow.paths import (
+    KIT_ROOT,
     SKILL_DIR,
     cache_dir,
     clean_runs,
@@ -3011,6 +3012,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
     target = args.target.resolve()
+    toolkit = lambda folder: (folder / "tools" / "android-workflow" / "android_workflow" / "cli.py").is_file()
+    if (target / ".ai").resolve() == KIT_ROOT.resolve() or target == KIT_ROOT.resolve() or toolkit(target / ".ai") or toolkit(target):
+        # `--target ~` would write runs (and the office) inside the toolkit itself.
+        raise ValueError(f"{target} is not an Android app: pass the app folder with --target")
     ensure_gitignore(target)
     if args.command == "start":
         if not args.ticket and not (args.id and args.title):

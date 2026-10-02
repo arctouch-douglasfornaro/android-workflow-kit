@@ -253,6 +253,30 @@ class LogTests(unittest.TestCase):
         self.assertNotIn("New.kt", patch)  # already reviewed
 
 
+class OfficePageTests(unittest.TestCase):
+    def test_a_working_agents_card_is_always_highlighted_and_diffs_open_per_file(self) -> None:
+        page = office.PAGE
+        self.assertIn(".filebtn.busy", page)
+        self.assertIn('marks.busy ? " busy" : ""', page)  # in the card's own HTML: a refresh never drops it
+        self.assertIn("function diffView", page)
+        self.assertIn("OPEN_DIFFS", page)  # an open diff stays open when the page updates
+
+    def test_the_toolkit_folder_is_never_a_target(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            (home / ".ai/tools/android-workflow/android_workflow").mkdir(parents=True)
+            (home / ".ai/tools/android-workflow/android_workflow/cli.py").write_text("", encoding="utf-8")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                _, code = quiet("office", "--target", str(home), "--no-open")
+            written = (home / ".ai" / "workflow").exists()
+        self.assertEqual(code, 2)
+        self.assertIn("is not an Android app", err.getvalue())
+        self.assertFalse(written)
+
+
 class RunPageTests(unittest.TestCase):
     def test_a_live_runs_own_page_sends_the_reader_to_the_live_page(self) -> None:
         import re
