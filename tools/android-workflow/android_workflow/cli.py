@@ -2230,6 +2230,23 @@ def close_clock(entry: dict[str, Any], now: float) -> float | None:
     return max(now - float(since), 0) if isinstance(since, (int, float)) else None
 
 
+# Stages run by an agent, whose tokens the host's transcript can tell when the orchestrator passes none.
+TOKEN_STAGES = frozenset({"T0", "T3", "T4", "T4L", "T6", "T7", "T8"})
+
+
+def measured_tokens(target: Path, agent_dir: Path, stage: str, slice_id: str | None, since: Any) -> tuple[int | None, str | None]:
+    """This round's tokens, read from the host's own transcript (the same number the host reports)."""
+    if stage not in TOKEN_STAGES or not isinstance(since, (int, float)):
+        return None, None
+    from android_workflow.usage import measure
+
+    try:
+        found = measure(target, agent_dir, stage, slice_id, float(since))
+    except Exception:  # noqa: BLE001 - a host's file format changed: keep the old behaviour (a warning)
+        return None, None
+    return found if found else (None, None)
+
+
 @contextlib.contextmanager
 def run_lock(target: Path):
     """One writer at a time for a run's state files: parallel agents log at the same moment, and a
@@ -2309,6 +2326,7 @@ def _log_stage(
             entry.pop("running_since", None)  # a clock left open by a crashed round starts over
         open_clock(entry, now)
     duplicate = False
+    round_start = entry.get("running_since") or entry.get("last_logged_at") or state.get("created_at")
     if status not in OPENING_STATUSES:
         # The same round logged twice (the agent, then the orchestrator with the tokens): one round,
         # its time and attempt counted once, its tokens not added twice.
@@ -2326,6 +2344,11 @@ def _log_stage(
             seconds = since if since is not None else (now - int(state["updated_at"]) if state.get("updated_at") else None)
     if wait_seconds and seconds is not None:
         seconds = max(seconds - wait_seconds, 0)
+    source = "reported" if tokens is not None else None
+    if status not in OPENING_STATUSES and tokens is None and not duplicate:
+        tokens, source = measured_tokens(target, agent_dir, stage, None, round_start)
+    if source and status not in OPENING_STATUSES:
+        entry["tokens_source"] = source
     if duplicate:
         counted = entry.get("round_tokens") or 0
         added = max(tokens - counted, 0) if tokens is not None else None
@@ -2507,6 +2530,29 @@ def _log_slice(
         open_clock(stage, now)
         own = None
     else:
+        round_start = entry.get("running_since") or entry.get("last_logged_at") or state.get("created_at")
+        last = entry.get("last_logged_at")
+        # The agent's own `completed` took its tokens from the transcript, then the orchestrator logs the
+        # same round with the reported total: that total replaces the transcript's, it does not add to it.
+        repeat = ("running_since" not in entry and entry.get("status") == status
+                  and entry.get("tokens_source") not in {None, "reported"}
+                  and isinstance(last, (int, float)) and now - last < DUPLICATE_WINDOW_SECONDS)
+        earlier = entry.pop("tokens_source", None)
+        if tokens is None and repeat:
+            entry["tokens_source"] = earlier
+        elif tokens is None:
+            tokens, source = measured_tokens(target, agent_dir, "T4", slice_id, round_start)
+            if source:
+                entry["tokens_source"] = source
+        elif tokens is not None:
+            entry["tokens_source"] = "reported"
+        if repeat and tokens is not None:
+            counted = entry.get("round_tokens") or 0
+            entry["round_tokens"] = max(counted, tokens)
+            tokens = max(tokens - counted, 0) or None
+        elif not repeat:
+            entry["round_tokens"] = tokens or 0
+        entry["last_logged_at"] = round(now, 3)
         since = close_clock(entry, now)
         own = seconds if seconds is not None else since
         if wait_seconds and own is not None:
@@ -2548,7 +2594,7 @@ def _log_slice(
             stage_state["status"] = "integrating" if status == "completed" else status
     stage.setdefault("wall_time_seconds", None)
     save_state(target, state, metrics)
-    if status == "completed" and tokens is None:
+    if status == "completed" and tokens is None and not entry.get("tokens_source"):
         return {**state, "warnings": [f"{slice_role(slice_id)} logged without --tokens: pass the total the agent's result reports"]}
     return state
 

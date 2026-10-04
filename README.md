@@ -131,6 +131,11 @@ and walk back as soon as they get work. It is **live**: each working agent's clo
 second next to its name, the file the Implementer is editing shows up on its line (and in its
 **Live changes** tab, with lines added and removed) as soon as it is saved, and new activity lands in
 the chat within a couple of seconds, without reloading the page or closing the panel you are reading.
+Tokens are live too: a working agent's count so far (a pulsing dot next to it) is read from the host's
+own transcript — Claude Code (`~/.claude/projects/…/subagents/`) and Codex (`~/.codex/sessions/`) —
+using the same number the host reports when the agent returns. Cursor and Gemini write no per-agent
+token log, so there the count appears when the agent's stage is logged. `ANDROID_WORKFLOW_NO_USAGE=1`
+turns the reading off.
 The page also shows who sent work back for a fix, time and tokens per agent, the run's activity as a
 chat and every past run of the app. **Click any desk,
 agent, file card or message** to read what that agent produced, formatted: the plan and acceptance

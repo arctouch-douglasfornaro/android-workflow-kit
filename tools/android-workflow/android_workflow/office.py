@@ -266,6 +266,45 @@ def _team(run: Path, stages: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _live_tokens(target: Path, run: Path, desks: list[dict[str, Any]], measured_stages: dict[str, Any],
+                 state: dict[str, Any]) -> int:
+    """Tokens the working agents have used in their current round, read from the host's transcript.
+
+    Added to their desk (on top of the rounds already logged) and returned for the run's total. When the
+    round is logged as completed the desk stops working, and the logged figure (the same number) takes over.
+    """
+    from android_workflow.usage import agent_tokens, transcripts
+
+    working = [desk for desk in desks if desk["state"] == "working" and desk["kind"] == "agent"]
+    if not working or os.environ.get("ANDROID_WORKFLOW_NO_USAGE"):
+        return 0
+    created = state.get("created_at") or 0
+    team = any(desk["stage"].startswith("T4:") for desk in desks)
+    rounds = []
+    for desk in working:
+        stage, _, slice_id = desk["stage"].partition(":")
+        measured = measured_stages.get(stage) or {}
+        if stage == "T4" and (slice_id or team):
+            slice_id = slice_id or "S1"
+            measured = (measured.get("slices") or {}).get(slice_id) or {}
+        since = measured.get("running_since") or measured.get("last_logged_at") or created
+        rounds.append((desk, stage, slice_id or None, float(since)))
+    try:
+        found = transcripts(target, run, min(since for *_, since in rounds))
+    except OSError:
+        return 0
+    total = 0
+    for desk, stage, slice_id, since in rounds:
+        measured = agent_tokens(found, stage, slice_id, since)
+        if not measured:
+            continue
+        tokens, host = measured
+        desk["tokens"] = (desk.get("tokens") or 0) + tokens
+        desk["tokens_live"] = host
+        total += tokens
+    return total
+
+
 def collect(target: Path, ticket: str | None = None, page_dir: Path | None = None, live_src: str | None = None,
             full_scan: bool = False, snapshot: bool = False) -> dict[str, Any]:
     """The page data for one run (the current one by default), with links relative to `page_dir`.
@@ -330,21 +369,26 @@ def collect(target: Path, ticket: str | None = None, page_dir: Path | None = Non
             "tokens": measured.get("tokens"),
             "running_since": since if state_name == "working" and isinstance(since, (int, float)) else None,
         })
+    running = ticket == current and run_is_live(run)
+    live_tokens = _live_tokens(target, run, desks, measured_stages, state) if running and not snapshot else 0
     final_totals = dict(metrics.get("totals") or {})
     totals = final_totals
-    if not totals:  # mid-run: add up what the stages reported so far
+    if not totals:  # mid-run: add up what the stages reported so far, and what working agents used until now
         reported = [item.get("tokens") for item in measured_stages.values()
                     if isinstance(item, dict) and isinstance(item.get("tokens"), int)]
         created = state.get("created_at")
         totals = {
             "wall_time_seconds": max(now - created, 0) if created else None,
-            "tokens": sum(reported) if reported else None,
+            "tokens": sum(reported) + live_tokens if reported or live_tokens else None,
+            "tokens_live": bool(live_tokens),
         }
+    elif live_tokens:  # a finished run an agent works on again (Delivery after `finish`): count it too
+        totals = {**totals, "tokens": (totals.get("tokens") or 0) + live_tokens, "tokens_live": True}
     pr = delivery.get("pr") or {}
     draft = state.get("draft") or {}
     # A run's own page (reached from the history) is a snapshot: only the main page follows the run live.
-    live = ticket == current and run_is_live(run) and not snapshot
-    if snapshot and ticket == current and run_is_live(run):
+    live = running and not snapshot
+    if snapshot and running:
         # Opened while the run is still going: send the reader to the live page instead.
         data["redirect"] = Path(os.path.relpath(office_path(target), page_dir)).as_posix()
     changes: list[dict[str, Any]] = []
@@ -722,6 +766,7 @@ aside.side { background: var(--panel); border-left: 1px solid var(--line); displ
 @keyframes freshglow { 50% { box-shadow: 0 0 0 1px rgba(255, 201, 77, .25) inset; } }
 .pulse { animation: pulse .9s ease-in-out infinite; }
 @keyframes pulse { 50% { opacity: .45; } }
+.tokdot { margin: 0 0 0 6px; }
 .livedot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); margin-right: 5px; vertical-align: middle; animation: pulse 1.6s ease-in-out infinite; }
 .change { display: grid; grid-template-columns: 48px minmax(0, 1fr) auto auto; gap: 4px 10px; align-items: center; padding: 7px 0; border-bottom: 1px dashed var(--line); font-size: 13px; }
 .change code { overflow-wrap: anywhere; }
@@ -877,6 +922,8 @@ const EDITORS = ["Implementer", "Implementer 2", "Implementer 3", "Tech Lead"];
 const esc = t => String(t ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const fmtS = v => { if (v == null) return "—"; const s = Math.round(v); return s >= 3600 ? `${Math.floor(s / 3600)}h${String(Math.floor(s % 3600 / 60)).padStart(2, "0")}m` : s >= 60 ? `${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s` : `${s}s`; };
 const fmtT = v => v == null ? "—" : v >= 1e6 ? `${(v / 1e6).toFixed(1)}M` : v >= 1000 ? `${(v / 1000).toFixed(1)}k` : String(v);
+// Tokens still growing: an agent is working and its count so far comes from the host's transcript.
+const liveTok = on => on ? `<i class="livedot tokdot" title="So far: still working (read from the ${on === true ? "host" : esc(on)} transcript)"></i>` : "";
 const fmtB = v => v == null ? "" : v >= 1e6 ? `${(v / 1e6).toFixed(1)} MB` : v >= 1000 ? `${Math.round(v / 1000)} KB` : `${v} B`;
 const live = () => Boolean(DATA.live);
 // The run waits for the host while its agents work: show that as running.
@@ -931,7 +978,7 @@ function bossDesk() {
   const running = live() && !DATA.totals_final && DATA.created_at;
   return { stage: "boss", role: "Orchestrator", kind: "agent", colour: "#d4a72c", state, note,
     seconds: running ? 0 : (DATA.totals || {}).wall_time_seconds, running_since: running ? DATA.created_at : null,
-    tokens: (DATA.totals || {}).tokens };
+    tokens: (DATA.totals || {}).tokens, tokens_live: (DATA.totals || {}).tokens_live };
 }
 const desks = () => DATA.ticket ? [bossDesk(), ...(DATA.desks || [])] : [];
 const deskOf = role => desks().find(d => d.role === role) || { role, colour: role === "Orchestrator" ? "#d4a72c" : "#888", state: "idle" };
@@ -1488,7 +1535,7 @@ function renderSide() {
   if (!DATA.ticket) {
     html = `<div class="empty">No run yet. Start <code>/android-workflow</code> in this app and the office comes alive.</div>`;
   } else {
-    html = `<div class="stats"><div class="stat"><span>Status</span><b>${chip(runStatus())}</b></div><div class="stat"><span>Time</span><b data-clock="Orchestrator">${fmtS(liveSeconds(deskOf("Orchestrator")))}</b></div><div class="stat"><span>Tokens</span><b>${fmtT(t.tokens)}</b></div></div>`;
+    html = `<div class="stats"><div class="stat"><span>Status</span><b>${chip(runStatus())}</b></div><div class="stat"><span>Time</span><b data-clock="Orchestrator">${fmtS(liveSeconds(deskOf("Orchestrator")))}</b></div><div class="stat"><span>Tokens</span><b>${fmtT(t.tokens)}${liveTok(t.tokens_live)}</b></div></div>`;
     if (DATA.pr) html += `<div class="alert ${(DATA.draft || []).length ? "warn" : "ok"}"><b>${(DATA.draft || []).length ? "Draft PR" : "Pull request"}:</b> <a href="${esc(DATA.pr)}" target="_blank" rel="noopener">${esc(DATA.pr)}</a></div>`;
     if (DATA.status === "paused") html += `<div class="alert warn"><b>Waiting for you in the chat.</b><br>${esc(DATA.question || "")}</div>`;
     if ((DATA.draft || []).length) html += `<div class="alert bad"><b>Still open:</b><ul>${DATA.draft.map(i => `<li>${esc(i)}</li>`).join("")}</ul></div>`;
@@ -1716,7 +1763,7 @@ const drawerOpen = () => drawer.classList.contains("open");
 // reader keeps their scroll position (and the before/after slider its place).
 function openDrawer(role, tabId, refresh) {
   const desk = deskOf(role), tabs = tabsFor(role), active = tabs.find(t => t.id === tabId) || tabs[0];
-  setHTML(document.getElementById("dhead"), `${avatar(role, desk.state)}<div><h3>${esc(role)}</h3><div class="sub">${chip(desk.state || "idle", STATE_LABEL[desk.state] || desk.state || "idle")}<span data-clock="${esc(role)}">${fmtS(liveSeconds(desk))}</span><span>· ${fmtT(desk.tokens)} tokens</span></div></div><button class="close" aria-label="Close">×</button>`);
+  setHTML(document.getElementById("dhead"), `${avatar(role, desk.state)}<div><h3>${esc(role)}</h3><div class="sub">${chip(desk.state || "idle", STATE_LABEL[desk.state] || desk.state || "idle")}<span data-clock="${esc(role)}">${fmtS(liveSeconds(desk))}</span><span>· ${fmtT(desk.tokens)} tokens${liveTok(desk.tokens_live)}</span></div></div><button class="close" aria-label="Close">×</button>`);
   setHTML(document.getElementById("dnote"), desk.note ? esc(desk.note) : `<span class="muted">No note from this agent yet.</span>`);
   setHTML(document.getElementById("tabs"), tabs.map(t => `<button class="tab ${t === active ? "on" : ""}" role="tab" aria-selected="${t === active}" data-tab="${esc(t.id)}">${esc(t.label)}</button>`).join(""));
   const body = document.getElementById("dbody"), scroll = body.scrollTop, before = LAST_HTML.get(body);

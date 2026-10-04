@@ -77,8 +77,10 @@ Cursor and Gemini inherit the session model.
 
 ### How to delegate, per host
 
-Every spawn passes the same inputs: `TARGET`, `RUN`, `CLI`, the level, the mode or fix-round
-finding IDs, and nothing else — the agent reads its files itself.
+Every spawn passes the same inputs: `TARGET`, `RUN`, `CLI`, `AW_STAGE=<Role>` (`AW_STAGE=Implementer/S2`
+for a slice), the level, the mode or fix-round finding IDs, and nothing else — the agent reads its
+files itself. On Codex, name the agent `aw_<role>` (`aw_implementer_s2` for a slice, `aw_tech_lead`):
+its prompt is not readable on disk, so the name is how the office tells whose tokens it is reading.
 
 | Host | Spawn | Resume for a fix round |
 |---|---|---|
@@ -260,6 +262,9 @@ toolkit changed since `start` → run `CLI start` for the ticket again before th
 Planner's decisions and archives the earlier metrics). `log` answers with a `warnings` entry
 when an agent stage has none; if the host truly exposes no count, say so once in the final
 summary. When you paused to ask the user, add `--wait-seconds S` so waiting is not counted.
+While an agent works, the office reads its tokens so far from the host's own transcript (Claude
+Code, Codex), and a `completed` without `--tokens` takes them from there; you still pass `--tokens`
+whenever the agent's result reports them.
 
 ## Stop
 
