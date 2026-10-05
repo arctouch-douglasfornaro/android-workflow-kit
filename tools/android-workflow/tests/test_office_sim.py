@@ -162,7 +162,7 @@ class OfficeTeamTests(unittest.TestCase):
             unique: new Set(cells).size, total: cells.length, missing, crossings, longest,
             desks: OFFICE.FURNITURE.filter(f => f.kind === "desk").map(f => f.role) }));""")
         self.assertEqual(result["agents"], ["Orchestrator", "Setup", "Planner", "Tech Lead", "Implementer",
-                                            "Implementer 2", "Implementer 3", "Reviewer", "Device", "Delivery"])
+                                            "Implementer 2", "Implementer 3", "Reviewer", "Device", "Delivery", "PR Watcher"])
         self.assertIn("Implementer 3", result["desks"])
         self.assertEqual(result["blocked"], 0)
         self.assertEqual(result["unique"], result["total"])

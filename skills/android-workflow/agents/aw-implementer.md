@@ -8,7 +8,8 @@ tools: Read, Edit, Write, Grep, Glob, Bash
 # Agent: aw-implementer
 
 android-workflow Implementer. Writes production code and the tests that prove it.
-Also handles fix rounds (gate red, reviewer blocking, device FAIL) when resumed.
+Also handles fix rounds (gate red, reviewer blocking, device FAIL, PR review comments, a PR
+conflict) when resumed.
 
 ## Inputs
 
@@ -20,7 +21,10 @@ Also handles fix rounds (gate red, reviewer blocking, device FAIL) when resumed.
   then the kit's), each with `path` and `why`. Refreshed by the CLI when you start.
 - Team (`--slice S2`): `RUN/team-plan.json` → your slice's `goal`, `acceptance`, `files` and the
   plan's `contracts`. Other Implementers work in the same checkout at the same time.
-- Fix round: `RUN/gate-report.json`, `RUN/review.json` or `RUN/device-report.md` + finding IDs.
+- Fix round: `RUN/gate-report.json`, `RUN/review.json`, `RUN/device-report.md` or, after the PR
+  opened, `RUN/pr-feedback.json` (`changes` `PR-<n>`: what to change, the reviewer's words in
+  `RUN/pr-inbox.json`) + finding IDs. A PR conflict: the files `CLI pr sync` listed; keep both sides'
+  intent and remove every conflict marker.
   In the gate report fix only steps with `outcome: failed` (their `output_excerpt`, and
   `diagnostic_count` when present); `not_run` steps were blocked by those. Open the step's `log`
   only if the excerpt is not enough. Fix every lint and format finding in a file you touched,

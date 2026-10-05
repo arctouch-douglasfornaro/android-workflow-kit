@@ -39,6 +39,7 @@ DESKS = (
     ("T6", "Reviewer", "agent", "#e8913a"),
     ("T7", "Device", "agent", "#e2557b"),
     ("T8", "Delivery", "agent", "#18a5a7"),
+    ("T10", "PR Watcher", "agent", "#5c6bc0"),
 )
 TEAM_ROLES = {"T4L", "T4:S2", "T4:S3"}
 # What each desk opens: (path relative to the run folder, label).
@@ -57,6 +58,8 @@ ROLE_FILES = {
     "Device": (("device-report.md", "Device report"), ("prebuild.json", "Base build")),
     "Delivery": (("pr-description.md", "PR description"), ("delivery.json", "Delivery"),
                  ("commit-message.txt", "Commit message")),
+    "PR Watcher": (("pr-watch.json", "PR status"), ("pr-inbox.json", "Comments & checks"),
+                   ("pr-feedback.json", "What it decided")),
 }
 WORKING = {"started", "running"}
 FAILED = {"escalated", "failed", "blocked"}
@@ -219,7 +222,9 @@ def _desk_state(stage: str, entry: dict[str, Any], route: list[str], gate: dict[
         return "working"
     if status in FAILED:
         return "failed"
-    if status == "skipped" or (not status and stage not in route and stage != "T0"):
+    if status == "watching":
+        return "waiting"
+    if status == "skipped" or (not status and stage not in route and stage not in {"T0", "T10"}):
         return "skipped"
     if status == "completed":
         if stage == "T6" and (review.get("status") != "approved" or review.get("blocking")):
@@ -500,9 +505,10 @@ const SIM = (() => {
   // Desks: [x, y, width]; the agent sits on a chair just behind the desk (smaller y), facing the viewer.
   const LAYOUT = { Orchestrator: [5.6, 1.4, 2.4], "Tech Lead": [2.3, 1.4, 2], "Implementer 3": [8.6, 1.4, 1.8],
     Setup: [1.0, 3.9, 2], Planner: [4.4, 3.9, 2], Implementer: [7.8, 3.9, 2], "Implementer 2": [9.8, 3.9, 1.8],
-    "Quality gate": [0.8, 7.4, 2], Reviewer: [3.2, 7.6, 2], Device: [6.1, 7.6, 2], Delivery: [9.0, 7.6, 2] };
-  const BASE = ["Orchestrator", "Setup", "Planner", "Implementer", "Reviewer", "Device", "Delivery"];
-  const ORDER = ["Orchestrator", "Setup", "Planner", "Tech Lead", "Implementer", "Implementer 2", "Implementer 3", "Reviewer", "Device", "Delivery"];
+    "Quality gate": [0.6, 7.4, 2], Reviewer: [2.7, 7.6, 1.8], Device: [4.9, 7.6, 1.8], Delivery: [7.1, 7.6, 1.8],
+    "PR Watcher": [9.3, 7.6, 1.8] };
+  const BASE = ["Orchestrator", "Setup", "Planner", "Implementer", "Reviewer", "Device", "Delivery", "PR Watcher"];
+  const ORDER = ["Orchestrator", "Setup", "Planner", "Tech Lead", "Implementer", "Implementer 2", "Implementer 3", "Reviewer", "Device", "Delivery", "PR Watcher"];
   const p = (x, y, face, pose) => ({ x, y, face, pose: pose || { x, y } });
   // Where agents go when idle. `at` is where they stand to arrive; `pose` is where they are drawn.
   const POIS = {
@@ -909,11 +915,12 @@ let DATA = __DATA__;
 if (DATA.redirect) location.replace(DATA.redirect + location.hash);  // this run is live: show the live page
 __SIM__
 const ROLE_OF_STAGE = { T0: "Setup", T1: "Planner", T2: "Planner", T3: "Planner", T4: "Implementer", T4L: "Tech Lead",
-  T5: "Quality gate", T6: "Reviewer", T7: "Device", T8: "Delivery", T9: "Orchestrator" };
+  T5: "Quality gate", T6: "Reviewer", T7: "Device", T8: "Delivery", T9: "Orchestrator", T10: "PR Watcher" };
 const ROLE_ALIAS = { Triage: "Planner", Localizer: "Planner", Telemetry: "Orchestrator", Bootstrap: "Orchestrator" };
 const LOOK = { Orchestrator: ["#2a1d14", "#f1c27d"], Setup: ["#c24d2c", "#e0ac69"], Planner: ["#1d1d1d", "#f6d1b0"],
   Implementer: ["#6b3e1e", "#c68642"], Reviewer: ["#e7c35a", "#f6d1b0"], Device: ["#3a2a5a", "#8d5524"], Delivery: ["#111", "#ffdbac"],
-  "Tech Lead": ["#4a2c2a", "#e0ac69"], "Implementer 2": ["#d35400", "#f6d1b0"], "Implementer 3": ["#2c3e50", "#a1665e"] };
+  "Tech Lead": ["#4a2c2a", "#e0ac69"], "Implementer 2": ["#d35400", "#f6d1b0"], "Implementer 3": ["#2c3e50", "#a1665e"],
+  "PR Watcher": ["#3949ab", "#c68642"] };
 const STATE_LABEL = { working: "working", done: "done", failed: "needs a fix", skipped: "not needed", waiting: "waiting", idle: "idle" };
 // The roles on this page, in the order the work flows (a team adds the Tech Lead and more Implementers).
 const roles = () => DATA.ticket ? ["Orchestrator", ...(DATA.desks || []).map(d => d.role)] : [];

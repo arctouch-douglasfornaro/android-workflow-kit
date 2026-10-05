@@ -42,6 +42,7 @@ STAGE_ROLES = {
     "T7": "Device",
     "T8": "Delivery",
     "T9": "Telemetry",
+    "T10": "PR Watcher",
 }
 
 
@@ -49,6 +50,7 @@ STAGE_ROLES = {
 AGENT_STAGES = {
     "setup": "T0", "planner": "T3", "implementer": "T4", "quality gate": "T5",
     "gate": "T5", "reviewer": "T6", "device": "T7", "delivery": "T8", "tech lead": "T4L",
+    "pr watcher": "T10", "watcher": "T10",
 }
 
 
@@ -69,7 +71,10 @@ def resolve_stage(value: str) -> tuple[str, str]:
     if not stage:
         names = ", ".join(dict.fromkeys(name.title() for name in AGENT_STAGES if name != "gate"))
         raise ValueError(f"unknown stage {value!r}; use a role name: {names}")
-    display = key.title() if key in AGENT_STAGES and key not in {"gate", "quality gate"} else STAGE_ROLES[stage]
+    display = (
+        key.title() if key in AGENT_STAGES and key not in {"gate", "quality gate", "pr watcher", "watcher"}
+        else STAGE_ROLES[stage]
+    )
     return stage, display
 
 
@@ -2231,7 +2236,7 @@ def close_clock(entry: dict[str, Any], now: float) -> float | None:
 
 
 # Stages run by an agent, whose tokens the host's transcript can tell when the orchestrator passes none.
-TOKEN_STAGES = frozenset({"T0", "T3", "T4", "T4L", "T6", "T7", "T8"})
+TOKEN_STAGES = frozenset({"T0", "T3", "T4", "T4L", "T6", "T7", "T8", "T10"})
 
 
 def measured_tokens(target: Path, agent_dir: Path, stage: str, slice_id: str | None, since: Any) -> tuple[int | None, str | None]:
@@ -2669,11 +2674,14 @@ def finish_run(
     skip_device: str | None = None,
     draft: str | None = None,
     no_device: bool = False,
+    keep_device: str | None = None,
 ) -> dict[str, Any]:
     """Final check before the PR. With `draft`, unresolved checks become known issues of a draft PR.
 
     `skip_device` is refused while a device is connected: "no device" is checked, not believed. The
     developer's own `--no-device` (`no_device`) is the only way to skip a device that is there.
+    `keep_device` (a PR feedback round with nothing visible on the device) keeps an earlier device PASS
+    of this run instead of verifying again; the reason is logged.
     """
     errors = implementation_errors(target)
     if errors:
@@ -2693,6 +2701,14 @@ def finish_run(
     state = load_state(target)
     metrics = read_json(agent_dir / "stage-metrics.json")
     gate = read_json(agent_dir / "gate-report.json")
+    if keep_device and "T7" in spec["route"] and not skip_device:
+        device = state.get("stages", {}).get("T7", {})
+        if recorded_verdict(agent_dir, "T7") != "pass":
+            raise ValueError("--keep-device needs an earlier device PASS in this run; run the Device stage")
+        device["fingerprint"] = source_fingerprint(target)
+        device["kept"] = keep_device
+        state["stages"]["T7"] = device
+        append_stage_log(agent_dir, "T7", "kept", "host", f"earlier PASS kept: {keep_device}")
     issues: list[str] = []
     if gate.get("status") == "failed":
         issues.append("quality gate is failing; see gate-report.json")
@@ -2980,6 +2996,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="the developer asked for --no-device: skip the Device stage even with a device connected",
     )
     finish_parser.add_argument(
+        "--keep-device", metavar="REASON",
+        help="a PR feedback round with nothing visible on the device: keep the earlier device PASS",
+    )
+    finish_parser.add_argument(
         "--draft",
         metavar="REASON",
         help="the run stopped after the code was written: deliver a draft PR that lists what is unresolved",
@@ -3006,6 +3026,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     deliver_parser.add_argument("--no-commit", action="store_true")
     deliver_parser.add_argument("--no-push", action="store_true")
     deliver_parser.add_argument("--no-pr", action="store_true")
+    deliver_parser.add_argument(
+        "--keep-body", action="store_true",
+        help="a PR feedback round: push the commit and leave the open PR's description as it is",
+    )
     spec_parser = subparsers.add_parser("update-spec")
     spec_parser.add_argument("--target", required=True, type=Path)
     spec_parser.add_argument("--surfaces")
@@ -3045,6 +3069,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     office_parser = subparsers.add_parser("office", help="open the page that shows the agents at work")
     office_parser.add_argument("--target", required=True, type=Path)
     office_parser.add_argument("--no-open", action="store_true", help="only print the page's path")
+    pr_parser = subparsers.add_parser("pr", help="PR Watcher: follow the open PR until it is merged")
+    pr_parser.add_argument("action", choices=("status", "wait", "reply", "rerequest", "ci", "sync", "merge"))
+    pr_parser.add_argument("--target", required=True, type=Path)
+    pr_parser.add_argument("--pr", type=int, help="PR number (default: the one this run opened, else the branch's)")
+    pr_parser.add_argument("--timeout", type=float, default=540.0, help="wait: give up after this many seconds")
+    pr_parser.add_argument("--interval", type=float, default=60.0, help="wait: seconds between reads (it slows down while idle)")
+    pr_parser.add_argument("--item", help="reply: the comment id from pr-inbox.json")
+    pr_parser.add_argument("--body", help="reply: the answer to post")
+    pr_parser.add_argument("--skip", metavar="REASON", help="reply: mark the comment handled without posting")
+    pr_parser.add_argument("--reviewer", action="append", default=[], help="rerequest: a login (repeatable)")
+    pr_parser.add_argument("--check", help="ci: the failing check's name")
+    pr_parser.add_argument("--as", dest="verdict", help="ci: ours | unrelated | rerun")
+    pr_parser.add_argument("--reason", help="ci: one line on why")
+    pr_parser.add_argument("--continue", dest="resume", action="store_true", help="sync: conflicts resolved, commit and push")
     evidence_parser = subparsers.add_parser("evidence")
     evidence_parser.add_argument("action", choices=("capture", "ingest", "compare", "list"))
     evidence_parser.add_argument("--target", required=True, type=Path)
@@ -3135,7 +3173,10 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
         return status_payload(target), 0
     if args.command == "finish":
         with run_lock(target):
-            return finish_run(target, skip_device=args.skip_device, draft=args.draft, no_device=args.no_device), 0
+            return finish_run(
+                target, skip_device=args.skip_device, draft=args.draft, no_device=args.no_device,
+                keep_device=args.keep_device,
+            ), 0
     if args.command == "prebuild":
         from android_workflow.prebuild import current_status, start_prebuild, wait_prebuild
 
@@ -3155,7 +3196,7 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
 
         return deliver(
             target, subject=args.subject, body=args.body, base=args.base,
-            no_commit=args.no_commit, no_push=args.no_push, no_pr=args.no_pr,
+            no_commit=args.no_commit, no_push=args.no_push, no_pr=args.no_pr, keep_body=args.keep_body,
         ), 0
     if args.command == "setup":
         result = run_setup(target, force=args.force, accept=args.accept, source_repo=args.source_repo)
@@ -3204,6 +3245,10 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
         from android_workflow.emulator import dispatch_emulator
 
         return dispatch_emulator(target, args)
+    if args.command == "pr":
+        from android_workflow.watch import dispatch as dispatch_pr
+
+        return dispatch_pr(target, args)
     if args.command == "evidence":
         from android_workflow.evidence import dispatch_evidence
 

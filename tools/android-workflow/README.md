@@ -22,8 +22,9 @@ How the workflow runs (stages, agents, levels, stops) is described in one place 
 | `emulator --target APP [--wait\|--stop\|--status] [--avd NAME] [--headless]` | No device connected: starts an existing AVD in the background (`device.avd`, else the first). `--wait` until booted; `--stop` closes it only if the workflow started it. Never creates an AVD |
 | `gate --target APP` | Formatter, compile, unit tests, detekt, lint, consumer modules, secret scan |
 | `evidence capture\|ingest\|compare\|list --target APP` | Screenshots/videos in `media/{before,after}/` and `media/compare.md` |
-| `finish --target APP [--skip-device "reason"] [--draft "reason"]` | Final check: gate, review and device belong to the code that ships. `--draft` turns what is still unresolved into a draft PR's known issues |
-| `deliver --target APP [--subject "ID: title"] [--no-commit\|--no-push\|--no-pr]` | Commits app source only, pushes, opens the PR (as a draft after `finish --draft`) |
+| `finish --target APP [--skip-device "reason"] [--keep-device "reason"] [--draft "reason"]` | Final check: gate, review and device belong to the code that ships. `--draft` turns what is still unresolved into a draft PR's known issues; `--keep-device` keeps an earlier device PASS for a PR feedback round with nothing visible on the device |
+| `deliver --target APP [--subject "ID: title"] [--no-commit\|--no-push\|--no-pr] [--keep-body]` | Commits app source only, pushes, opens the PR (as a draft after `finish --draft`). `--keep-body`: a PR feedback round leaves the open PR's description as it is |
+| `pr status\|wait\|reply\|rerequest\|ci\|sync\|merge --target APP [--pr N]` | PR Watcher. `status` reads the PR once (comments, threads, reviews, checks with `isRequired`, reviewers, mergeability) and returns one `action`: `respond`, `sync`, `merge`, `wait`, `needs_user`, `merged`, `closed`; the comments themselves go to `RUN/pr-inbox.json`. `wait` polls until there is something to do (`--timeout`, default 540 s). `reply --item ID --body "…"` answers a thread (or quotes a top-level comment), `--skip "why"` marks it handled; threads are never resolved. `ci --check NAME --as ours\|unrelated\|rerun` records a failing check's verdict (`rerun`: GitHub Actions, once). `sync [--continue]` merges the PR branch and then the base in and pushes, never rebasing or force-pushing. `merge` merges only when a fresh read is ready, at the checked head, never with `--admin`. GitHub only; with several `gh` accounts the one that sees the repository is used |
 | `office --target APP [--no-open]` | Opens `.ai/workflow/office.html`, the pixel-art office that shows each agent's desk. Every command keeps it current, and while a run is live a watcher (`live.py`) refreshes `office-data.js` between commands, so clocks, edited files and activity update in place |
 | `status`, `list`, `clean [--ticket ID \| --stale [HOURS]]` | Run housekeeping: one ticket, unfinished idle runs, or everything when nothing is given |
 
@@ -55,6 +56,13 @@ Optional overrides read by the newer commands (all may be left out):
 | `device.boot_timeout_seconds` | `300` | `emulator --wait` |
 | `team.max_parallel` | `3` (1–3) | `team`: how many Implementers may work at once |
 | `skills.max` | `4` (1–8) | `skills`: how many skills the Implementer reads |
+| `watch.auto_merge` | `true` | `pr`: merge when ready; `false` stops at "ready to merge" |
+| `watch.require_review` | `false` | `pr`: always wait for an approving review |
+| `watch.unreviewed_merge_after_minutes` | `30` | `pr`: with no reviewer requested, how long the PR stays open before it merges |
+| `watch.optional_check_grace_minutes` | `30` | `pr`: a pending check that is not required stops blocking this long after the last push |
+| `watch.merge_method` | first allowed of squash, merge, rebase | `pr merge` |
+| `watch.max_rounds` / `watch.max_hours` | `6` / `72` | `pr`: hand the PR to the developer after this many fix rounds or hours |
+| `watch.bots` | `[]` | `pr`: bots whose top-level comments count as feedback (inline comments always do) |
 
 Set `ANDROID_WORKFLOW_NO_WATCH=1` to keep the office from starting its background watcher (the tests do).
 

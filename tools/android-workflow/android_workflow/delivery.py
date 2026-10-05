@@ -121,16 +121,25 @@ def compare_url(remote: str, branch: str, base: str) -> str | None:
 
 def open_pull_request(
     target: Path, host: str, remote: str, branch: str, base: str, subject: str, body_file: Path,
-    timeout: int, draft: bool = False,
+    timeout: int, draft: bool = False, keep_body: bool = False,
 ) -> dict[str, Any]:
     cli = {"github": "gh", "gitlab": "glab"}.get(host)
     if not cli or not shutil.which(cli):
         return {"status": "manual", "compare_url": compare_url(remote, branch, base),
                 "reason": f"no {cli or 'CLI'} for this remote; open it from the compare URL"}
+    env = dict(os.environ)
+    if host == "github":
+        from android_workflow.watch import github_env
+
+        try:
+            env.update(github_env(target))  # the logged-in account that can see this repository
+        except ValueError:
+            pass  # `gh` reports the real problem below
 
     def run(*args: str) -> subprocess.CompletedProcess[str]:
         try:
-            return subprocess.run([cli, *args], cwd=target, text=True, capture_output=True, timeout=timeout, check=False)
+            return subprocess.run([cli, *args], cwd=target, text=True, capture_output=True, timeout=timeout, check=False,
+                                  env=env)
         except subprocess.TimeoutExpired as error:
             raise ValueError(f"`{cli}` timed out after {timeout}s") from error
 
@@ -138,6 +147,8 @@ def open_pull_request(
         existing = run("pr", "view", branch, "--json", "url,state", "-q", '.state + " " + .url')
         if existing.returncode == 0 and existing.stdout.startswith("OPEN "):
             url = existing.stdout.split(" ", 1)[1].strip()
+            if keep_body:
+                return {"status": "updated", "url": url, "body": "kept"}
             edited = run("pr", "edit", branch, "--body-file", str(body_file))
             return {"status": "updated", "url": url, **({} if edited.returncode == 0 else {"warning": tail(edited.stderr, 5)})}
         created = run(
@@ -163,6 +174,7 @@ def deliver(
     no_commit: bool = False,
     no_push: bool = False,
     no_pr: bool = False,
+    keep_body: bool = False,
 ) -> dict[str, Any]:
     from android_workflow.cli import (
         AGENT_ATTRIBUTION_PATTERN,
@@ -275,7 +287,9 @@ def deliver(
         return result
     host, remote = remote_host(target)
     draft = bool((state.get("draft") or {}).get("issues"))
-    pr = open_pull_request(target, host, remote, branch, base_name, subject, body_file, timeout=300, draft=draft)
+    pr = open_pull_request(
+        target, host, remote, branch, base_name, subject, body_file, timeout=300, draft=draft, keep_body=keep_body,
+    )
     result["pr"] = pr
     result["warnings"] = warnings
     result["duration_seconds"] = round(time.monotonic() - started, 1)

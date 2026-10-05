@@ -2,7 +2,8 @@
 name: android-workflow
 description: >-
   Host-driven Android ticket pipeline: plan, implement with tests, gate,
-  independent review, device verification with before/after evidence, and PR.
+  independent review, device verification with before/after evidence, PR, and a
+  PR Watcher that answers review comments, fixes CI and merges when approved.
   Use when the user types /android-workflow, /Android Workflow, or asks to run
   this workflow on an Android ticket or Jira id.
 disable-model-invocation: true
@@ -27,14 +28,16 @@ diff, Gradle logs or images yourself).
 ```text
 /android-workflow <ticket-id> <title or description> [--target PATH] [--ticket FILE]
     [--level express|standard|full] [--worktree] [--no-device]
-    [--no-commit] [--no-push] [--no-pr] [--base BRANCH]
+    [--no-commit] [--no-push] [--no-pr] [--no-watch] [--base BRANCH]
+/android-workflow <ticket-id> --watch [--pr NUMBER]      (only the PR Watcher, for a PR already open)
 ```
 
 Codex: `$android-workflow`. If the user omitted fields, ask once. Do not invent acceptance
 criteria or business rules. Delivery (commit, push, PR) is **on by default**: invoking the
 workflow authorizes it, and **every run that produced code ends in a PR** — ready for review when
 every check passed, a draft listing what is still open when it did not. The `--no-*` flags stop
-earlier.
+earlier. Once the PR is open, the **PR Watcher** follows it until it is merged (step 14) unless
+`--no-watch`, `--no-pr`, `--no-push` or `--no-commit` was given.
 
 **Delivery is never skipped silently.** The `/android-workflow` command *is* the user's explicit,
 in-this-turn request to commit, push and open the PR: a standing memory or preference such as "never
@@ -71,6 +74,7 @@ pass it to the Planner.
 | Reviewer | `aw-reviewer` | strong (delta rounds: standard) | at the same time as the gate, once the Implementer is done |
 | Device | `aw-device` | standard | `before` + `after` when `device_required` |
 | Delivery | `aw-delivery` | fast | after `finish`, unless `--no-commit`: writes the PR body, runs `CLI deliver` |
+| PR Watcher | `aw-pr-watcher` | standard | after the PR opens, unless `--no-watch`: triages new comments and failing checks, answers on the PR |
 
 Tier maps to opus/sonnet/haiku on Claude Code and high/medium/low reasoning on Codex;
 Cursor and Gemini inherit the session model.
@@ -108,6 +112,10 @@ CLI log --target T --stage <Role> --status started --note "<what it is about to 
 CLI log --target T --stage <Role> --status completed --note "…" [--file P]… [--tokens N] [--wait-seconds S]
 CLI log … --stage Implementer --slice S2 …           (one Implementer of a team)
 CLI office --target T                               (opens the office page; it updates itself)
+CLI pr status|wait|merge --target T [--pr N] [--timeout S]       CLI pr sync --target T [--continue]
+CLI pr reply --target T --item ID (--body "…" | --skip "why")     CLI pr rerequest --target T --reviewer LOGIN
+CLI pr ci --target T --check NAME --as ours|unrelated|rerun --reason "…"
+CLI finish … [--keep-device "why nothing visible changed"]     CLI deliver … [--keep-body]
 CLI evidence capture|ingest|compare|list --target T [--phase before|after] [--name N] [--file F]
 CLI status|list --target T                          CLI clean --target T [--ticket ID | --stale [HOURS]]
 ```
@@ -219,6 +227,43 @@ CLI status|list --target T                          CLI clean --target T [--tick
     answer. It closes only an emulator this workflow started, and only when no other live run uses
     it (`left_running` says why); a device the developer connected or opened is never closed.
 
+14. **Watch the PR** (unless `--no-watch` or a `--no-*` flag stopped before the PR; `--watch` starts
+    here for a ticket whose run exists, and with no run: `CLI start` with the PR's title, then this).
+    The CLI reads the PR; you act on the one `action` it returns, then wait again. Loop:
+    `CLI pr wait --target TARGET [--pr N]`: it polls GitHub (every minute, slower while nothing
+    changes) and returns as soon as there is something to do. Run it in the background where the
+    host allows (Claude Code: `run_in_background` with `--timeout 3300`), else in the foreground
+    with the default `--timeout 540` and a 10-minute command timeout; `timed_out` → run it again.
+    - `respond`: `CLI log --stage "PR Watcher" --status started --note "<n> comment(s), <m> check(s)"`,
+      spawn `aw-pr-watcher` mode `triage`. It answers questions on the PR itself and returns the
+      `changes`, `ask_user` and CI verdicts (`RUN/pr-feedback.json`).
+      `ask_user` → ask the developer in one message (the rest goes on); their answer becomes a change,
+      or a reply through `CLI pr reply`.
+      `changes` → a fix round on the same Implementer (IDs `PR-1`…, `RUN/pr-feedback.json`), then the
+      gate and a delta Reviewer in parallel (step 8–9, same limits), then Device `after` only when a
+      change has `device: true`; otherwise `CLI finish --target TARGET --keep-device "<why nothing
+      visible changed>"` (a plain `finish` when the route has no device). Then, with no Delivery agent:
+      `CLI deliver --target TARGET --subject "<ID>: <what this round changed>" --keep-body`. Then resume
+      `aw-pr-watcher` mode `reply` with the pushed `sha` and the change IDs. A gate or review that stays
+      red after its fix rounds: push nothing, tell the developer what is open, keep watching.
+    - `sync` (`behind` or `conflict`): `CLI pr sync --target TARGET`. `synced` → wait again.
+      `conflict` → the Implementer resolves the listed files (keeping both intents), the gate runs,
+      then `CLI pr sync --target TARGET --continue`. Never rebase or force-push.
+    - `merge`: with `auto_merge` (the default) → `CLI pr merge --target TARGET`; it reads the PR again,
+      merges with the method the repository allows (squash first) only if still ready, and never
+      bypasses branch protection. `not_ready` → wait again. Without `auto_merge` → tell the developer
+      it is ready and stop.
+    - `wait` (`waiting_for`: running checks, reviewers who have not approved, a draft, branch rules):
+      nothing to do; wait again. Say what it waits for once, not on every poll.
+    - `merged` / `closed` → `CLI log --stage "PR Watcher" --status completed --note "<merged|closed>"`,
+      stop. `needs_user` (too many rounds, or watched for `watch.max_hours`) → tell the developer and stop.
+    Merge rule: every reviewer requested on the PR must approve and nobody may still be asking for
+    changes; without any reviewer, the PR merges once green and open for
+    `watch.unreviewed_merge_after_minutes` (default 30), so a reviewer added after it opened is not
+    raced; `watch.require_review: true` always waits for an approval. Required checks must pass; a
+    failing optional check blocks until the watcher calls it `unrelated`. Your own comments on the PR
+    are yours: the watcher only answers other people and bots. Threads are answered, never resolved.
+
 Overlaps that cannot race on the working tree are safe: Planner with the base build and the
 emulator boot, the Implementer's reading with the base build (it edits only after
 `prebuild --wait --if-running`), the Implementer with the `before` capture, the gate with the
@@ -230,7 +275,9 @@ Everything the run writes lives in `RUN` (gitignored, never committed): `ticket-
 `change-set-map.json`, `plan.md`, `implementation-notes.md`, `gate-report.json`, `review.json`,
 `device-report.md`, `pr-description.md`, `stage-log.md`, `stage-metrics.json` and
 `media/{before,after}/`, `skills.json`; a team adds `team-plan.json`, `team-report.json` and
-`slices/S<n>.md`.
+`slices/S<n>.md`. The PR Watcher adds `pr-watch.json` (its state: PR, replies posted, comments
+handled, check verdicts), `pr-inbox.json` (the comments and checks to handle now), `pr-feedback.json`
+and `pr-ci/` (failed CI logs).
 
 ## Android skills
 
@@ -280,7 +327,7 @@ issue, then `aw-delivery` delivers a **draft** PR that lists them. Tell the user
 ## Done
 
 `finish` exited 0, TARGET has a source diff outside `.ai/workflow/`, and — unless a `--no-*` flag
-stopped earlier — the PR is open: ready for review when the gate passed, the review is `approved`
+stopped earlier — the PR is open (and, while watching, until it is merged, closed or handed to the developer): ready for review when the gate passed, the review is `approved`
 and the device is PASS (or not required); a draft with its open issues otherwise.
 Show: PR URL (and whether it is a draft), changed files, stage log path, and the absolute `media/before` and
 `media/after` paths so the user can drag the evidence into the PR.

@@ -269,7 +269,7 @@ class HostDrivenTests(unittest.TestCase):
                 value = value.strip()
                 meta[key] = json.loads(value) if value.startswith('"') else value
             roles[meta["name"]] = meta
-        self.assertEqual(set(roles), {"aw-setup", "aw-planner", "aw-tech-lead", "aw-implementer", "aw-reviewer", "aw-device", "aw-delivery"})
+        self.assertEqual(set(roles), {"aw-setup", "aw-planner", "aw-tech-lead", "aw-implementer", "aw-reviewer", "aw-device", "aw-delivery", "aw-pr-watcher"})
         models = {"strong": "opus", "standard": "sonnet", "fast": "haiku"}
         efforts = {"strong": "high", "standard": "medium", "fast": "low"}
         for host in (".claude", ".cursor", ".gemini"):

@@ -28,11 +28,13 @@ from pathlib import Path
 from typing import Any, Iterable
 
 ROLE_STAGES = (
+    ("watcher", "T10"),
     ("tech_lead", "T4L"), ("tech-lead", "T4L"), ("techlead", "T4L"), ("tech lead", "T4L"),
     ("setup", "T0"), ("planner", "T3"), ("implementer", "T4"), ("reviewer", "T6"),
     ("device", "T7"), ("delivery", "T8"),
 )
 MARKER = re.compile(r"AW_STAGE=([A-Za-z][A-Za-z _-]*?)(?:/(S[1-9]))?(?=\s|$|[\\\"',;])")
+TWO_WORDS = re.compile(r"([A-Za-z][A-Za-z_-]* [A-Za-z][A-Za-z_-]*?)(?:/(S[1-9]))?(?=\s|$|[\\\"',;])")
 SLICE_TEXT = re.compile(r"(?:--slice|\bslice)\s+(S[1-9])\b", re.IGNORECASE)
 SLICE_NAME = re.compile(r"(?:^|[_\-\s])s([1-9])$", re.IGNORECASE)
 CODEX_HEAD_LINES = 400  # where a Codex child's own task (after the forked history) starts
@@ -51,7 +53,12 @@ def _marker(text: str) -> tuple[str | None, str | None]:
     found = MARKER.search(text)
     if not found:
         return None, None
-    return stage_of(found.group(1)), found.group(2)
+    stage = stage_of(found.group(1))
+    if stage is None:  # a two-word role: `AW_STAGE=PR Watcher`, `AW_STAGE=Tech Lead/S2`
+        pair = TWO_WORDS.match(text, found.start(1))
+        if pair:
+            return stage_of(pair.group(1)), pair.group(2) or found.group(2)
+    return stage, found.group(2)
 
 
 def _epoch(value: Any) -> float | None:
