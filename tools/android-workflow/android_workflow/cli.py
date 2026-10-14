@@ -3115,8 +3115,9 @@ def _office(args: argparse.Namespace) -> tuple[Any, int]:
     else:
         hub.publish_page()
         path = hub.page_path()
+    url = hub.office_url(args.target.resolve() if args.target else None)
     if not args.no_open:
-        webbrowser.open(path.as_uri())
+        webbrowser.open(url)
     return {"office": str(path), "hub": str(hub.page_path()), **result}, 0
 
 
@@ -3282,6 +3283,9 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
     raise ValueError(f"unknown command: {args.command}")
 
 
+OFFICE_URL_COMMANDS = {"start", "status", "office"}
+
+
 def refresh_office(target: Path) -> None:
     """Keep the office page in step with the run; a page problem never fails a workflow command.
 
@@ -3304,6 +3308,11 @@ def main(argv: list[str] | None = None) -> int:
         result, code = _dispatch(args)
         if args.target:
             refresh_office(args.target.resolve())
+        if args.command in OFFICE_URL_COMMANDS and isinstance(result, dict):
+            from android_workflow.hub import office_url
+
+            # A `file://` link, opened at this run: the host pastes it and one (Cmd+)click opens the office.
+            result = {**result, "office_url": office_url(args.target.resolve() if args.target else None)}
         print(json.dumps(role_view(result), indent=2, ensure_ascii=False))
         return code
     except (OSError, ValueError, json.JSONDecodeError) as error:

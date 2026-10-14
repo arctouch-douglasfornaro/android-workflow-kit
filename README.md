@@ -186,7 +186,8 @@ screenshots (side by side or with a slider), and the PR description.
 
 ![Clicking the Implementer opens its live changes](docs/office-panel.png)
 
-The link appears in the chat when a run starts. To open it yourself:
+The link (`office_url`, a `file://` address) appears in the chat when a run starts: Cmd+click it in
+the terminal and the office opens at that run. To open it yourself:
 
 ```bash
 python3 ~/.ai/bin/android-workflow office                 # every app and run

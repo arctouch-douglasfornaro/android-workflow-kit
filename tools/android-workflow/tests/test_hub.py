@@ -119,6 +119,17 @@ class HubTests(unittest.TestCase):
         self.assertEqual(result["removed"], [hub.run_key(root, "D-1")])
         self.assertEqual(left, ["D-2"])
 
+    def test_start_status_and_office_print_the_link_that_opens_this_run(self) -> None:
+        with GitProject() as root:
+            started, _ = quiet("start", "--target", str(root), "--id", "U-1", "--title", "Change ProfileScreen", "--type", "chore")
+            status, _ = quiet("status", "--target", str(root))
+            opened, _ = quiet("office", "--target", str(root), "--no-open")
+            wanted = f"{hub.page_path().resolve().as_uri()}#run={hub.run_key(root, 'U-1')}"
+        self.assertTrue(wanted.startswith("file:///"))
+        self.assertEqual([started["office_url"], status["office_url"], opened["office_url"]], [wanted] * 3)
+        everything, _ = quiet("office", "--no-open")
+        self.assertEqual(everything["office_url"], hub.page_path().resolve().as_uri())
+
     def test_the_office_opens_without_an_app(self) -> None:
         result, code = quiet("office", "--no-open")
         self.assertEqual(code, 0)

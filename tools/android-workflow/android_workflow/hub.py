@@ -291,13 +291,19 @@ def prune(days: float | None = None) -> dict[str, Any]:
     return {"removed": removed, "kept": len(runs)}
 
 
+def office_url(target: Path | None = None, ticket: str | None = None) -> str:
+    """The office's `file://` address, opened at TARGET's run (its current one by default): one click
+    (Cmd+click in a terminal) opens it."""
+    url = page_path().resolve().as_uri()
+    ticket = ticket or (current_ticket_id(target) if target else None)
+    return f"{url}#run={run_key(target, ticket)}" if target and ticket else url
+
+
 def stub(target: Path, ticket: str | None) -> str:
     """The app's own `office.html`: it opens the one office at this app's current run."""
-    hub = page_path().resolve().as_uri()
-    fragment = f"#run={run_key(target, ticket)}" if ticket else ""
-    url = _payload(hub + fragment)
+    url = office_url(target, ticket) if ticket else office_url()
     return (
         "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"><title>Agent Office</title>\n"
-        f"<script>location.replace({url});</script></head>\n"
-        f"<body><p><a href=\"{html.escape(hub + fragment)}\">Open the Agent Office</a></p></body></html>\n"
+        f"<script>location.replace({_payload(url)});</script></head>\n"
+        f"<body><p><a href=\"{html.escape(url)}\">Open the Agent Office</a></p></body></html>\n"
     )

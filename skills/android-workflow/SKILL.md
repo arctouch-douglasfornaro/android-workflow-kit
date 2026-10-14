@@ -57,10 +57,10 @@ Keep log notes neutral (`--note "writing the PR description"`), never a list of 
 2. If this repo is the toolkit (has `android_workflow/cli.py`) and TARGET was omitted, STOP.
 3. `CLI` = `python3 ~/.ai/bin/android-workflow`. `RUN` = `TARGET/.ai/workflow/<ticket-id>/`.
 
-Record `TARGET`, `RUN` and `CLI` in the first chat message, plus the office page the user can open
-to watch the agents: `TARGET/.ai/workflow/office.html` (`CLI office --target TARGET` opens it; it is
-the one office for every app and run, opened at this run). Never
-read that page yourself. If the ticket id looks like a
+Record `TARGET`, `RUN` and `CLI` in the first chat message, plus the office the user opens to watch
+the agents: paste `office_url` from the `start` output exactly as printed, on its own line (a
+`file://` link that one click, Cmd+click in a terminal, opens at this run; `status` prints it too).
+Never build that link yourself and never read that page. If the ticket id looks like a
 Jira key and this host has a Jira tool (MCP server or connector), fetch the issue body and
 pass it to the Planner.
 
