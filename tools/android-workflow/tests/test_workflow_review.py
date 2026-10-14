@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 
 os.environ["ANDROID_WORKFLOW_NO_WATCH"] = "1"
+# The one office every app publishes to: a throwaway folder, never the developer's own.
+os.environ.setdefault("ANDROID_WORKFLOW_OFFICE_HOME", __import__("tempfile").mkdtemp(prefix="aw-office-"))
 # The developer's own emulator may be connected; tests never ask adb.
 os.environ["ANDROID_WORKFLOW_NO_DEVICE_CHECK"] = "1"
 
@@ -278,24 +280,24 @@ class OfficePageTests(unittest.TestCase):
 
 
 class RunPageTests(unittest.TestCase):
-    def test_a_live_runs_own_page_sends_the_reader_to_the_live_page(self) -> None:
-        import re
-
-        def page_data(path: Path) -> dict:
-            return json.loads(re.search(r"let DATA = (.*);\n", path.read_text(encoding="utf-8")).group(1))
+    def test_a_runs_own_page_opens_the_office_at_that_run(self) -> None:
+        from android_workflow import hub
+        from test_live_team_emulator import office_run
 
         with GitProject() as root:
             run(root, {"id": "P-1", "title": "Change ProfileScreen", "type": "chore"})
             main(["office", "--target", str(root), "--no-open"])
-            live_page = page_data(run_dir(root, "P-1") / "office.html")
+            live_run = office_run(root, "P-1")
             state = run_dir(root, "P-1") / "run-state.json"
             state.write_text(json.dumps({**read_json(state), "status": "completed"}), encoding="utf-8")
             run(root, {"id": "P-2", "title": "Another change", "type": "chore"})
             main(["office", "--target", str(root), "--no-open"])
-            past_page = page_data(run_dir(root, "P-1") / "office.html")
-        self.assertEqual(live_page["redirect"], "../office.html")
-        self.assertNotIn("redirect", past_page)  # once another run is current it is P-1's own snapshot again
-        self.assertEqual(past_page["ticket"], "P-1")
+            own_page = (run_dir(root, "P-1") / "office.html").read_text(encoding="utf-8")
+            past_run = office_run(root, "P-1")
+        self.assertTrue(live_run["live"])
+        self.assertIn(f"#run={hub.run_key(root, 'P-1')}", own_page)
+        self.assertFalse(past_run["live"])  # once another run is current P-1 is a snapshot
+        self.assertEqual(past_run["ticket"], "P-1")
 
 
 class ReopenedRunTests(unittest.TestCase):

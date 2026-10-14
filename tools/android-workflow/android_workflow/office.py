@@ -1,11 +1,13 @@
-"""The office: an isometric, pixel-art page that shows the agents of the current run at their desks.
+"""The office: an isometric, pixel-art page that shows the agents of a run at their desks.
 
-Rewritten after every CLI command into ``TARGET/.ai/workflow/office.html`` from the files the run
-already writes, so it costs no tokens and needs no server. A browser cannot read sibling files from
-a local page, so the readable run files are embedded (size-capped); big Gradle logs are links only.
-While the run is going the page loads ``office-data.js`` every two seconds and updates in place (no
-reload, an open panel stays open); a small watcher (``live.py``) keeps that file current between
-commands, so clocks, file edits and new activity show up as they happen.
+One page for every app and run (`hub.py` writes it, outside any repository): a Project and a
+Workflow selector pick the run, and the page loads that run's data script and redraws in place.
+The data is rebuilt after every CLI command from the files the run already writes, so it costs no
+tokens and needs no server. A browser cannot read sibling files from a local page, so the readable
+run files are embedded (size-capped); big Gradle logs are links only. While a run is going the page
+reloads its script every two seconds (no reload, an open panel stays open); a small watcher
+(``live.py``) keeps it current between commands, so clocks, file edits and new activity show up as
+they happen.
 """
 
 from __future__ import annotations
@@ -237,26 +239,6 @@ def _desk_state(stage: str, entry: dict[str, Any], route: list[str], gate: dict[
     return "idle"
 
 
-def _history(target: Path, page_dir: Path) -> list[dict[str, Any]]:
-    """Every run of the app, newest first, with a link to its own office page."""
-    root = workflow_root(target)
-    runs = []
-    for item in list_runs(target):
-        run = Path(item["path"])
-        state = _json(run / "run-state.json")
-        pr = (_json(run / "delivery.json").get("pr") or {})
-        page = root / OFFICE_NAME if item["current"] else run / OFFICE_NAME
-        updated = state.get("updated_at") or state.get("created_at")
-        runs.append({
-            "ticket": item["ticket_id"], "title": item["title"] or "", "status": item["status"] or "unknown",
-            "current": item["current"], "href": Path(os.path.relpath(page, page_dir.resolve())).as_posix(),
-            "updated": datetime.fromtimestamp(updated, timezone.utc).strftime("%Y-%m-%d %H:%M") if updated else None,
-            "updated_at": updated or 0, "pr": pr.get("url") or pr.get("compare_url"),
-            "draft": bool((state.get("draft") or {}).get("issues")),
-        })
-    return sorted(runs, key=lambda run: (not run["current"], -run["updated_at"]))
-
-
 def _team(run: Path, stages: dict[str, Any]) -> dict[str, Any] | None:
     """The engineering team of this run, when the Tech Lead worked or split the plan into slices."""
     from android_workflow.team import owners, read_plan
@@ -314,7 +296,7 @@ def collect(target: Path, ticket: str | None = None, page_dir: Path | None = Non
             full_scan: bool = False, snapshot: bool = False) -> dict[str, Any]:
     """The page data for one run (the current one by default), with links relative to `page_dir`.
 
-    `live_src` is the data script the page reloads while the run is live (the main page only).
+    `live_src` is the run's data script the page reloads to stay current.
     """
     root = workflow_root(target)
     current = current_ticket_id(target)
@@ -324,8 +306,6 @@ def collect(target: Path, ticket: str | None = None, page_dir: Path | None = Non
     data: dict[str, Any] = {
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
         "ticket": ticket,
-        "is_current": ticket == current,
-        "history": _history(target, page_dir),
         "live": False,
         "live_src": live_src,
     }
@@ -391,11 +371,8 @@ def collect(target: Path, ticket: str | None = None, page_dir: Path | None = Non
         totals = {**totals, "tokens": (totals.get("tokens") or 0) + live_tokens, "tokens_live": True}
     pr = delivery.get("pr") or {}
     draft = state.get("draft") or {}
-    # A run's own page (reached from the history) is a snapshot: only the main page follows the run live.
+    # A snapshot (a run the app has moved on from) never follows the run live.
     live = running and not snapshot
-    if snapshot and running:
-        # Opened while the run is still going: send the reader to the live page instead.
-        data["redirect"] = Path(os.path.relpath(office_path(target), page_dir)).as_posix()
     changes: list[dict[str, Any]] = []
     patches: dict[str, Any] = {}
     if live:
@@ -432,67 +409,38 @@ def collect(target: Path, ticket: str | None = None, page_dir: Path | None = Non
     return data
 
 
-def _payload(data: dict[str, Any]) -> str:
-    return json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
-
-
-def _atomic_write(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temporary.write_text(text, encoding="utf-8")
-    temporary.replace(path)
-
-
-def _write(path: Path, data: dict[str, Any]) -> None:
-    _atomic_write(path, PAGE.replace("__SIM__", SIM_JS).replace("__DATA__", _payload(data)))
-
-
-def _write_data(path: Path, data: dict[str, Any]) -> None:
-    _atomic_write(path, f"window.officeData && window.officeData({_payload(data)});\n")
-
-
-def _stale(page: Path, run: Path) -> bool:
-    if not page.exists():
-        return True
-    built = page.stat().st_mtime
-    return any(item.stat().st_mtime > built for item in run.iterdir() if item.is_file() and item != page)
-
-
-def _redirects(page: Path) -> bool:
-    """A run page written while its run was live points at the live page; once another run is
-    current it must become that run's own snapshot again."""
-    try:
-        return '"redirect": "' in page.read_text(encoding="utf-8")
-    except OSError:
-        return False
-
-
 def render(target: Path) -> Path:
-    """Write the office page for TARGET's current run, plus one page per run for the history."""
+    """Publish TARGET's runs to the one office and point the app's own pages at it.
+
+    `office.html` in the app (and in each run folder) only opens the office at that run; the page
+    itself, with every app and run, lives in the office folder (`hub.py`)."""
+    from android_workflow import hub
+
+    hub.publish(target)
     current = current_ticket_id(target)
     main = office_path(target)
-    data = collect(target, current, main.parent, live_src=DATA_NAME)
-    _write(main, data)
-    _write_data(main.parent / DATA_NAME, data)
+    hub.write_if_changed(main, hub.stub(target, current))
     for item in list_runs(target):
-        run = Path(item["path"])
-        page = run / OFFICE_NAME
-        if item["ticket_id"] == current or _stale(page, run) or _redirects(page):
-            _write(page, collect(target, item["ticket_id"], run, snapshot=True))
+        hub.write_if_changed(Path(item["path"]) / OFFICE_NAME, hub.stub(target, item["ticket_id"]))
+    (main.parent / DATA_NAME).unlink(missing_ok=True)  # the data script the app's own page used to poll
     return main
 
 
 def write_live_data(target: Path, last_key: str | None = None, full_scan: bool = False) -> tuple[str, bool]:
-    """The watcher's tick: rewrite the page's data script only when something changed."""
-    main = office_path(target)
-    data = collect(target, current_ticket_id(target), main.parent, live_src=DATA_NAME, full_scan=full_scan)
+    """The watcher's tick: rewrite the current run's data in the office only when something changed."""
+    from android_workflow import hub
+
+    ticket = current_ticket_id(target)
+    if not ticket:
+        return "", False
+    data = hub.run_data(target, ticket, full_scan=full_scan)
     stable = {k: v for k, v in data.items() if k != "generated_at"}
     if not data.get("totals_final") and isinstance(stable.get("totals"), dict):
         # Mid-run the total is "now minus the start": it changes every tick but the page counts it itself.
         stable["totals"] = {**stable["totals"], "wall_time_seconds": None}
     key = json.dumps(stable, sort_keys=True, ensure_ascii=False)
     if key != last_key:
-        _write_data(main.parent / DATA_NAME, data)
+        hub.publish(target, live=data)
     return key, bool(data.get("live"))
 
 
@@ -721,8 +669,6 @@ code { font-family: ui-monospace, Menlo, monospace; }
 .picker { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
 .picker select { background: var(--panel-2); color: var(--ink); border: 1px solid var(--line); border-radius: 8px;
   padding: 6px 8px; font: inherit; font-size: 13px; max-width: 260px; }
-.pastbar { padding: 10px 18px; background: rgba(108, 183, 255, .12); border-bottom: 1px solid #3b6ea5; font-size: 13px; }
-.pastbar a { font-weight: 600; }
 .chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px;
   background: var(--panel-2); border: 1px solid var(--line); font-size: 12px; white-space: nowrap; }
 .chip.running, .chip.awaiting_host, .chip.working, .chip.started { color: #0b1020; background: var(--warn); border-color: transparent; }
@@ -887,10 +833,10 @@ figcaption { color: var(--muted); font-size: 11px; margin-top: 4px; }
     <div class="topbar">
       <div class="brand">AGENT OFFICE</div>
       <div class="grow"><b id="ticket"></b> <span class="ticket-title" id="ticketTitle"></span></div>
-      <label class="picker" id="pickerWrap" hidden><span>Ticket</span><select id="runPicker" aria-label="Open another run"></select></label>
+      <label class="picker" id="projectWrap" hidden><span>Project</span><select id="projectPicker" aria-label="Project"></select></label>
+      <label class="picker" id="pickerWrap" hidden><span>Workflow</span><select id="runPicker" aria-label="Workflow run"></select></label>
       <span id="statusChip"></span>
     </div>
-    <div class="pastbar" id="pastbar" hidden></div>
     <div class="room-wrap"><svg class="room" id="room" role="img" aria-label="The agents at their desks"></svg></div>
     <div class="hint">Click a desk, a file card or a message to read what that agent produced.</div>
   </section>
@@ -912,7 +858,16 @@ figcaption { color: var(--muted); font-size: 11px; margin-top: 4px; }
 </aside>
 <script>
 let DATA = __DATA__;
-if (DATA.redirect) location.replace(DATA.redirect + location.hash);  // this run is live: show the live page
+// The run on screen ("<app>/<ticket>"), kept in the address so a reload or a link reopens it.
+const hashParams = () => new URLSearchParams(location.hash.slice(1));
+let RUN_KEY = hashParams().get("run") || null;
+function setHash(agent, tab) {
+  const h = new URLSearchParams();
+  if (RUN_KEY) h.set("run", RUN_KEY);
+  if (agent) { h.set("agent", agent); if (tab) h.set("tab", tab); }
+  const text = h.toString();
+  history.replaceState(null, "", text ? `#${text}` : location.pathname);
+}
 __SIM__
 const ROLE_OF_STAGE = { T0: "Setup", T1: "Planner", T2: "Planner", T3: "Planner", T4: "Implementer", T4L: "Tech Lead",
   T5: "Quality gate", T6: "Reviewer", T7: "Device", T8: "Delivery", T9: "Orchestrator", T10: "PR Watcher" };
@@ -1764,7 +1719,7 @@ function tabsFor(role) {
 
 /* ---------- drawer ---------- */
 const drawer = document.getElementById("drawer"), scrim = document.getElementById("scrim");
-let refreshTimer = null, OPEN = null;
+let OPEN = null;
 const drawerOpen = () => drawer.classList.contains("open");
 // `refresh`: the run moved while the panel is open. Only the parts that changed are replaced and the
 // reader keeps their scroll position (and the before/after slider its place).
@@ -1787,17 +1742,13 @@ function openDrawer(role, tabId, refresh) {
   OPEN = { role, tab: active ? active.id : null };
   if (refresh) return;
   drawer.classList.add("open"); scrim.classList.add("open"); drawer.setAttribute("aria-hidden", "false");
-  history.replaceState(null, "", `#agent=${encodeURIComponent(role)}${active ? `&tab=${encodeURIComponent(active.id)}` : ""}`);
-  clearTimeout(refreshTimer);
+  setHash(role, active ? active.id : null);
 }
 function closeDrawer() {
   drawer.classList.remove("open"); scrim.classList.remove("open"); drawer.setAttribute("aria-hidden", "true");
-  history.replaceState(null, "", location.pathname);
+  setHash();
   OPEN = null;
-  scheduleRefresh();
 }
-// A page with no data script (a past run's own page) falls back to reloading while its run is live.
-function scheduleRefresh() { clearTimeout(refreshTimer); if (live() && !DATA.live_src) refreshTimer = setTimeout(() => location.reload(), 3000); }
 scrim.onclick = closeDrawer;
 document.getElementById("dbody").addEventListener("toggle", e => {
   const box = e.target;
@@ -1818,7 +1769,7 @@ function applyData(next) {
   if (!next || typeof next !== "object") return;
   const key = keyOf(next);
   if (key === LAST_KEY) return;
-  const newTicket = (next.ticket || null) !== (DATA.ticket || null);
+  const newTicket = (next.run_key || next.ticket || null) !== (DATA.run_key || DATA.ticket || null);
   DATA = next; LAST_KEY = key;
   if (newTicket) { OPEN = null; if (drawerOpen()) closeDrawer(); ROSTER_KEY = ""; }
   renderHeader();
@@ -1828,9 +1779,16 @@ function applyData(next) {
   if (roster !== ROSTER_KEY) { ROSTER_KEY = roster; OFFICE = SIM.build(rosterOf()); renderRoom(); }
   else { FURNITURE_ITEMS = null; SCENE_KEY = ""; refreshDeskHits(); drawScene(); }
   if (OPEN && drawerOpen()) openDrawer(OPEN.role, OPEN.tab, true);
+  else if (PENDING_AGENT && DATA.ticket) {
+    const [role, tab] = PENDING_AGENT; PENDING_AGENT = null;
+    drawer.classList.add("instant"); scrim.classList.add("instant");  // no slide-in after a reload
+    openDrawer(role, tab);
+    requestAnimationFrame(() => requestAnimationFrame(() => { drawer.classList.remove("instant"); scrim.classList.remove("instant"); }));
+  }
   tickClocks();
 }
-window.officeData = next => { pollFailures = 0; try { applyData(next); } catch (e) { console.error(e); } };
+// A script of the run shown before the reader picked another one may still arrive: it is ignored.
+window.officeData = next => { pollFailures = 0; if (next && next.run_key && next.run_key !== RUN_KEY) return; try { applyData(next); } catch (e) { console.error(e); } };
 function schedulePoll() { clearTimeout(pollTimer); pollTimer = setTimeout(poll, live() ? 2000 : 6000); }
 function poll() {
   if (!DATA.live_src) return;
@@ -1848,25 +1806,62 @@ function poll() {
 /* ---------- boot ---------- */
 function renderHeader() {
   document.getElementById("ticket").textContent = DATA.ticket || "";
-  document.getElementById("ticketTitle").textContent = DATA.title || "";
+  document.getElementById("ticketTitle").textContent = DATA.ticket ? (DATA.title || "")
+    : INDEX ? ((INDEX.runs || []).length ? "Pick a workflow" : "No workflow has run yet: start one and it shows up here") : "Loading…";
   setHTML(document.getElementById("statusChip"), chip(runStatus()));
   document.title = DATA.ticket ? `${DATA.ticket} · Agent Office` : "Agent Office";
 }
+/* ---------- the selectors: every app (Project) and its runs (Workflow) ---------- */
+let INDEX = null, INDEX_KEY = "", indexTimer = null, PENDING_AGENT = null;
+const runOf = key => ((INDEX || {}).runs || []).find(r => r.key === key);
+const runLabel = r => `${r.ticket}${r.question ? " · needs your answer" : r.live ? (r.working.length ? ` · ${r.working.join(" + ")}` : " · running") : ` · ${["running", "awaiting_host"].includes(r.status) ? "unfinished" : r.status}`}${r.worktree ? ` · ${r.worktree}` : ""}${r.pr ? (r.draft ? " · draft PR" : " · PR") : ""}${r.updated_at ? ` · ${new Date(r.updated_at * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}` : ""}${r.gone ? " · folder removed" : ""}`;
+function selectRun(key) {
+  if (!key || key === RUN_KEY) return;
+  if (drawerOpen()) closeDrawer();
+  RUN_KEY = key;
+  setHash();
+  const run = runOf(key);
+  DATA = { ...DATA, live_src: run ? run.src : null };
+  renderHistory();
+  clearTimeout(pollTimer);
+  poll();
+}
+window.officeIndex = next => {
+  if (!next || typeof next !== "object") return;
+  const key = JSON.stringify({ ...next, generated_at: 0 });
+  if (key === INDEX_KEY) return;
+  INDEX = next; INDEX_KEY = key;
+  const runs = INDEX.runs || [];
+  // First the run in the address, else one at work right now, else the latest.
+  const wanted = runOf(RUN_KEY) ? RUN_KEY : runs[0] && runs[0].key;
+  if (wanted && (wanted !== RUN_KEY || !DATA.live_src)) { RUN_KEY = null; selectRun(wanted); }
+  renderHistory();
+  renderHeader();
+};
+function pollIndex() {
+  clearTimeout(indexTimer);
+  const script = document.createElement("script");
+  script.src = `${DATA.index_src}?t=${Date.now()}`;
+  script.onload = () => { script.remove(); indexTimer = setTimeout(pollIndex, 3000); };
+  script.onerror = () => { script.remove(); indexTimer = setTimeout(pollIndex, 6000); };
+  document.head.appendChild(script);
+}
 function renderHistory() {
-  const runs = DATA.history || [];
-  const picker = document.getElementById("runPicker"), wrap = document.getElementById("pickerWrap");
-  if (runs.length > 1 || (runs.length && !DATA.is_current)) {
-    if (document.activeElement !== picker) {
-      setHTML(picker, runs.map(r => `<option value="${esc(r.href)}" ${r.ticket === DATA.ticket ? "selected" : ""}>${esc(r.ticket)}${r.current ? " (current)" : ""} · ${esc(r.status)}${r.pr ? (r.draft ? " · draft PR" : " · PR") : ""}${r.updated ? " · " + esc(r.updated) : ""}</option>`).join(""));
-    }
-    picker.onchange = () => { location.href = picker.value; };
-    wrap.hidden = false;
-  } else wrap.hidden = true;
-  const current = runs.find(r => r.current), bar = document.getElementById("pastbar");
-  if (DATA.ticket && !DATA.is_current) {
-    setHTML(bar, `You are viewing a past run (${esc(DATA.ticket)}).${current ? ` <a href="${esc(current.href)}">Go to the current run (${esc(current.ticket)}) →</a>` : ""}`);
-    bar.hidden = false;
-  } else bar.hidden = true;
+  const runs = (INDEX || {}).runs || [], projects = (INDEX || {}).projects || [];
+  const run = runOf(RUN_KEY), project = run ? run.project : (projects[0] || {}).id;
+  const projectPicker = document.getElementById("projectPicker"), runPicker = document.getElementById("runPicker");
+  document.getElementById("projectWrap").hidden = !projects.length;
+  document.getElementById("pickerWrap").hidden = !runs.length;
+  if (document.activeElement !== projectPicker) {
+    setHTML(projectPicker, projects.map(p => `<option value="${esc(p.id)}" ${p.id === project ? "selected" : ""}>${esc(p.name)}${p.live ? ` (${p.live} running)` : ""}</option>`).join(""));
+  }
+  if (document.activeElement !== runPicker) {
+    const mine = runs.filter(r => r.project === project);
+    const group = (label, items) => items.length ? `<optgroup label="${esc(label)}">${items.map(r => `<option value="${esc(r.key)}" title="${esc(r.title)}" ${r.key === RUN_KEY ? "selected" : ""}>${esc(runLabel(r))}</option>`).join("")}</optgroup>` : "";
+    setHTML(runPicker, group("Running", mine.filter(r => r.live)) + group("Past", mine.filter(r => !r.live)));
+  }
+  projectPicker.onchange = () => { const first = runs.find(r => r.project === projectPicker.value); if (first) selectRun(first.key); };
+  runPicker.onchange = () => selectRun(runPicker.value);
 }
 renderHeader();
 renderHistory();
@@ -1874,14 +1869,9 @@ renderRoom();
 renderSide();
 bindSide();
 setInterval(() => { if (!document.hidden) tickClocks(); }, 1000);
-const hash = new URLSearchParams(location.hash.slice(1));
-if (hash.get("agent")) {
-  // Reopened after a reload: show the panel at once, no slide-in.
-  drawer.classList.add("instant"); scrim.classList.add("instant");
-  openDrawer(hash.get("agent"), hash.get("tab"));
-  requestAnimationFrame(() => requestAnimationFrame(() => { drawer.classList.remove("instant"); scrim.classList.remove("instant"); }));
-} else scheduleRefresh();
-poll();
+// Reopened after a reload: the panel in the address opens as soon as its run has loaded.
+if (hashParams().get("agent")) PENDING_AGENT = [hashParams().get("agent"), hashParams().get("tab")];
+if (DATA.index_src) pollIndex(); else poll();
 </script>
 </body>
 </html>

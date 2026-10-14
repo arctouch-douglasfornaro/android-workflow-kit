@@ -58,7 +58,8 @@ Keep log notes neutral (`--note "writing the PR description"`), never a list of 
 3. `CLI` = `python3 ~/.ai/bin/android-workflow`. `RUN` = `TARGET/.ai/workflow/<ticket-id>/`.
 
 Record `TARGET`, `RUN` and `CLI` in the first chat message, plus the office page the user can open
-to watch the agents: `TARGET/.ai/workflow/office.html` (`CLI office --target TARGET` opens it). Never
+to watch the agents: `TARGET/.ai/workflow/office.html` (`CLI office --target TARGET` opens it; it is
+the one office for every app and run, opened at this run). Never
 read that page yourself. If the ticket id looks like a
 Jira key and this host has a Jira tool (MCP server or connector), fetch the issue body and
 pass it to the Planner.
@@ -111,7 +112,7 @@ CLI finish   --target T [--skip-device "r"] [--no-device] [--draft "r"] CLI deli
 CLI log --target T --stage <Role> --status started --note "<what it is about to do>"
 CLI log --target T --stage <Role> --status completed --note "…" [--file P]… [--tokens N] [--wait-seconds S]
 CLI log … --stage Implementer --slice S2 …           (one Implementer of a team)
-CLI office --target T                               (opens the office page; it updates itself)
+CLI office --target T                               (opens the office at this run; it updates itself)
 CLI pr status|wait|merge --target T [--pr N] [--timeout S]       CLI pr sync --target T [--continue]
 CLI pr reply --target T --item ID (--body "…" | --skip "why")     CLI pr rerequest --target T --reviewer LOGIN
 CLI pr ci --target T --check NAME --as ours|unrelated|rerun --reason "…"

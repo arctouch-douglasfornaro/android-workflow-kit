@@ -173,8 +173,10 @@ own transcript — Claude Code (`~/.claude/projects/…/subagents/`) and Codex (
 using the same number the host reports when the agent returns. Cursor and Gemini write no per-agent
 token log, so there the count appears when the agent's stage is logged. `ANDROID_WORKFLOW_NO_USAGE=1`
 turns the reading off.
-The page also shows who sent work back for a fix, time and tokens per agent, the run's activity as a
-chat and every past run of the app. **Click any desk,
+The page also shows who sent work back for a fix, time and tokens per agent and the run's activity as
+a chat. It is **one office for every app and run**: a **Project** selector (worktrees count as their
+repository) and a **Workflow** selector (running runs first, then past ones) switch the office in place,
+and the address keeps the run (`#run=…`) so a reload or a bookmark reopens it. **Click any desk,
 agent, file card or message** to read what that agent produced, formatted: the plan and acceptance
 criteria, the implementation notes and changed files, every quality-gate check (with the Gradle
 logs), the review's blocking points and suggestions, the device report with before/after
@@ -184,14 +186,19 @@ screenshots (side by side or with a slider), and the PR description.
 
 ![Clicking the Implementer opens its live changes](docs/office-panel.png)
 
-The link appears in the chat when a run starts. To open it yourself, from the app's folder:
+The link appears in the chat when a run starts. To open it yourself:
 
 ```bash
-python3 ~/.ai/bin/android-workflow office --target .
+python3 ~/.ai/bin/android-workflow office                 # every app and run
+python3 ~/.ai/bin/android-workflow office --target .      # at this app's current run
+python3 ~/.ai/bin/android-workflow office --prune [--days 30]   # forget removed worktrees (and old runs)
 ```
 
-It is a local file (`.ai/workflow/office.html`); nothing leaves your machine. While a run is live a
-small background process keeps it current between commands; it stops by itself when the run ends.
+It is a local file (`~/.local/state/android-workflow/office/office.html`, or `$ANDROID_WORKFLOW_OFFICE_HOME`);
+no server, nothing leaves your machine. Each app's `.ai/workflow/office.html` only opens it at that app's
+run. While a run is live a small background process keeps it current between commands; it stops by
+itself when the run ends. A run stays listed after its worktree is removed until `office --prune`;
+`clean` in an app removes its runs from the office too.
 
 ### 7. When it stops to ask you
 

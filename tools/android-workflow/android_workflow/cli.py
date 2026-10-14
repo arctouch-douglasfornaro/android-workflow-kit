@@ -3066,9 +3066,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     emulator_parser.add_argument("--avd", help="AVD to start (default: device.avd in the project overrides, else the first)")
     emulator_parser.add_argument("--headless", action="store_true", help="start without a window")
     emulator_parser.add_argument("--timeout", type=float, help="seconds --wait waits for the boot (default 300)")
-    office_parser = subparsers.add_parser("office", help="open the page that shows the agents at work")
-    office_parser.add_argument("--target", required=True, type=Path)
+    office_parser = subparsers.add_parser("office", help="open the page that shows the agents of every app and run")
+    office_parser.add_argument("--target", type=Path, help="open it at this app's current run (and refresh its runs)")
     office_parser.add_argument("--no-open", action="store_true", help="only print the page's path")
+    office_parser.add_argument("--prune", action="store_true",
+                               help="drop runs whose app or run folder is gone (a removed worktree, a clean)")
+    office_parser.add_argument("--days", type=float, help="with --prune: also drop past runs idle this many days")
     pr_parser = subparsers.add_parser("pr", help="PR Watcher: follow the open PR until it is merged")
     pr_parser.add_argument("action", choices=("status", "wait", "reply", "rerequest", "ci", "sync", "merge"))
     pr_parser.add_argument("--target", required=True, type=Path)
@@ -3094,7 +3097,32 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _office(args: argparse.Namespace) -> tuple[Any, int]:
+    """The one office for every app: `--target` publishes that app's runs and opens it at its current run."""
+    import webbrowser
+
+    from android_workflow import hub
+
+    result: dict[str, Any] = {}
+    if args.prune:
+        result.update(hub.prune(args.days))
+    elif args.days is not None:
+        raise ValueError("--days only goes with --prune")
+    if args.target:
+        from android_workflow.office import render
+
+        path = render(args.target.resolve())
+    else:
+        hub.publish_page()
+        path = hub.page_path()
+    if not args.no_open:
+        webbrowser.open(path.as_uri())
+    return {"office": str(path), "hub": str(hub.page_path()), **result}, 0
+
+
 def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
+    if args.command == "office" and not args.target:
+        return _office(args)
     target = args.target.resolve()
     toolkit = lambda folder: (folder / "tools" / "android-workflow" / "android_workflow" / "cli.py").is_file()
     if (target / ".ai").resolve() == KIT_ROOT.resolve() or target == KIT_ROOT.resolve() or toolkit(target / ".ai") or toolkit(target):
@@ -3221,14 +3249,7 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
             stop_emulator(target)  # only one the workflow started; its record lives in the cache
         return clean_runs(target, ticket_id=args.ticket, stale_hours=args.stale), 0
     if args.command == "office":
-        import webbrowser
-
-        from android_workflow.office import render
-
-        path = render(target)
-        if not args.no_open:
-            webbrowser.open(path.as_uri())
-        return {"office": str(path)}, 0
+        return _office(args)
     if args.command == "delta":
         return review_delta(target), 0
     if args.command == "skills":
@@ -3281,7 +3302,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
         result, code = _dispatch(args)
-        refresh_office(args.target.resolve())
+        if args.target:
+            refresh_office(args.target.resolve())
         print(json.dumps(role_view(result), indent=2, ensure_ascii=False))
         return code
     except (OSError, ValueError, json.JSONDecodeError) as error:

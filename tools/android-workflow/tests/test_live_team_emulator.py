@@ -6,6 +6,8 @@ import os
 
 # Commands start the office watcher for a live run; tests never leave background processes behind.
 os.environ["ANDROID_WORKFLOW_NO_WATCH"] = "1"
+# The one office every app publishes to: a throwaway folder, never the developer's own.
+os.environ.setdefault("ANDROID_WORKFLOW_OFFICE_HOME", __import__("tempfile").mkdtemp(prefix="aw-office-"))
 # The developer's own emulator may be connected; tests never ask adb.
 os.environ["ANDROID_WORKFLOW_NO_DEVICE_CHECK"] = "1"
 
@@ -23,9 +25,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from android_workflow import emulator, live, office, team
+from android_workflow import emulator, hub, live, office, team
 from android_workflow.cli import main, read_json, run
-from android_workflow.paths import cache_dir, run_dir, workflow_root
+from android_workflow.paths import cache_dir, current_ticket_id, run_dir, workflow_root
 
 
 def git(root: Path, *args: str) -> str:
@@ -56,6 +58,16 @@ class GitProject:
 
 def start(root: Path, ticket: str = "L-1") -> None:
     run(root, {"id": ticket, "title": "Change ProfileScreen", "type": "chore"})
+
+
+def office_script(root: Path, ticket: str | None = None) -> Path:
+    """Where the one office keeps a run's page data (the app's current run by default)."""
+    return hub.hub_dir() / hub.run_src(hub.run_key(root, ticket or current_ticket_id(root)))
+
+
+def office_run(root: Path, ticket: str | None = None) -> dict:
+    text = office_script(root, ticket).read_text(encoding="utf-8")
+    return json.loads(re.search(r"window\.officeData\((.*)\);\n$", text, re.S).group(1))
 
 
 def metrics(root: Path) -> dict:
@@ -298,17 +310,19 @@ class LiveChangesTests(unittest.TestCase):
             start(root)
             (root / "app/src/main/java/com/example/ProfileScreen.kt").write_text("package com.example\nclass P\n", encoding="utf-8")
             main(["office", "--target", str(root), "--no-open"])
-            script = (workflow_root(root) / office.DATA_NAME).read_text(encoding="utf-8")
-            html = (workflow_root(root) / office.OFFICE_NAME).read_text(encoding="utf-8")
-            own_page = (run_dir(root) / office.OFFICE_NAME).read_text(encoding="utf-8")
+            script = office_script(root).read_text(encoding="utf-8")
+            page = hub.page_path().read_text(encoding="utf-8")
+            app_page = (workflow_root(root) / office.OFFICE_NAME).read_text(encoding="utf-8")
+            old_data_script = (workflow_root(root) / office.DATA_NAME).exists()
         self.assertTrue(script.startswith("window.officeData && window.officeData({"))
         data = json.loads(re.search(r"window\.officeData\((.*)\);\n$", script, re.S).group(1))
-        embedded = json.loads(re.search(r"let DATA = (.*);\n", html).group(1))
-        own = json.loads(re.search(r"let DATA = (.*);\n", own_page).group(1))
+        embedded = json.loads(re.search(r"let DATA = (.*);\n", page).group(1))
         self.assertTrue(data["live"])
-        self.assertEqual(data["live_src"], "office-data.js")
-        self.assertEqual(embedded["live_src"], "office-data.js")
-        self.assertIsNone(own["live_src"])  # a run's own page is a snapshot: it falls back to reloading
+        self.assertEqual(data["run_key"], hub.run_key(root, "L-1"))
+        self.assertEqual(data["live_src"], hub.run_src(data["run_key"]))  # the page reloads the run's own script
+        self.assertEqual(embedded["index_src"], "index.js")
+        self.assertIn(f"#run={data['run_key']}", app_page)  # the app's page opens the office at its run
+        self.assertFalse(old_data_script)
         self.assertEqual([item["path"] for item in data["changes"]], ["app/src/main/java/com/example/ProfileScreen.kt"])
         self.assertIn("mtime", data["artifacts"]["Planner"][0])
         self.assertIsNotNone(data["created_at"])
@@ -351,7 +365,7 @@ class WatcherTests(unittest.TestCase):
     def test_watch_writes_the_data_script_and_stops_when_the_run_ends(self) -> None:
         with GitProject() as root:
             start(root)
-            data_path = workflow_root(root) / office.DATA_NAME
+            data_path = office_script(root)
             thread = threading.Thread(target=live.watch, args=(str(root), 0.05), daemon=True)
             thread.start()
             deadline = time.time() + 10
@@ -385,7 +399,7 @@ class WatcherTests(unittest.TestCase):
                 began = time.time()
                 live.watch(str(root), 0.05)  # another watcher holds the lock: returns at once
                 took = time.time() - began
-            wrote = (workflow_root(root) / office.DATA_NAME).exists()
+            wrote = office_script(root).exists()
         self.assertLess(took, 2)
         self.assertFalse(wrote)
 

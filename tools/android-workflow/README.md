@@ -25,7 +25,7 @@ How the workflow runs (stages, agents, levels, stops) is described in one place 
 | `finish --target APP [--skip-device "reason"] [--keep-device "reason"] [--draft "reason"]` | Final check: gate, review and device belong to the code that ships. `--draft` turns what is still unresolved into a draft PR's known issues; `--keep-device` keeps an earlier device PASS for a PR feedback round with nothing visible on the device |
 | `deliver --target APP [--subject "ID: title"] [--no-commit\|--no-push\|--no-pr] [--keep-body]` | Commits app source only, pushes, opens the PR (as a draft after `finish --draft`). `--keep-body`: a PR feedback round leaves the open PR's description as it is |
 | `pr status\|wait\|reply\|rerequest\|ci\|sync\|merge --target APP [--pr N]` | PR Watcher. `status` reads the PR once (comments, threads, reviews, checks with `isRequired`, reviewers, mergeability) and returns one `action`: `respond`, `sync`, `merge`, `wait`, `needs_user`, `merged`, `closed`; the comments themselves go to `RUN/pr-inbox.json`. `wait` polls until there is something to do (`--timeout`, default 540 s). `reply --item ID --body "…"` answers a thread (or quotes a top-level comment), `--skip "why"` marks it handled; threads are never resolved. `ci --check NAME --as ours\|unrelated\|rerun` records a failing check's verdict (`rerun`: GitHub Actions, once). `sync [--continue]` merges the PR branch and then the base in and pushes, never rebasing or force-pushing. `merge` merges only when a fresh read is ready, at the checked head, never with `--admin`. GitHub only; with several `gh` accounts the one that sees the repository is used |
-| `office --target APP [--no-open]` | Opens `.ai/workflow/office.html`, the pixel-art office that shows each agent's desk. Every command keeps it current, and while a run is live a watcher (`live.py`) refreshes `office-data.js` between commands, so clocks, edited files and activity update in place |
+| `office [--target APP] [--no-open] [--prune [--days N]]` | Opens the one pixel-art office for every app and run (`hub.py`, in `~/.local/state/android-workflow/office/` or `$ANDROID_WORKFLOW_OFFICE_HOME`): a Project and a Workflow selector switch it in place. `--target` publishes that app's runs and opens it at its current run; the app's `.ai/workflow/office.html` only points there. Every command keeps it current, and while a run is live a watcher (`live.py`) rewrites that run's `runs/<app>/<ticket>.js` between commands, so clocks, edited files and activity update in place. `--prune` drops runs whose app or run folder is gone (a removed worktree); `--days N` also past runs idle that long; `clean` drops an app's runs |
 | `status`, `list`, `clean [--ticket ID \| --stale [HOURS]]` | Run housekeeping: one ticket, unfinished idle runs, or everything when nothing is given |
 
 ## Quality gate details
@@ -64,7 +64,8 @@ Optional overrides read by the newer commands (all may be left out):
 | `watch.max_rounds` / `watch.max_hours` | `6` / `72` | `pr`: hand the PR to the developer after this many fix rounds or hours |
 | `watch.bots` | `[]` | `pr`: bots whose top-level comments count as feedback (inline comments always do) |
 
-Set `ANDROID_WORKFLOW_NO_WATCH=1` to keep the office from starting its background watcher (the tests do).
+Set `ANDROID_WORKFLOW_NO_WATCH=1` to keep the office from starting its background watcher (the tests do,
+and point `ANDROID_WORKFLOW_OFFICE_HOME` at a throwaway folder).
 
 ## Tests
 

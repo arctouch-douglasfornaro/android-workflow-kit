@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 
 os.environ["ANDROID_WORKFLOW_NO_WATCH"] = "1"
+# The one office every app publishes to: a throwaway folder, never the developer's own.
+os.environ.setdefault("ANDROID_WORKFLOW_OFFICE_HOME", __import__("tempfile").mkdtemp(prefix="aw-office-"))
 # The developer's own emulator may be connected; tests never ask adb.
 os.environ["ANDROID_WORKFLOW_NO_DEVICE_CHECK"] = "1"
 
@@ -22,7 +24,7 @@ from unittest import mock
 from android_workflow import office, usage
 from android_workflow.cli import main, read_json
 from android_workflow.paths import run_dir
-from test_live_team_emulator import PLAN, GitProject, metrics, start, write_plan
+from test_live_team_emulator import PLAN, GitProject, metrics, office_script, start, write_plan
 
 IDS = itertools.count(1)
 
@@ -236,7 +238,7 @@ class CodexTests(HostTests):
             handle.write(json.dumps({"timestamp": iso(now + 2), "ordinal": 9, "type": "event_msg", "payload": {
                 "type": "token_count", "info": {"last_token_usage": {"total_tokens": 25_000}}}}) + "\n")
         again, _ = office.write_live_data(self.root, key)
-        written = (self.root / ".ai" / "workflow" / office.DATA_NAME).read_text(encoding="utf-8")
+        written = office_script(self.root).read_text(encoding="utf-8")
         self.assertNotEqual(key, again)
         self.assertIn('"tokens": 25000', written)
 

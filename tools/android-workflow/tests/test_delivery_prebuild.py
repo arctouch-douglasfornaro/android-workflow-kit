@@ -4,6 +4,8 @@ import os
 
 # Commands start the office watcher for a live run; tests never leave background processes behind.
 os.environ["ANDROID_WORKFLOW_NO_WATCH"] = "1"
+# The one office every app publishes to: a throwaway folder, never the developer's own.
+os.environ.setdefault("ANDROID_WORKFLOW_OFFICE_HOME", __import__("tempfile").mkdtemp(prefix="aw-office-"))
 # The developer's own emulator may be connected; tests never ask adb.
 os.environ["ANDROID_WORKFLOW_NO_DEVICE_CHECK"] = "1"
 

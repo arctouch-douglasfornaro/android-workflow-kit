@@ -4,6 +4,8 @@ import os
 
 # Commands start the office watcher for a live run; tests never leave background processes behind.
 os.environ["ANDROID_WORKFLOW_NO_WATCH"] = "1"
+# The one office every app publishes to: a throwaway folder, never the developer's own.
+os.environ.setdefault("ANDROID_WORKFLOW_OFFICE_HOME", __import__("tempfile").mkdtemp(prefix="aw-office-"))
 # The developer's own emulator may be connected; tests never ask adb.
 os.environ["ANDROID_WORKFLOW_NO_DEVICE_CHECK"] = "1"
 
@@ -14,6 +16,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from android_workflow import office
 from android_workflow.cli import (
     bootstrap,
     build_project_config,
@@ -1412,10 +1415,27 @@ if __name__ == "__main__":
     unittest.main()
 
 
-def office_data(root: Path) -> tuple[dict, str]:
-    html = (root / ".ai/workflow/office.html").read_text(encoding="utf-8")
-    payload = re.search(r"let DATA = (.*);\n", html).group(1)
-    return json.loads(payload), html
+def office_data(root: Path, ticket: str | None = None) -> tuple[dict, str]:
+    """A run's data as the one office has it (the app's current run by default), and its raw script."""
+    from android_workflow import hub
+    from android_workflow.paths import current_ticket_id
+
+    script = (hub.hub_dir() / hub.run_src(hub.run_key(root, ticket or current_ticket_id(root)))).read_text(encoding="utf-8")
+    return json.loads(re.search(r"window\.officeData\((.*)\);\n$", script, re.S).group(1)), script
+
+
+def office_file(src: str) -> Path:
+    """The file a page link points at: links are relative to the office folder."""
+    from android_workflow import hub
+
+    return (hub.hub_dir() / src).resolve()
+
+
+def office_index() -> dict:
+    from android_workflow import hub
+
+    text = (hub.hub_dir() / hub.INDEX_JS).read_text(encoding="utf-8")
+    return json.loads(re.search(r"window\.officeIndex\((.*)\);\n$", text, re.S).group(1))
 
 
 class OfficeTests(unittest.TestCase):
@@ -1464,6 +1484,7 @@ class OfficeTests(unittest.TestCase):
             data, html = office_data(root)
         self.assertEqual(code, 0)
         self.assertTrue(json.loads(out.getvalue())["office"].endswith(".ai/workflow/office.html"))
+        self.assertTrue(json.loads(out.getvalue())["hub"].endswith("office.html"))
         self.assertEqual(data["status"], "completed")
         self.assertEqual({desk["role"]: desk["state"] for desk in data["desks"]}["Reviewer"], "done")
 
@@ -1478,38 +1499,38 @@ class OfficeTests(unittest.TestCase):
             data, _ = office_data(root)
         files = {role: {item["name"]: item for item in items} for role, items in data["artifacts"].items()}
         self.assertIn("Show the empty state.", files["Planner"]["plan.md"]["content"])
-        self.assertEqual(files["Planner"]["plan.md"]["src"], "O-4/plan.md")
+        self.assertEqual(office_file(files["Planner"]["plan.md"]["src"]), (root / ".ai/workflow/O-4/plan.md").resolve())
         self.assertIn("ticket-spec.json", files["Planner"])
         self.assertIn("Empty state helper.", files["Implementer"]["implementation-notes.md"]["content"])
         self.assertIn("approved", files["Reviewer"]["review.json"]["content"])
         self.assertIn("project-profile.md", files["Setup"])
         self.assertIn("stage-log.md", files["Orchestrator"])
-        self.assertTrue(any(item["src"] == "O-4/stage-log.md" for item in data["files"]))
+        self.assertTrue(any(item["rel"] == "stage-log.md" for item in data["files"]))
 
-    def test_history_lists_every_run_and_each_run_has_its_own_page(self) -> None:
+    def test_the_office_lists_every_run_and_each_run_has_its_own_data(self) -> None:
+        from android_workflow import hub
+
         with AndroidProject() as root:
             run(root, {"id": "H-1", "title": "First change", "type": "chore"})
             (run_dir(root) / "plan.md").write_text("# Objective\n\nFirst plan.\n", encoding="utf-8")
             run(root, {"id": "H-2", "title": "Second change", "type": "chore"})
             main(["office", "--target", str(root), "--no-open"])
             current, _ = office_data(root)
-            html = (root / ".ai/workflow/H-1/office.html").read_text(encoding="utf-8")
-            past = json.loads(re.search(r"let DATA = (.*);\n", html).group(1))
-        history = {item["ticket"]: item for item in current["history"]}
-        self.assertEqual(set(history), {"H-1", "H-2"})
-        self.assertEqual(current["history"][0]["ticket"], "H-2")
-        self.assertTrue(history["H-2"]["current"])
-        self.assertEqual(history["H-1"]["href"], "H-1/office.html")
-        self.assertEqual(history["H-2"]["href"], "office.html")
-        self.assertTrue(current["is_current"])
+            past, _ = office_data(root, "H-1")
+            index = office_index()
+            own_page = (root / ".ai/workflow/H-1/office.html").read_text(encoding="utf-8")
+        mine = [item for item in index["runs"] if item["app"] == hub.app_id(root)]
+        self.assertEqual([item["ticket"] for item in mine], ["H-2", "H-1"])  # running first, then the latest
+        self.assertEqual([item["live"] for item in mine], [True, False])
+        self.assertEqual(mine[1]["src"], hub.run_src(hub.run_key(root, "H-1")))
+        self.assertIn(mine[0]["project"], {item["id"] for item in index["projects"]})
+        self.assertIn(f"#run={hub.run_key(root, 'H-1')}", own_page)
         self.assertTrue(current["live"])
         self.assertEqual(past["ticket"], "H-1")
-        self.assertFalse(past["is_current"])
         self.assertFalse(past["live"])
         plan = {item["name"]: item for item in past["artifacts"]["Planner"]}["plan.md"]
-        self.assertEqual(plan["src"], "plan.md")
+        self.assertEqual(office_file(plan["src"]), (root / ".ai/workflow/H-1/plan.md").resolve())
         self.assertIn("First plan.", plan["content"])
-        self.assertEqual({item["ticket"]: item["href"] for item in past["history"]}["H-2"], "../office.html")
         self.assertNotIn("office.html", [item["rel"] for item in past["files"]])
 
     def test_before_and_after_pairs_reach_the_page_for_the_slider(self) -> None:
@@ -1522,8 +1543,8 @@ class OfficeTests(unittest.TestCase):
             data, html = office_data(root)
         self.assertEqual([item["name"] for item in data["media"]["before"]], ["profile"])
         self.assertEqual(data["media"]["after"][0]["kind"], "image")
-        self.assertEqual(data["media"]["after"][0]["src"], "S-9/media/after/profile.png")
-        self.assertIn("function compareView", html)
+        self.assertEqual(office_file(data["media"]["after"][0]["src"]), (root / ".ai/workflow/S-9/media/after/profile.png").resolve())
+        self.assertIn("function compareView", office.PAGE)
 
     def test_office_knows_when_each_agent_worked(self) -> None:
         with AndroidProject() as root:
