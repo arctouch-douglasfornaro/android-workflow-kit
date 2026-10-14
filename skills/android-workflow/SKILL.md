@@ -57,10 +57,10 @@ Keep log notes neutral (`--note "writing the PR description"`), never a list of 
 2. If this repo is the toolkit (has `android_workflow/cli.py`) and TARGET was omitted, STOP.
 3. `CLI` = `python3 ~/.ai/bin/android-workflow`. `RUN` = `TARGET/.ai/workflow/<ticket-id>/`.
 
-Record `TARGET`, `RUN` and `CLI` in the first chat message, plus the office the user opens to watch
-the agents: paste `office_url` from the `start` output exactly as printed, on its own line (a
-`file://` link that one click, Cmd+click in a terminal, opens at this run; `status` prints it too).
-Never build that link yourself and never read that page. If the ticket id looks like a
+Record `TARGET`, `RUN` and `CLI` in the first chat message, and end that message with the office
+the user opens to watch the agents: `office_message` from the `start` output, copied as is, on its
+own line (a bold `Office:` label and a `file://` link that one click, Cmd+click in a terminal, opens
+at this run; `status` prints it too). Never reword it, build that link yourself or read that page. If the ticket id looks like a
 Jira key and this host has a Jira tool (MCP server or connector), fetch the issue body and
 pass it to the Planner.
 
@@ -294,7 +294,8 @@ points at the active ticket. A new ticket gets a new folder.
 
 ## Chat log and telemetry
 
-Right before you spawn or resume an agent, run `CLI log --stage <Role> --status started --note
+Right before you spawn or resume an agent (Setup included: its logs before `start` wait for that
+`start`, never land in the previous ticket's run), run `CLI log --stage <Role> --status started --note
 "<one line: what it will do>"`. It costs nothing, it starts that agent's clock (the office counts it
 second by second), and it is what lights up its desk on the office page. The page updates itself
 while the run is live, files the Implementers edit included; you never refresh it.
@@ -331,7 +332,8 @@ issue, then `aw-delivery` delivers a **draft** PR that lists them. Tell the user
 stopped earlier — the PR is open (and, while watching, until it is merged, closed or handed to the developer): ready for review when the gate passed, the review is `approved`
 and the device is PASS (or not required); a draft with its open issues otherwise.
 Show: PR URL (and whether it is a draft), changed files, stage log path, and the absolute `media/before` and
-`media/after` paths so the user can drag the evidence into the PR.
+`media/after` paths so the user can drag the evidence into the PR. End with `office_message` from
+`CLI status --target TARGET`, as is, on its own line (also when you stop to ask the user).
 
 Commit message and PR body are product copy only: no host/agent/tool names, no
 `Generated with …`, `🤖`, `Assisted-by` or agent `Co-Authored-By`.

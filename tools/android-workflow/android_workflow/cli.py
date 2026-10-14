@@ -21,6 +21,7 @@ from android_workflow.paths import (
     SKILL_DIR,
     cache_dir,
     clean_runs,
+    current_ticket_id,
     ensure_gitignore,
     list_runs,
     run_dir,
@@ -620,6 +621,7 @@ def run_setup(
         if helper.get("status") == "error":
             raise ValueError(f"setup helper failed: {helper.get('error')}")
     ensure_gitignore(target)
+    open_pending_setup(target)
     config = configure(target)
     quality = config["detected"]["quality"]
     overrides = durable_overrides(target)
@@ -2010,6 +2012,7 @@ def append_stage_log(
     actor: str = "cli",
     note: str = "",
     role: str | None = None,
+    at: float | None = None,
 ) -> None:
     path = agent_dir / "stage-log.md"
     if not path.exists():
@@ -2017,7 +2020,7 @@ def append_stage_log(
             "# Stage log\n\n| time | stage | status | actor | note |\n|---|---|---|---|---|\n",
             encoding="utf-8",
         )
-    now = datetime.now(timezone.utc)
+    now = datetime.fromtimestamp(at, timezone.utc) if at is not None else datetime.now(timezone.utc)
     stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     safe_note = note.replace("|", "\\|").replace("\n", " ")
     row = f"| {role or stage_label(stage)} | {status} | {actor} | {safe_note} |"
@@ -2266,8 +2269,93 @@ def run_lock(target: Path):
             fcntl.flock(handle, fcntl.LOCK_UN)
 
 
+SETUP_PENDING_FILE = "setup-pending.json"
+
+
+def pending_setup_path(target: Path) -> Path:
+    return cache_dir(target) / SETUP_PENDING_FILE
+
+
+@contextlib.contextmanager
+def pending_setup_lock(target: Path):
+    path = cache_dir(target) / ".setup.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def open_pending_setup(target: Path) -> None:
+    """`setup` runs before the ticket's `start`: until then the Setup agent's logs wait here, not in
+    whichever run `current.json` still names (the previous ticket's)."""
+    with pending_setup_lock(target):
+        path = pending_setup_path(target)
+        if not path.exists():
+            write_json(path, {"opened_at": round(time.time(), 3), "events": []})
+
+
+def _log_pending_setup(
+    target: Path, status: str, note: str, actor: str, tokens: int | None, seconds: float | None,
+    wait_seconds: float | None,
+) -> dict[str, Any]:
+    with pending_setup_lock(target):
+        path = pending_setup_path(target)
+        pending = read_json(path)
+        now = time.time()
+        pending.setdefault("events", []).append({"at": round(now, 3), "status": status, "actor": actor, "note": note})
+        if status in OPENING_STATUSES:
+            pending.setdefault("running_since", round(now, 3))
+        else:
+            since = pending.pop("running_since", None)
+            if seconds is None and isinstance(since, (int, float)):
+                seconds = max(now - since, 0)
+            if wait_seconds and seconds is not None:
+                seconds = max(seconds - wait_seconds, 0)
+            if seconds is not None:
+                pending["seconds"] = round((pending.get("seconds") or 0) + seconds, 3)
+            if tokens is not None:
+                pending["tokens"] = (pending.get("tokens") or 0) + tokens
+            pending["attempts"] = (pending.get("attempts") or 0) + 1
+            pending["status"] = status
+        write_json(path, pending)
+    return {"stage": "Setup", "status": status, "recorded": "pending",
+            "note": "kept for this ticket's `start`, which adds it to the new run"}
+
+
+def attach_pending_setup(target: Path, agent_dir: Path, state: dict[str, Any], metrics: dict[str, Any]) -> None:
+    """`start` takes the Setup logged since `setup`: its time, tokens and stage-log rows join this run."""
+    with pending_setup_lock(target):
+        path = pending_setup_path(target)
+        pending = read_json(path) if path.exists() else {}
+        path.unlink(missing_ok=True)
+    for event in pending.get("events") or []:
+        append_stage_log(agent_dir, "T0", str(event.get("status")), str(event.get("actor") or "host"),
+                         str(event.get("note") or ""), role="Setup", at=event.get("at"))
+    if pending.get("attempts") or pending.get("tokens") is not None:
+        record_stage_metrics(metrics, "T0", "completed", seconds=pending.get("seconds"), tokens=pending.get("tokens"),
+                             attempts=pending.get("attempts") or 0)
+        if pending.get("tokens") is not None:
+            metrics["stages"]["T0"]["tokens_source"] = "reported"
+    if isinstance(pending.get("running_since"), (int, float)):
+        # The Setup agent is still working: its `completed` lands in this run and closes the clock.
+        metrics["stages"]["T0"]["running_since"] = pending["running_since"]
+        metrics["stages"]["T0"]["status"] = "started"
+        state["stages"]["T0"] = {"status": "started"}
+
+
 def log_stage(*args: Any, **kwargs: Any) -> dict[str, Any]:
     target = args[0] if args else kwargs["target"]
+    stage = args[1] if len(args) > 1 else kwargs["stage"]
+    if resolve_stage(stage)[0] == "T0" and pending_setup_path(target).exists():
+        names = ("status", "note", "actor", "files", "tokens", "seconds", "wait_seconds", "slice_id")
+        values = {**dict(zip(names, args[2:])), **{key: value for key, value in kwargs.items() if key in names}}
+        return _log_pending_setup(
+            target, values["status"], values.get("note") or "", values.get("actor") or "host", values.get("tokens"),
+            values.get("seconds"), values.get("wait_seconds"),
+        )
     with run_lock(target):
         return _log_stage(*args, **kwargs)
 
@@ -2848,7 +2936,6 @@ def run(target: Path, ticket: dict[str, Any]) -> dict[str, Any]:
         metrics["earlier_runs"] = history[-10:]
     record_stage_metrics(metrics, "T0", "completed", seconds=bootstrap_seconds)
     record_stage_metrics(metrics, "T1", "completed", seconds=time.monotonic() - started)
-    write_json(agent_dir / "stage-metrics.json", metrics)
     state = {
         "schema_version": 1,
         "run_id": str(uuid.uuid4()),
@@ -2860,6 +2947,8 @@ def run(target: Path, ticket: dict[str, Any]) -> dict[str, Any]:
         "created_at": int(time.time()),
         "updated_at": int(time.time()),
     }
+    attach_pending_setup(target, agent_dir, state, metrics)
+    write_json(agent_dir / "stage-metrics.json", metrics)
     question = pending_question(spec, state["answers"])
     if question:
         state.update({"status": "paused", "pending_question": question})
@@ -3308,12 +3397,21 @@ def main(argv: list[str] | None = None) -> int:
         result, code = _dispatch(args)
         if args.target:
             refresh_office(args.target.resolve())
+        banner = None
         if args.command in OFFICE_URL_COMMANDS and isinstance(result, dict):
-            from android_workflow.hub import office_url
+            from android_workflow.hub import office_banner, office_message, office_url
 
-            # A `file://` link, opened at this run: the host pastes it and one (Cmd+)click opens the office.
-            result = {**result, "office_url": office_url(args.target.resolve() if args.target else None)}
+            target = args.target.resolve() if args.target else None
+            # A `file://` link, opened at this run: the host pastes `office_message` as is, and one
+            # (Cmd+)click opens the office.
+            url = office_url(target)
+            result = {**result, "office_url": url, "office_message": office_message(url)}
+            banner = office_banner(url, current_ticket_id(target) if target else None)
         print(json.dumps(role_view(result), indent=2, ensure_ascii=False))
+        if banner:
+            sys.stdout.flush()
+            # On stderr: the JSON stays parseable, and the link is the last thing the command prints.
+            print(banner, file=sys.stderr)
         return code
     except (OSError, ValueError, json.JSONDecodeError) as error:
         print(f"error: {error}", file=sys.stderr)

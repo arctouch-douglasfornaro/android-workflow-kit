@@ -299,6 +299,18 @@ def office_url(target: Path | None = None, ticket: str | None = None) -> str:
     return f"{url}#run={run_key(target, ticket)}" if target and ticket else url
 
 
+def office_message(url: str) -> str:
+    """The chat line the host pastes as is: a bold label, then the raw link every terminal makes clickable."""
+    return f"🏢 **Office:** {url}"
+
+
+def office_banner(url: str, ticket: str | None = None) -> str:
+    """What a person sees in the command's own output, even when the host folds the JSON above it."""
+    rule = "─" * 60
+    title = "  ·  ".join(part for part in ("🏢  OFFICE", ticket, "Cmd+click to open") if part)
+    return f"{rule}\n{title}\n    {url}\n{rule}"
+
+
 def stub(target: Path, ticket: str | None) -> str:
     """The app's own `office.html`: it opens the one office at this app's current run."""
     url = office_url(target, ticket) if ticket else office_url()

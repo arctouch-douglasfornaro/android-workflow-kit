@@ -130,6 +130,21 @@ class HubTests(unittest.TestCase):
         everything, _ = quiet("office", "--no-open")
         self.assertEqual(everything["office_url"], hub.page_path().resolve().as_uri())
 
+    def test_start_prints_one_office_line_and_a_banner_after_the_json(self) -> None:
+        with GitProject() as root:
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = main(["start", "--target", str(root), "--id", "M-1", "--title", "Change ProfileScreen", "--type", "chore"])
+            logged, _ = quiet("log", "--target", str(root), "--stage", "Planner", "--status", "started")
+        result = json.loads(out.getvalue())  # the banner never breaks the JSON
+        self.assertEqual(code, 0)
+        self.assertEqual(result["office_message"], f"🏢 **Office:** {result['office_url']}")
+        self.assertEqual(list(result)[-2:], ["office_url", "office_message"])
+        banner = err.getvalue().strip().splitlines()
+        self.assertEqual(banner[1], "🏢  OFFICE  ·  M-1  ·  Cmd+click to open")
+        self.assertEqual(banner[2].strip(), result["office_url"])
+        self.assertNotIn("office_message", logged)
+
     def test_the_office_opens_without_an_app(self) -> None:
         result, code = quiet("office", "--no-open")
         self.assertEqual(code, 0)
