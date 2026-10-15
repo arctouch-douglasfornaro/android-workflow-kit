@@ -101,6 +101,11 @@ registrations: run `~/.ai/link.sh` once (it links every host's folder to this ki
 
 ## Commands (exact syntax; do not probe with `--help`)
 
+Never read a `gh` token into the environment (`GH_TOKEN=$(gh auth token …)`): the CLI picks the
+logged-in `gh` account that can see the repository by itself, and a token in the shell can leak into
+logs. Pass `--target` as an absolute path; the output is compact JSON, read it whole. If the host
+refuses a command (`pr merge` included), tell the developer and stop; never retry it another way.
+
 ```text
 python3 ~/.ai/bin/feature_workspace.py --repo-root T --ticket ID --title "…" [--worktree]
 CLI next     --target T [--no-device] [--no-watch] [--level express|standard] [--dry-run]   (the next action)
