@@ -32,21 +32,29 @@ listed under `device` in `RUN/skills.json` (e.g. `android-screenshots`, `android
    usable APK → return `BLOCKED: no prebuilt base APK` and stop. `after` always builds the current tree. Use
    `device.application_id` from `CLI setup` / the profile (flavored variants included). Record
    package, versionName and APK path.
-2. Launch and follow the navigation recipe (express level has none: derive it from the
+2. `after` with saved flows (the orchestrator passes `replay`): run `CLI device replay --target TARGET
+   --serial <serial>` first. It installs the current build and re-runs every flow in
+   `RUN/media/flows/` by code, files the captures under `media/after/` with their `before` names and
+   writes `media/compare.md` and `RUN/replay.json`. `replayed` → skip steps 3, 5 and 6 (navigation, capture
+   and compare are done) and judge the AC in step 4 from those files (open only the `after` captures
+   you need); drive by hand only an AC no flow reaches or one that needs logcat. `partial` → drive only the failed flows. `failed`, `install_failed`, `no_maestro` → the
+   normal path below. A replay is evidence, never a verdict by itself.
+3. Launch and follow the navigation recipe (express level has none: derive it from the
    profile's Device rows and the NavHost/intent code for the changed screen) with a Maestro flow saved in
    `RUN/media/flows/<name>.yaml`. Assert the target screen was reached (text/testTag) before
    judging anything. Recipe wrong → fix the flow, not the app.
-3. `after`: for each device AC write expected vs observed. Capture logcat for the app pid in
+4. `after`: for each device AC write expected vs observed. Capture logcat for the app pid in
    the same session when the AC involves events, errors or lifecycle.
-4. Evidence, same `--name` in both modes:
+5. Evidence, same `--name` in both modes (name the flow's `takeScreenshot` the same, so a replay
+   files it under the right name):
    - still: `CLI evidence capture --target TARGET --phase <mode> --name <surface>`
    - gesture, animation or multi-step flow: record inside the Maestro flow
      (`startRecording` / `stopRecording`, ≤15 s), then ingest the `.mp4`. `evidence capture
      --kind video` blocks while recording, so use it only for a static or self-running screen.
    - Maestro screenshots/videos: `CLI evidence ingest --target TARGET --phase <mode> --name <surface> --file <png|mp4>`
    At most one still per changed surface and one short clip per behavior.
-5. `after` only: `CLI evidence compare --target TARGET`.
-6. Real failure: rerun once. Second failure = FAIL (first failure only = flaky, note it).
+6. `after` only: `CLI evidence compare --target TARGET`.
+7. Real failure: rerun once. Second failure = FAIL (first failure only = flaky, note it).
 
 ## Writes (`after` mode)
 

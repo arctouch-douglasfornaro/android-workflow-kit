@@ -49,8 +49,10 @@ The only planning role for `/android-workflow`. One pass, short output.
 
 `CLI update-spec --target TARGET` with whatever the ticket proves: `--surfaces` (ui, navigation,
 deeplink, permissions, lifecycle, notifications, workmanager, room_migration, domain),
-`--acceptance "a|b"`, `--type`, `--risk`, `--complexity`, `--reproduction`. Any surface other
-than `domain` routes through Device.
+`--acceptance "a|b"`, `--type`, `--risk`, `--complexity`, `--reproduction`, `--visual yes|no`, and
+the Parallel work as numbers: `--parallel-parts N --parallel-files M` (`1` and `0` for single). Any
+surface other than `domain` routes through Device. `CLI next` reads these to pick the team and the
+device `before`; it never reads your prose for them.
 
 `RUN/plan.md` with headings exactly: Objective, Steps, Out of scope, Verification.
 Put under Verification: AC table (AC → proof: unit | device | both), `device_required`,

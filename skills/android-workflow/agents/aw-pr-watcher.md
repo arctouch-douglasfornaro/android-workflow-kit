@@ -36,7 +36,11 @@ and the file), then decide one of:
 - **skip**: no answer needed (a thank-you, an emoji, a bot summary repeated inline):
   `CLI pr reply --target TARGET --item <id> --skip "<why>"`.
 
-Failing checks: read `log` when there is one; otherwise reproduce locally with the Gradle task that
+Failing checks: runner and network failures were already re-run by the CLI and never reach you. A
+check with a `hint` comes with the CLI's evidence (`ours`: its log names a file this PR changed;
+`rerun`: the re-run itself failed, see `rerun_error`): confirm it against the log and record it
+without reproducing it again unless the log contradicts it. Without a hint, read `log` when there
+is one; otherwise reproduce locally with the Gradle task that
 matches the check's name in the project profile (lint, ktlint/format, unit tests of the touched
 modules), never the full build. Then:
 - `ours` (this change broke it): `CLI pr ci --target TARGET --check "<name>" --as ours --reason "…"`,

@@ -50,6 +50,8 @@ flowchart TD
     style CHECKS fill:transparent,stroke:#f9a825,stroke-dasharray:4 3
 ```
 
+Every routing decision the run's files can answer (level rules, team or single, fix round or draft, device or skip, CI re-runs) is made by `android-workflow next` in code, not by the agent's reading of prose: see [`decide.py`](tools/android-workflow/android_workflow/decide.py).
+
 The workflow is described in one place: [`skills/android-workflow/SKILL.md`](skills/android-workflow/SKILL.md).
 The repository mirrors `~/.ai`, which is where every host reads it from.
 

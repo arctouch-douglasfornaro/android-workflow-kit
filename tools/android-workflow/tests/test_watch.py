@@ -468,3 +468,102 @@ class AccountTests(unittest.TestCase):
         self.assertEqual(_marker("RUN=/x AW_STAGE=PR Watcher\n"), ("T10", None))
         self.assertEqual(_marker("AW_STAGE=Tech Lead "), ("T4L", None))
         self.assertEqual(_marker("AW_STAGE=Implementer/S2 "), ("T4", "S2"))
+
+
+class CiTriageTests(unittest.TestCase):
+    """Failing checks the code can classify never reach the PR Watcher agent."""
+
+    def test_classify_from_evidence_only(self) -> None:
+        item = {"name": "build", "conclusion": "FAILURE"}
+        self.assertEqual(watch.classify_ci({"conclusion": "TIMED_OUT"}, "", [])["verdict"], "rerun")
+        self.assertEqual(watch.classify_ci(item, "e: app/src/Main.kt:3 Unresolved", ["app/src/Main.kt"])["verdict"], "ours")
+        self.assertEqual(watch.classify_ci(item, "fatal: unable to access: Could not resolve host: github.com", [])["verdict"],
+                         "rerun")
+        self.assertIsNone(watch.classify_ci(item, "Test FooTest > bar FAILED", ["app/src/Main.kt"]))
+
+    def test_a_file_this_pr_touched_wins_over_a_network_line(self) -> None:
+        hint = watch.classify_ci({"conclusion": "FAILURE"}, "Read timed out\ne: Main.kt:3 error", ["app/Main.kt"])
+        self.assertEqual(hint["verdict"], "ours")
+
+    def run_status(self, root: Path, pr: dict, log: str, rerun_code: int = 0) -> tuple[dict, list]:
+        data = {"viewer": {"login": ME}, "repository": {"squashMergeAllowed": True, "mergeCommitAllowed": True,
+                                                        "rebaseMergeAllowed": False, "pullRequest": pr}}
+        (run_dir(root) / "pr-ci").mkdir(exist_ok=True)
+        (run_dir(root) / "pr-ci/build.log").write_text(log, encoding="utf-8")
+        calls = []
+
+        def gh(args, **_kwargs):
+            calls.append(args)
+            return subprocess.CompletedProcess(args, rerun_code, "", "boom" if rerun_code else "")
+
+        with mock.patch.object(watch, "github_env", return_value={}), \
+                mock.patch.object(watch, "_remote", return_value=("github.com", "o/r")), \
+                mock.patch.object(watch, "_graphql", return_value=copy.deepcopy(data)), \
+                mock.patch.object(watch, "_ci_log", return_value="pr-ci/build.log"), \
+                mock.patch.object(watch, "_gh", side_effect=gh):
+            return watch.status(root, 5), calls
+
+    def failing(self) -> dict:
+        commits = {"nodes": [{"commit": {"oid": "abc123def4567890", "committedDate": OLD,
+                                         "statusCheckRollup": {"contexts": {"nodes": [check("build", "FAILURE")]}}}}]}
+        return pull_request(commits=commits)
+
+    def test_an_infrastructure_failure_is_re_run_by_code_and_the_agent_is_not_called(self) -> None:
+        with AndroidProject() as root:
+            finished_run(root)
+            result, calls = self.run_status(root, self.failing(), "Error: The runner has received a shutdown signal")
+            state = json.loads((run_dir(root) / "pr-watch.json").read_text())
+            log = (run_dir(root) / "stage-log.md").read_text()
+        self.assertEqual(result["action"], "wait")
+        self.assertIn("re-run of build", result["waiting_for"][0])
+        self.assertTrue(any(args[:2] == ["run", "rerun"] for args in calls))
+        self.assertEqual(state["rounds"], 0)
+        self.assertIn("auto: infrastructure", json.dumps(state["ci_reasons"]))
+        self.assertIn("re-ran: build", log)
+
+    def test_a_failed_re_run_hands_the_check_to_the_agent_with_the_hint(self) -> None:
+        with AndroidProject() as root:
+            finished_run(root)
+            result, _ = self.run_status(root, self.failing(), "connect timed out", rerun_code=1)
+            inbox = json.loads((run_dir(root) / "pr-inbox.json").read_text())
+        self.assertEqual(result["action"], "respond")
+        self.assertEqual(result["ci"][0]["hint"], "rerun")
+        self.assertEqual(inbox["ci"][0]["hint"]["rerun_error"], "boom")
+
+    def test_a_cancelled_check_is_left_to_the_agent(self) -> None:
+        self.assertIsNone(watch.classify_ci({"conclusion": "CANCELLED"}, "", []))
+
+    def test_a_build_file_name_in_a_log_does_not_blame_the_pr(self) -> None:
+        hint = watch.classify_ci({"conclusion": "FAILURE"}, "> Configure build.gradle.kts\nRead timed out", ["app/build.gradle.kts"])
+        self.assertEqual(hint["verdict"], "rerun")
+
+    def test_one_actions_run_is_re_run_once_and_never_with_a_check_of_ours(self) -> None:
+        def two(ours: bool) -> dict:
+            nodes = [check("build", "FAILURE"), check("lint", "FAILURE")]
+            for node in nodes:
+                node["detailsUrl"] = "https://github.com/o/r/actions/runs/7/job/1"
+            commits = {"nodes": [{"commit": {"oid": "abc123def4567890", "committedDate": OLD,
+                                             "statusCheckRollup": {"contexts": {"nodes": nodes}}}}]}
+            return pull_request(commits=commits)
+
+        with AndroidProject() as root:
+            finished_run(root)
+            result, calls = self.run_status(root, two(False), "Error: The runner has received a shutdown signal")
+        self.assertEqual(result["action"], "wait")
+        self.assertEqual(sum(args[:2] == ["run", "rerun"] for args in calls), 1)
+
+        with AndroidProject() as root:
+            finished_run(root)
+            with mock.patch.object(watch, "classify_ci", side_effect=[{"verdict": "rerun", "evidence": "x"}, None]):
+                result, calls = self.run_status(root, two(True), "whatever")
+        self.assertEqual(result["action"], "respond")
+        self.assertFalse(any(args[:2] == ["run", "rerun"] for args in calls))
+        self.assertEqual(len(result["ci"]), 2)
+
+    def test_an_unclear_failure_goes_to_the_agent_without_a_hint(self) -> None:
+        with AndroidProject() as root:
+            finished_run(root)
+            result, calls = self.run_status(root, self.failing(), "FooTest > bar FAILED")
+        self.assertEqual(result["action"], "respond")
+        self.assertNotIn("hint", result["ci"][0])
+        self.assertFalse(any(args[:2] == ["run", "rerun"] for args in calls))

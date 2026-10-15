@@ -49,6 +49,19 @@ FAILED_CONCLUSIONS = {"FAILURE", "TIMED_OUT", "STARTUP_FAILURE", "ACTION_REQUIRE
 PASSED_CONCLUSIONS = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 MERGEABLE_STATES = {"CLEAN", "UNSTABLE", "HAS_HOOKS"}
 LOG_TAIL_LINES = 150
+# A failed check whose log shows the runner or the network failing, not the code: re-run it once.
+INFRA_PATTERNS = re.compile(
+    r"runner has received a shutdown signal|lost communication with the server|no space left on device"
+    r"|ETIMEDOUT|ECONNRESET|connection reset by peer|could not resolve host|temporary failure in name resolution"
+    r"|\b50[234] (?:bad gateway|service unavailable|gateway time-?out)|read timed out|connect timed out"
+    r"|gradle (?:build )?daemon disappeared unexpectedly|could not (?:get|head|download) '?https?://"
+    r"|api rate limit exceeded|the operation was canceled|the job was not acquired by runner",
+    re.I,
+)
+INFRA_CONCLUSIONS = {"TIMED_OUT", "STARTUP_FAILURE"}  # never CANCELLED: a person may have cancelled it
+# A compiler, lint or test line that names a file: only these lines can blame this PR's code.
+ERROR_LINE = re.compile(r"\s*(?:e:|w:|error:|\S+:\d+:\s*(?:error|warning)|.*\bFAILED\b)", re.I)
+SOURCE_SUFFIXES = (".kt", ".kts", ".java", ".xml")
 
 QUERY = """
 query($owner: String!, $repo: String!, $number: Int!) {
@@ -392,6 +405,42 @@ def _ci_log(target: Path, agent_dir: Path, env: dict[str, str], item: dict[str, 
     return str(path.relative_to(agent_dir))
 
 
+def classify_ci(item: dict[str, Any], log_text: str, touched: list[str]) -> dict[str, Any] | None:
+    """What a failing check most likely is, from evidence only: `rerun` when the runner or the
+    network failed, `ours` when its log names a file this PR changed. None: the agent reads it."""
+    if str(item.get("conclusion") or "").upper() in INFRA_CONCLUSIONS:
+        return {"verdict": "rerun", "evidence": f"conclusion {item.get('conclusion')}"}
+    error_lines = "\n".join(line for line in log_text.splitlines() if ERROR_LINE.match(line))
+    named = sorted({
+        path for path in touched
+        if path and (path in log_text or (path.endswith(SOURCE_SUFFIXES) and not path.endswith(".gradle.kts")
+                                          and Path(path).name in error_lines))
+    })
+    if named:
+        return {"verdict": "ours", "evidence": "its log names " + ", ".join(named[:3])}
+    found = INFRA_PATTERNS.search(log_text)
+    if found:
+        return {"verdict": "rerun", "evidence": f"infrastructure: {found.group(0)}"}
+    return None
+
+
+def _touched(target: Path, base: str | None) -> list[str]:
+    if not base:
+        return []
+    out = subprocess.run(["git", "-C", str(target), "diff", "--name-only", f"origin/{base}...HEAD"],
+                         text=True, capture_output=True, check=False)
+    return [line for line in out.stdout.splitlines() if line.strip()] if out.returncode == 0 else []
+
+
+def _rerun(target: Path, env: dict[str, str], item: dict[str, Any]) -> str | None:
+    """Re-run a GitHub Actions job's failed steps; the error text, or None when it was re-run."""
+    found = re.search(r"/actions/runs/(\d+)", str(item.get("url") or ""))
+    if not found:
+        return "not a GitHub Actions run"
+    rerun = _gh(["run", "rerun", found.group(1), "--failed"], env=env, cwd=target)
+    return None if rerun.returncode == 0 else (rerun.stderr or rerun.stdout).strip()[-300:]
+
+
 def _local(target: Path, head: str | None, branch: str | None) -> dict[str, Any]:
     def git(*args: str) -> str:
         return subprocess.run(["git", "-C", str(target), *args], text=True, capture_output=True, check=False).stdout.strip()
@@ -438,11 +487,50 @@ def status(target: Path, number: int | None = None, record: bool = True) -> dict
     if decision["action"] in {"wait", "respond", "sync", "merge"} and now - watch["started_at"] > float(config["max_hours"]) * 3600:
         decision = {**decision, "action": "needs_user", "reason": f"watched for {config['max_hours']} hours"}
     decision["local"] = _local(target, decision.get("head"), pr.get("headRefName"))
+    auto: list[str] = []
     if decision["action"] == "respond":
+        touched = _touched(target, pr.get("baseRefName")) if decision["ci"] else []
         for item in decision["ci"]:
             log = _ci_log(target, agent_dir, env, item)
             if log:
                 item["log"] = log
+            text = (agent_dir / log).read_text(encoding="utf-8", errors="replace") if log else ""
+            hint = classify_ci(item, text, touched)
+            if hint:
+                item["hint"] = hint
+
+        def run_id(item: dict[str, Any]) -> str | None:
+            found = re.search(r"/actions/runs/(\d+)", str(item.get("url") or ""))
+            return found.group(1) if found else None
+
+        # `gh run rerun --failed` re-runs every failed job of the run: only when all of them are re-runs.
+        mixed = {run_id(item) for item in decision["ci"] if (item.get("hint") or {}).get("verdict") != "rerun"}
+        rerun_runs: dict[str, str | None] = {}
+        kept_ci = []
+        for item in decision["ci"]:
+            hint = item.get("hint")
+            already = any(key.endswith(":" + str(item["name"])) and value == "rerun" for key, value in watch["ci"].items())
+            rid = run_id(item)
+            if hint and hint["verdict"] == "rerun" and not already and record and rid and rid not in mixed:
+                if rid not in rerun_runs:
+                    rerun_runs[rid] = _rerun(target, env, item)
+                error = rerun_runs[rid]
+                if error is None:
+                    # Decided by code: the agent never sees it unless it fails again after the re-run.
+                    watch["ci"][item["id"]] = "rerun"
+                    watch.setdefault("ci_at", {})[item["id"]] = round(now, 3)
+                    watch.setdefault("ci_reasons", {})[item["id"]] = "auto: " + hint["evidence"]
+                    auto.append(f"{item['name']} ({hint['evidence']})")
+                    continue
+                item["hint"] = {**hint, "rerun_error": error}
+            kept_ci.append(item)
+        decision["ci"] = kept_ci
+        if auto:
+            append_stage_log(agent_dir, "T10", "rerun", "cli", "re-ran: " + "; ".join(auto))
+        if not decision["items"] and not decision["ci"]:
+            decision = {**{key: value for key, value in decision.items() if key not in {"items", "ci"}},
+                        "action": "wait", "waiting_for": ["re-run of " + ", ".join(name.split(" (")[0] for name in auto)]}
+    if decision["action"] == "respond":
         _write(agent_dir / INBOX_FILE, {
             "pr": number, "url": pr.get("url"), "head": decision["head"], "base": pr.get("baseRefName"),
             "items": decision["items"], "ci": decision["ci"],
@@ -524,7 +612,8 @@ def _compact(decision: dict[str, Any]) -> dict[str, Any]:
                                           "draft", "reviewers", "local") if key in decision}
     if decision["action"] == "respond":
         out["items"] = len(decision["items"])
-        out["ci"] = [{"name": item["name"], "required": item["required"]} for item in decision["ci"]]
+        out["ci"] = [{"name": item["name"], "required": item["required"],
+                      **({"hint": item["hint"]["verdict"]} if item.get("hint") else {})} for item in decision["ci"]]
     if "checks" in decision:
         checks = decision["checks"]
         out["checks"] = f"{checks['passed']}/{checks['total']} passed" + (

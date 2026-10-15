@@ -792,8 +792,11 @@ def ticket_spec(ticket: dict[str, Any], target: Path | None = None) -> dict[str,
         "business_questions": questions,
         "route": route_for(ticket_type, complexity, risk, surfaces),
         "pr_template": find_pr_template(target) if target else None,
+        **({"level_override": ticket["level"]} if ticket.get("level") in LEVELS else {}),
     }
 
+
+LEVELS = ("express", "standard", "full")
 
 RUN_VERDICTS = ("gate-report.json", "review.json", "device-report.md", "delivery.json", "prebuild.json")
 
@@ -2227,6 +2230,16 @@ def update_spec(target: Path, args: argparse.Namespace) -> dict[str, Any]:
         if value is not None:
             spec[field] = value
     spec["route"] = route_for(spec["type"], spec["complexity"], spec["risk"], spec["surfaces"])
+    if getattr(args, "visual", None) is not None:
+        spec["visual"] = args.visual == "yes"
+    if getattr(args, "parallel_parts", None) is not None:
+        spec["parallel_parts"] = max(int(args.parallel_parts), 1)
+        spec["parallel_files"] = max(int(args.parallel_files or 0), 0)
+    from android_workflow.decide import apply_level
+
+    # The rules may raise the level (a Planner found a risky surface), never lower it; an express
+    # the rules forbid (a bug, an open question, risk above low) is refused.
+    apply_level(spec, explicit=getattr(args, "level", None), planner=bool(getattr(args, "level", None)))
     spec["planner_updated"] = True  # a later `start` of this ticket keeps these decisions
     errors = validate_artifact("ticket-spec.json", spec)
     if errors:
@@ -2254,6 +2267,7 @@ def ticket_from_flags(args: argparse.Namespace) -> dict[str, Any]:
         "risk": args.risk or "low",
         "explicit": [name for name in ("type", "complexity", "risk") if getattr(args, name) is not None],
         "business_questions": [],
+        **({"level": args.level} if getattr(args, "level", None) else {}),
     }
 
 
@@ -2313,6 +2327,8 @@ def run_quality_gate(target: Path) -> dict[str, Any]:
         "duration_seconds": duration,
         "secret_scan": scan,
         "prior_runs": prior_runs[-3:],
+        "red_streak": (int(previous.get("red_streak") or (1 if previous.get("status") == "failed" else 0)) + 1)
+        if gate_status == "failed" else 0,
         "prohibitions_respected": True,
         **extras,
     }
@@ -2585,7 +2601,12 @@ def _log_stage(
             state.update({"status": "running", "current_stage": later[0] if later else "T8"})
     if status == "completed" and stage in {"T6", "T7"}:
         verdict = recorded_verdict(agent_dir, stage)
-        state["stages"][stage].update({"verdict": verdict, "fingerprint": source_fingerprint(target)})
+        fingerprint = source_fingerprint(target)
+        state["stages"][stage].update({"verdict": verdict, "fingerprint": fingerprint})
+        history = [item for item in state["stages"][stage].get("history") or [] if isinstance(item, dict)]
+        if not any(item.get("fingerprint") == fingerprint and item.get("verdict") == verdict for item in history):
+            history.append({"verdict": verdict, "fingerprint": fingerprint})
+        state["stages"][stage]["history"] = history[-10:]
         if stage == "T6" and not duplicate:  # a repeated log must not move what the review saw
             try:
                 tree = snapshot_tree(target)
@@ -2903,6 +2924,7 @@ def finish_run(
             raise ValueError("--keep-device needs an earlier device PASS in this run; run the Device stage")
         device["fingerprint"] = source_fingerprint(target)
         device["kept"] = keep_device
+        device["status"] = "completed"  # a Device `started` logged for this round never ran
         state["stages"]["T7"] = device
         append_stage_log(agent_dir, "T7", "kept", "host", f"earlier PASS kept: {keep_device}")
     issues: list[str] = []
@@ -2992,6 +3014,11 @@ def execute_pipeline(target: Path, state: dict[str, Any], spec: dict[str, Any]) 
     write_json(agent_dir / "change-set-map.json", change_set)
     append_stage_log(agent_dir, "T2", "completed", "cli", f"{len(change_set['candidate_files'])} candidate file(s)")
     stage_end(state, metrics, "T2", started)
+    from android_workflow.decide import apply_level
+
+    apply_level(spec, change_set, spec.pop("level_override", None))
+    write_json(agent_dir / "ticket-spec.json", spec)
+    append_stage_log(agent_dir, "T1", "completed", "cli", f"level {spec['level']}: " + "; ".join(spec["level_reasons"]))
 
     started = stage_start(state, "T3")
     if "T3" in spec["route"]:
@@ -3119,6 +3146,11 @@ def keep_planner_decisions(agent_dir: Path, spec: dict[str, Any], ticket: dict[s
             kept[field] = previous[field]
     kept["route"] = route_for(kept["type"], kept["complexity"], kept["risk"], kept["surfaces"])
     kept["planner_updated"] = True
+    for field in ("visual", "parallel_parts", "parallel_files"):
+        if field in previous:
+            kept[field] = previous[field]
+    if previous.get("level_source") in {"flag", "planner", "orchestrator"} and "level_override" not in kept:
+        kept.update({key: previous[key] for key in ("level", "level_reasons", "level_source") if key in previous})
     return kept
 
 
@@ -3178,6 +3210,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     start_parser.add_argument("--acceptance", default="")
     start_parser.add_argument("--reproduction")
     start_parser.add_argument("--overrides", type=Path)
+    start_parser.add_argument("--level", choices=LEVELS, help="overrides the level the CLI picks")
     resume_parser = subparsers.add_parser("resume")
     resume_parser.add_argument("--target", required=True, type=Path)
     resume_parser.add_argument("--question-id", required=True)
@@ -3265,6 +3298,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     spec_parser.add_argument("--complexity", choices=("low", "medium", "high"))
     spec_parser.add_argument("--risk", choices=("low", "medium", "high"))
     spec_parser.add_argument("--reproduction")
+    spec_parser.add_argument("--level", choices=LEVELS)
+    spec_parser.add_argument("--visual", choices=("yes", "no"), help="a before/after capture helps the PR reviewer")
+    spec_parser.add_argument("--parallel-parts", type=int, help="independent parts of the Parallel work (1 = single)")
+    spec_parser.add_argument("--parallel-files", type=int, help="files across those parts")
     list_parser = subparsers.add_parser("list")
     list_parser.add_argument("--target", required=True, type=Path)
     clean_parser = subparsers.add_parser("clean")
@@ -3274,6 +3311,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--stale", nargs="?", type=float, const=24.0, metavar="HOURS",
         help="remove unfinished runs (awaiting_host/paused/running) idle for HOURS (default 24)",
     )
+    device_parser = subparsers.add_parser("device", help="replay the saved Maestro flows on the current build")
+    device_parser.add_argument("action", choices=("replay",))
+    device_parser.add_argument("--target", required=True, type=Path)
+    device_parser.add_argument("--serial")
+    next_parser = subparsers.add_parser("next", help="the one thing to do now, decided from the run's files")
+    next_parser.add_argument("--target", required=True, type=Path)
+    next_parser.add_argument("--no-device", action="store_true")
+    next_parser.add_argument("--no-watch", action="store_true")
+    next_parser.add_argument("--dry-run", action="store_true", help="decide without recording or logging")
+    next_parser.add_argument("--level", choices=LEVELS, help="express or standard, when `next` said choose_level")
     delta_parser = subparsers.add_parser("delta", help="what changed since the last review (RUN/review-delta.diff)")
     delta_parser.add_argument("--target", required=True, type=Path)
     skills_parser = subparsers.add_parser("skills", help="pick the Android skills each agent reads (RUN/skills.json)")
@@ -3478,6 +3525,16 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
         return clean_runs(target, ticket_id=args.ticket, stale_hours=args.stale), 0
     if args.command == "office":
         return _office(args)
+    if args.command == "device":
+        from android_workflow.replay import replay
+
+        result = replay(target, serial=args.serial)
+        return result, 0 if result["status"] in {"replayed", "partial"} else 1
+    if args.command == "next":
+        from android_workflow.decide import next_action
+
+        return next_action(target, no_device=args.no_device, record=not args.dry_run, no_watch=args.no_watch,
+                           level=args.level), 0
     if args.command == "delta":
         return review_delta(target), 0
     if args.command == "skills":

@@ -36,7 +36,7 @@ Codex: `$android-workflow`. If the user omitted fields, ask once. Do not invent 
 criteria or business rules. Delivery (commit, push, PR) is **on by default**: invoking the
 workflow authorizes it, and **every run that produced code ends in a PR** — ready for review when
 every check passed, a draft listing what is still open when it did not. The `--no-*` flags stop
-earlier. Once the PR is open, the **PR Watcher** follows it until it is merged (step 14) unless
+earlier. Once the PR is open, the **PR Watcher** follows it until it is merged (step 5) unless
 `--no-watch`, `--no-pr`, `--no-push` or `--no-commit` was given.
 
 **Delivery is never skipped silently.** The `/android-workflow` command *is* the user's explicit,
@@ -70,7 +70,7 @@ pass it to the Planner.
 |---|---|---|---|
 | Setup | `aw-setup` | strong | only when `CLI setup` says `needs_setup_agent` (a build change, not a dependency-version bump) |
 | Planner | `aw-planner` | strong | standard and full levels |
-| Tech Lead | `aw-tech-lead` | standard | only for a team (see Execute 7): splits the plan into slices, then integrates them |
+| Tech Lead | `aw-tech-lead` | standard | only for a team (`CLI next` decides, Execute 4): splits the plan into slices, then integrates them |
 | Implementer | `aw-implementer` | standard | always: code **and** its unit tests; resumed for every fix round. A team runs up to 3 at once, one per slice |
 | Reviewer | `aw-reviewer` | strong (delta rounds: standard) | at the same time as the gate, once the Implementer is done |
 | Device | `aw-device` | standard | `before` + `after` when `device_required` |
@@ -103,7 +103,8 @@ registrations: run `~/.ai/link.sh` once (it links every host's folder to this ki
 
 ```text
 python3 ~/.ai/bin/feature_workspace.py --repo-root T --ticket ID --title "…" [--worktree]
-CLI setup    --target T [--source-repo MAIN]        CLI start    --target T --id ID --title "…" [--type bug --reproduction "…"]
+CLI next     --target T [--no-device] [--no-watch] [--level express|standard] [--dry-run]   (the next action)
+CLI setup    --target T [--source-repo MAIN]        CLI start    --target T --id ID --title "…" [--type bug --reproduction "…"] [--level L]
 CLI resume   --target T --question-id Q --answer "…" CLI update-spec --target T --surfaces ui --acceptance "a|b"
 CLI prebuild --target T [--wait [--if-running]|--status]           CLI gate     --target T
 CLI emulator --target T [--wait] [--stop]           CLI team     --target T [--check]
@@ -118,6 +119,7 @@ CLI pr reply --target T --item ID (--body "…" | --skip "why")     CLI pr rereq
 CLI pr ci --target T --check NAME --as ours|unrelated|rerun --reason "…"
 CLI finish … [--keep-device "why nothing visible changed"]     CLI deliver … [--keep-body]
 CLI evidence capture|ingest|compare|list --target T [--phase before|after] [--name N] [--file F]
+CLI device replay --target T [--serial S]            (re-runs the saved Maestro flows on the current build)
 CLI status|list --target T                          CLI clean --target T [--ticket ID | --stale [HOURS]]
 ```
 
@@ -137,101 +139,64 @@ CLI status|list --target T                          CLI clean --target T [--tick
    `needs_setup_agent` → spawn `aw-setup` with the JSON; its questions are batched to the user
    once; a missing formatter or app id never blocks a domain-only ticket.
 3. **Ticket:** `CLI start` (add `--type bug --reproduction "..."`, `--acceptance "a|b"`,
-   `--surfaces` when known). It writes `ticket-spec.json` and `change-set-map.json` (the likely
-   files). `paused` → ask the human, then `CLI resume`.
-4. **Level** (`--level` wins; otherwise decide from the ticket and `ticket-spec.json`):
-   - `express`: chore/feature, low risk, the ticket names the screen or file, ≤3 files,
-     no business question. Skip the Planner: run `CLI update-spec` yourself with the AC and
-     surfaces from the ticket text (a visible change is `ui`).
-   - `full`: high risk or complexity, or surfaces lifecycle, room_migration, workmanager,
-     payments/auth. Planner, and the Implementer also covers the edge cases its role file lists.
-   - `standard`: everything else. Planner.
-   Bugs are never express (the Planner checks the reproduction).
-5. **Device and base build in the background:** when the route has a device stage and not
-   `--no-device`, run `CLI emulator --target TARGET` right after `start`. It returns at once:
-   `connected` (a device is already there), `booting` (no device was connected, so it started an
-   existing emulator in the background, or a device is still starting), `ready` (the emulator the
-   workflow started earlier), `unauthorized` (a phone waits for its USB-debugging prompt: tell the
-   user) or `unavailable` with the reason (no SDK or no AVD; it never creates one). Keep its
-   `serial`. `connected`, `booting` or `ready` → a device counts as connected below.
-   Then, with a device, run `CLI prebuild --target TARGET`. It returns at once and
-   builds the unmodified source in the background. Nothing may edit source until it ends; reading
-   is fine. The Planner never edits, so spawn it now (standard/full): `aw-planner` with TARGET, RUN
-   and the ticket text. It corrects the CLI's guesses with `CLI update-spec`. `NEEDS_INPUT` →
-   batch the questions to the user and STOP until answered.
-6. **Implementer and Device before, at once:** as soon as the Planner is done (express: right
-   after `start`), spawn the Implementer (step 7) in the background, **without waiting for the
-   base build**: it reads first, and before its first edit it repeats
-   `CLI prebuild --target TARGET --wait --if-running --timeout 90` until `may_edit: true` (at once
-   when no base build runs). In the same turn, if `device_required` and `visual`, a device is connected and not
-   `--no-device`: `CLI prebuild --target TARGET --wait`, then `CLI emulator --target TARGET --wait`
-   (run both with a long command timeout, e.g. 30 min, or in the background; a host's 2-minute
-   default would kill them). `passed` and the device `ready`/`connected` → spawn `aw-device` mode
-   `before` (it installs the prebuilt APK, no build; it touches only the device and `RUN/media`).
-   Any other status (`skipped` because the source already changed, `failed`, `tainted`) or no
-   device → no real base exists to capture: skip `before` and say why in one line. Nobody waits
-   for the `before` capture.
-7. **Implementer:** spawn `aw-implementer` with the level. It writes the code and the unit tests
-   that prove it. Keep its agent id for fix rounds.
-   **Team** (standard/full only, when the plan's Parallel work lists 2+ parts and 4+ files): spawn
-   `aw-tech-lead` mode `split` instead. It writes `team-plan.json` and checks it with `CLI team`.
-   `single` → one Implementer as above. `ready` → spawn one `aw-implementer` per slice **in the
-   same turn** (`--slice S1`, `S2`, `S3`; log each with `--stage Implementer --slice S<n>`), wait
-   for all, then resume the Tech Lead in mode `integrate`; its `completed` hands the change to the
-   gate. A `NEEDS_OTHER_SLICE` return goes to the Tech Lead. Fix rounds: resume the Implementer
-   that owns the file a finding names (`team-report.json`), always logged with its `--slice` (its
-   `completed` hands the change back to the gate), the Tech Lead for seams or unowned files;
-   slices without findings stay idle.
-8. **Quality gate and Reviewer, in parallel:** when the Implementer is done, in the same turn run
-   `CLI gate --target TARGET` (long command timeout, e.g. 30 min) **and** spawn `aw-reviewer` in
-   the background: the review only reads code, so it does not wait for the gate. When both are
-   back, one fix round carries everything: the gate's failed steps and the review's blocking IDs
-   go to the Implementer together, then the gate and a delta review run again, in parallel. The
-   gate keeps the modules and test filters of earlier rounds, so Gradle reuses its configuration
-   cache.
-   The gate: It runs the project's formatter (fixing first when
-   it can), then compile, unit tests, detekt and lint for the touched modules in one build, plus
-   compile and unit tests for modules that use a changed declaration, and a secret scan. Lint or
-   format findings only in files the change does not touch, and Android lint findings on lines of a
-   touched file that the change did not write, are **waived** and disclosed in the PR; a finding
-   on a line the change wrote fails. Never "fix" a waived pre-existing finding: it widens the diff.
-   The change is measured from the merge-base with the default branch once that branch was merged
-   in, so syncing master never widens the gate. Red → resume the Implementer with `gate-report.json` (max 2),
-   then re-gate. Third red → draft PR (see Stop). Never ask the user to waive lint by hand. If
-   the gate itself looks wrong (a misclassified waiver, a parser miss), report it as a toolkit
-   defect and deliver a draft PR: no agent edits the toolkit (`~/.ai`) during a run. `start`
-   fingerprints the toolkit; after any change the gate reports `blocked`
-   (`toolkit_modified_during_run`) and only a draft PR can ship.
-9. **Reviewer:** `changes_requested` → its blocking IDs join the fix round above (once). The
-   delta review is a **new** `aw-reviewer` at the standard tier (Claude Code: Agent `model:
-   sonnet`; Codex: reasoning `medium`) with the previous `review.json` and the fixed IDs: it runs
-   `CLI delta --target TARGET` and reads only `RUN/review-delta.diff`, what changed since the last
-   review (new files included). Still blocking → draft PR.
-10. **Device after** (if `device_required`, not `--no-device`): `CLI emulator --target TARGET
-    --wait` (instant when ready). `ready` or `connected` → spawn `aw-device` mode `after` with the
-    `serial`; anything else (`timed_out`, `failed`, `unauthorized`, `unavailable`, `no_device`) →
-    no device: its `reason` is the `--skip-device` reason. `finish` checks adb itself and refuses
-    `--skip-device` while a device is connected (only the developer's `--no-device`, passed as
-    `finish --no-device`, skips a device that is there). It verifies the AC on the device and
-    writes `media/compare.md` (before vs after).
-    FAIL → Implementer once → gate → Reviewer delta → Device again. Second FAIL → draft PR.
-    BLOCKED with a device connected (login, feature flag, screen unreachable) → draft PR that says
-    what unblocks it. No device connected at all → skip it at Finish (`--skip-device`).
-11. **Finish** (final check before the PR): `CLI finish --target TARGET`. It confirms that the
-    gate, the approved review and the device PASS all belong to the code that will ship (any
-    later edit makes them stale) and that a visual ticket has `media/after/`. `--no-device` or
-    no device: `--skip-device "<reason>"`, which is logged and repeated in the PR body. When a
-    check is still open after its fix rounds: `--draft "<why it stopped>"` (see Stop).
-12. **Delivery:** `CLI log --stage Delivery --status started --note "writing the PR description"`, then
-    spawn `aw-delivery` with flags. It writes `pr-description.md`, then `CLI deliver`
-    commits app source only, pushes (git hooks run, nothing is force-pushed) and opens the PR,
-    ready for review.
-13. **Close the emulator:** `CLI emulator --target TARGET --stop` once the run is over (after
-    Delivery, or after `finish` when a `--no-*` flag stopped earlier), never while you wait for an
-    answer. It closes only an emulator this workflow started, and only when no other live run uses
-    it (`left_running` says why); a device the developer connected or opened is never closed.
+   `--surfaces` when known, and the developer's `--level`). It writes `ticket-spec.json` (with the
+   level the rules give) and `change-set-map.json` (the likely files).
+4. **From here on, `CLI next` decides.** Run `CLI next --target TARGET [--no-device] [--no-watch]`
+   and do the one thing it returns, then run it again. It reads the run's files (state, verdicts,
+   source fingerprints, round counts) and answers with `next` and a one-line `why`; the same files
+   always give the same answer, and each answer is appended to `RUN/decisions.jsonl`. Do not
+   re-derive what it decided (level, team or single, which checks to run, fix round or draft,
+   device or skip): those rules live in the CLI, not in your reading of this file. When it hands a
+   stage to an agent it already logged that stage `started` (`logged`), so do not log it again; a
+   repeated `next` while the agent works says `wait`.
+   - `choose_level`: the rules allow express; only the ticket text can say whether it fits (`rule`).
+     Run the `express` or the `standard` command it gives (`CLI next --level …`). The CLI refuses
+     express for a bug, an open question or risk above low, and picks `full` itself.
+   - `update_spec` (express): run `CLI update-spec` with the AC and surfaces from the ticket text (a
+     visible change is `ui`), then `next`.
+   - `spawn`: spawn (or, with `resume`, resume) `agent` with `mode`, `level`, `ids` (fix-round
+     finding IDs) and `read` (the reports they come from), as in *How to delegate*. With `tier:
+     standard` use the standard tier (Claude Code: `model: sonnet`; Codex: reasoning `medium`).
+     `also` lists commands to start in the same turn, in the background (the emulator, the base
+     build, a second `next` that says whether to capture the device `before`). `slices` → one
+     `aw-implementer` per slice in the same turn, each logged with `--stage Implementer --slice S<n>`.
+     `first` → run it before spawning. `replay` → pass it to `aw-device`.
+   - `checks`: run what `run` lists in the same turn: `CLI gate --target TARGET` (long command
+     timeout, e.g. 30 min) and/or `agent` (`aw-reviewer`, `mode` `full` or `delta` with the `fixed`
+     IDs) in the background. The review only reads code, so it never waits for the gate.
+   - `fix` (a team): resume the Implementer of each slice in `routes` with its IDs (logged with its
+     `--slice`), the Tech Lead for `Tech Lead`.
+   - `wait`, `wait_prebuild`, `wait_device`: an agent or a build is still running; run `command` if
+     given (long timeout or in the background), else wait for the agent's return, then `next`.
+   - `finish`: run `command` as is. With `draft`, the PR opens as a draft listing what is open.
+   - `ask_user`: ask `question` once (batched), then run `then`.
+   - `watch` / `done`: step 5 / the Done summary; run `also` (it closes the emulator the workflow
+     started) first.
 
-14. **Watch the PR** (unless `--no-watch` or a `--no-*` flag stopped before the PR; `--watch` starts
+   Agent returns that `next` cannot read from files are yours: `NEEDS_INPUT` (Planner) → batch the
+   questions to the user and STOP until answered, then resume it; `NEEDS_OTHER_SLICE` → the Tech
+   Lead; `BLOCKED` from the Implementer (an environment error) → tell the user; `NEEDS_APPROVAL`
+   (Delivery) → see *Invocation*. A red gate is never waived by hand; a gate that itself looks wrong
+   (a misclassified waiver, a parser miss) is a toolkit defect: `finish --draft`. No agent edits the
+   toolkit (`~/.ai`) during a run; `start` fingerprints it, and after a change the gate reports
+   `blocked` (`toolkit_modified_during_run`) and only a draft PR can ship.
+
+   What the CLI decides, for reference (change it in `android_workflow/decide.py`, not here):
+   level `full` for high risk or complexity, lifecycle/room_migration/workmanager surfaces or a
+   payments/auth ticket, express only when allowed; Planner unless express; a team for 2+
+   independent parts and 4+ files (`update-spec --parallel-parts/--parallel-files`); gate and
+   Reviewer together, one fix round for both; a draft after the third red gate in a row, a review
+   still blocking after one fix, the second device FAIL in a row, a BLOCKED device or a fix round
+   that changed nothing (in a PR round: `ask_user`, push nothing, never a draft); an approved review kept
+   when only formatting changed since; the device `before` only with a passed base build and a
+   device; `finish --skip-device "<reason>"` only when adb sees no device.
+   The gate itself: formatter (fixing first when it can), then compile, unit tests, detekt and lint
+   for the touched modules in one build, plus compile and unit tests for modules that use a changed
+   declaration, and a secret scan. Lint or format findings only in files the change does not touch,
+   and Android lint findings on lines of a touched file that the change did not write, are
+   **waived** and disclosed in the PR; never "fix" a waived finding: it widens the diff.
+
+5. **Watch the PR** (unless `--no-watch` or a `--no-*` flag stopped before the PR; `--watch` starts
     here for a ticket whose run exists, and with no run: `CLI start` with the PR's title, then this).
     The CLI reads the PR; you act on the one `action` it returns, then wait again. Loop:
     `CLI pr wait --target TARGET [--pr N]`: it polls GitHub (every minute, slower while nothing
@@ -244,8 +209,8 @@ CLI status|list --target T                          CLI clean --target T [--tick
       `ask_user` → ask the developer in one message (the rest goes on); their answer becomes a change,
       or a reply through `CLI pr reply`.
       `changes` → a fix round on the same Implementer (IDs `PR-1`…, `RUN/pr-feedback.json`), then the
-      gate and a delta Reviewer in parallel (step 8–9, same limits), then Device `after` only when a
-      change has `device: true`; otherwise `CLI finish --target TARGET --keep-device "<why nothing
+      gate and a delta Reviewer in parallel (`CLI next`, same limits), then Device `after` only when a
+      change has `device: true` (when `next` asks for the device and none has it, do not spawn it); otherwise `CLI finish --target TARGET --keep-device "<why nothing
       visible changed>"` (a plain `finish` when the route has no device). Then, with no Delivery agent:
       `CLI deliver --target TARGET --subject "<ID>: <what this round changed>" --keep-body`. Then resume
       `aw-pr-watcher` mode `reply` with the pushed `sha` and the change IDs. A gate or review that stays
@@ -259,6 +224,9 @@ CLI status|list --target T                          CLI clean --target T [--tick
       it is ready and stop.
     - `wait` (`waiting_for`: running checks, reviewers who have not approved, a draft, branch rules):
       nothing to do; wait again. Say what it waits for once, not on every poll.
+    Failing checks the CLI can classify never reach the agent: a runner or network failure (or a
+    cancelled/timed-out job) is re-run once by `pr wait` itself (`wait` for `re-run of …`, logged).
+    The rest reach `aw-pr-watcher` with a `hint` (`ours` when the log names a file this PR changed).
     - `merged` / `closed` → `CLI log --stage "PR Watcher" --status completed --note "<merged|closed>"`,
       stop. `needs_user` (too many rounds, or watched for `watch.max_hours`) → tell the developer and stop.
     Merge rule: every reviewer requested on the PR must approve and nobody may still be asking for
@@ -297,7 +265,8 @@ points at the active ticket. A new ticket gets a new folder.
 
 ## Chat log and telemetry
 
-Right before you spawn or resume an agent (Setup included: its logs before `start` wait for that
+Right before you spawn or resume an agent that `CLI next` did not already log (its answer says
+`logged`; Setup, the PR Watcher and team slices are yours: Setup's logs before `start` wait for that
 `start`, never land in the previous ticket's run), run `CLI log --stage <Role> --status started --note
 "<one line: what it will do>"`. It costs nothing, it starts that agent's clock (the office counts it
 second by second), and it is what lights up its desk on the office page. The page updates itself
