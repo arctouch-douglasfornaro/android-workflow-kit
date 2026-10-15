@@ -326,6 +326,7 @@ class RunLayoutTests(unittest.TestCase):
             path = run_dir(root) / "gate-report.json"
             path.write_text(json.dumps({**read_json(path), "status": "failed"}), encoding="utf-8")
             approve_review(root)
+            implement(root)  # an approved review of the same source is kept; see test_run_speedups
             run(root, {"id": "R-1", "title": "Change ProfileScreen", "type": "chore"})
             gate = read_json(run_dir(root) / "gate-report.json")
             review = read_json(run_dir(root) / "review.json")

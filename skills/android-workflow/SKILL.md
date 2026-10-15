@@ -192,8 +192,11 @@ CLI status|list --target T                          CLI clean --target T [--tick
    The gate: It runs the project's formatter (fixing first when
    it can), then compile, unit tests, detekt and lint for the touched modules in one build, plus
    compile and unit tests for modules that use a changed declaration, and a secret scan. Lint or
-   format findings only in files the change does not touch are **waived** and disclosed in the PR;
-   findings in a touched file fail. Red → resume the Implementer with `gate-report.json` (max 2),
+   format findings only in files the change does not touch, and Android lint findings on lines of a
+   touched file that the change did not write, are **waived** and disclosed in the PR; a finding
+   on a line the change wrote fails. Never "fix" a waived pre-existing finding: it widens the diff.
+   The change is measured from the merge-base with the default branch once that branch was merged
+   in, so syncing master never widens the gate. Red → resume the Implementer with `gate-report.json` (max 2),
    then re-gate. Third red → draft PR (see Stop). Never ask the user to waive lint by hand. If
    the gate itself looks wrong (a misclassified waiver, a parser miss), report it as a toolkit
    defect and deliver a draft PR: no agent edits the toolkit (`~/.ai`) during a run. `start`
@@ -306,9 +309,11 @@ Durable log: `RUN/stage-log.md`; time and tokens per stage: `RUN/stage-metrics.j
 debug runs and find improvements). Every `log` for an agent stage passes the token total that
 agent's result reports (`--tokens N`); never estimate. When the agent already logged its own
 `completed` (with `--file`), log `completed` again with `--tokens`: a second `completed` of the same
-round merges into the first, it is not counted twice. A `log … --status started` that warns the
-toolkit changed since `start` → run `CLI start` for the ticket again before the gate (it keeps the
-Planner's decisions and archives the earlier metrics). `log` answers with a `warnings` entry
+round merges into the first, it is not counted twice (and the chat log keeps one line). A `log …
+--status started` that warns the toolkit code changed since `start` → run `CLI start` for the ticket
+again before the gate (it keeps the Planner's decisions, an approved review and a PASS device report
+of the unchanged source, and archives the earlier metrics). Edits to role files or this skill never
+block the gate. `log` answers with a `warnings` entry
 when an agent stage has none; if the host truly exposes no count, say so once in the final
 summary. When you paused to ask the user, add `--wait-seconds S` so waiting is not counted.
 While an agent works, the office reads its tokens so far from the host's own transcript (Claude

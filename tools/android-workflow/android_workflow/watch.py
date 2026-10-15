@@ -451,15 +451,18 @@ def status(target: Path, number: int | None = None, record: bool = True) -> dict
         decision = {**decision, "inbox": f"{agent_dir}/{INBOX_FILE}"}
     if record:
         summary = _summary(decision)
-        if summary != (watch.get("last") or {}).get("summary"):
+        last = watch.get("last") or {}
+        if _log_key(decision, summary) != last.get("log_key", last.get("summary")):
             append_stage_log(agent_dir, "T10", decision["action"], "cli", summary)
+        if summary != last.get("summary"):
             _mark_desk(target, decision["action"], summary)
         if decision["action"] == "respond":
             ids = sorted(item["id"] for item in [*decision["items"], *decision["ci"]])
             if ids != watch.get("inbox_ids"):  # a new batch of work, not the same one read again
                 watch["rounds"] = int(watch["rounds"]) + 1
                 watch["inbox_ids"] = ids
-        watch["last"] = {"action": decision["action"], "summary": summary, "at": round(now, 3)}
+        watch["last"] = {"action": decision["action"], "summary": summary, "log_key": _log_key(decision, summary),
+                         "at": round(now, 3)}
         if decision["action"] in {"merged", "closed"}:
             watch["ended"] = decision["action"]
         _write(agent_dir / WATCH_FILE, watch)
@@ -481,6 +484,19 @@ def _mark_desk(target: Path, action: str, summary: str) -> None:
             entry.update({"status": DESK_STATUS[action], "note": summary})
             save_state(target, state)
     refresh_office(target)
+
+
+def _waiting_kinds(decision: dict[str, Any]) -> list[str]:
+    """What a `wait` waits for, without the names that change on every poll (which checks still run)."""
+    return [reason.split(":", 1)[0] if reason.startswith(("checks running:", "failing checks:")) else reason
+            for reason in decision.get("waiting_for") or []]
+
+
+def _log_key(decision: dict[str, Any], summary: str) -> str:
+    """A new chat-log line only when the kind of wait changes: CI moving from one check to the next is not news."""
+    if decision["action"] == "wait":
+        return "wait: " + "; ".join(_waiting_kinds(decision))
+    return summary
 
 
 def _summary(decision: dict[str, Any]) -> str:
@@ -528,7 +544,7 @@ def wait(target: Path, number: int | None = None, timeout: float = 540, interval
             return result
         if time.monotonic() + delay > deadline:
             return {**result, "timed_out": True}
-        summary = json.dumps(result.get("waiting_for"))
+        summary = json.dumps(_waiting_kinds(result))
         delay = min(delay * 1.5, 300) if summary == last else max(interval, 15)
         last = summary
         time.sleep(delay)

@@ -23,6 +23,10 @@ The only planning role for `/android-workflow`. One pass, short output.
 1. Triage: restate each acceptance criterion as a verifiable check. Only criteria present in
    the ticket text; anything missing that changes behavior is a **business question**, never
    a guess. Classify type (bug/feature/chore), risk and complexity from evidence.
+   **Questions first:** when a business question would change the plan (base branch, scope,
+   parity with a sibling screen), return `NEEDS_INPUT` with every question batched right after
+   triage, before steps 3–8. Planning on a guess and redoing it after the answer cost a past run
+   40 minutes; the orchestrator resumes you with the answers.
 2. Bug: a reproduction is required. Missing → return `NEEDS_INPUT` with the question.
 3. Localizer: open at most the top 8 `change-set-map.json` candidates. Drop generic matches,
    add the real files (≤5 extra) found by following symbols from the ticket's screen/feature.
@@ -57,6 +61,11 @@ with their files). ≤80 lines.
 
 `READY | NEEDS_INPUT`, business questions (batched), affected modules, top files,
 `device_required`, `visual`, parallel parts (`single` or their count and file total), path of `plan.md`.
+
+## Budget
+
+Open at most 15 files in total (exemplars included) and stop reading once each AC has a proof and
+a file. A plan that needs more is a `full`-level change: say so in the return instead of reading on.
 
 ## Never
 

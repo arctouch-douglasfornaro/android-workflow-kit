@@ -188,6 +188,8 @@ def toolkit_fingerprint() -> dict[str, str]:
 
 
 TOOLKIT_FINGERPRINT_FILE = "toolkit-fingerprint.json"
+# Prose an agent reads (role files, the skill) does not judge a run: editing it mid-run never blocks the gate.
+TOOLKIT_PROSE_SUFFIXES = (".md",)
 
 
 def toolkit_changes(agent_dir: Path) -> list[str]:
@@ -196,7 +198,10 @@ def toolkit_changes(agent_dir: Path) -> list[str]:
     if not recorded:
         return []
     current = toolkit_fingerprint()
-    return sorted(path for path in set(recorded) | set(current) if recorded.get(path) != current.get(path))
+    return sorted(
+        path for path in set(recorded) | set(current)
+        if recorded.get(path) != current.get(path) and not path.endswith(TOOLKIT_PROSE_SUFFIXES)
+    )
 
 
 PRUNE_DIRS = frozenset({
@@ -474,6 +479,35 @@ def durable_overrides(root: Path) -> dict[str, Any]:
     """Facts the Setup agent (or a human) proved; they survive `clean` and re-detection."""
     path = root / OVERRIDES_FILE
     return read_json(path) if path.is_file() else {}
+
+
+def diff_base(target: Path) -> str | None:
+    """The commit this change is measured against.
+
+    The pinned `base_commit` is HEAD when the run started. Merging the default branch in afterwards
+    would make every file that branch brought look changed (a whole-repo gate, waivers on files
+    nobody touched), so once the pinned base is an ancestor of the merge-base with origin's default
+    branch, that merge-base is the base instead.
+    """
+    repo_map_path = cache_dir(target) / "repo-map.json"
+    base = read_json(repo_map_path).get("base_commit") if repo_map_path.exists() else None
+    if not base:
+        return None
+
+    def git_out(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["git", "-C", str(target), *args], text=True, capture_output=True, check=False)
+
+    head = git_out("symbolic-ref", "--short", "refs/remotes/origin/HEAD").stdout.strip()
+    candidates = [head] if head else [f"origin/{name}" for name in ("main", "master", "develop")]
+    for ref in candidates:
+        merged = git_out("merge-base", "HEAD", ref)
+        if merged.returncode != 0:
+            continue
+        upstream = merged.stdout.strip()
+        if upstream and upstream != base and git_out("merge-base", "--is-ancestor", base, upstream).returncode == 0:
+            return upstream
+        break
+    return base
 
 
 def git_base_commit(root: Path) -> str | None:
@@ -1002,8 +1036,7 @@ def execute_command(
 
 
 def secret_scan(target: Path) -> dict[str, Any]:
-    repo_map_path = cache_dir(target) / "repo-map.json"
-    base = read_json(repo_map_path).get("base_commit") if repo_map_path.exists() else None
+    base = diff_base(target)
     result = subprocess.run(
         ["git", "-C", str(target), "diff", base or "HEAD", "--no-ext-diff", "--unified=0"],
         text=True,
@@ -1326,6 +1359,7 @@ BASELINE_CREATED_PATTERN = re.compile(r"Created baseline file (\S+)")
 BASELINE_ABORT = "Aborting build since new baseline file was created"
 BASELINE_NAME_PATTERN = re.compile(r"(?i)baseline[^/]*\.xml$")
 LINT_REPORT_PATTERN = re.compile(r"The full lint text report is located at:\s*(\S+)")
+LINT_LINE_PATTERN = re.compile(r"^.+?:(\d+): (?:Error|Fatal|Warning): ")
 LINT_ISSUE_PATTERN = re.compile(r"^(.+?):(?:\d+:)? (Error|Fatal|Warning): (.+) \[([\w-]+)(?: from [^\]]+)?\]$")
 KOTLINTER_ISSUE_PATTERN = re.compile(r"^(\S+?\.kts?):\d+:\d+:? Lint error > (.+)$")
 LINT_SUMMARY_PATTERN = re.compile(r"^\s*(\d+) errors?, (\d+) warnings?", re.M)
@@ -1416,10 +1450,15 @@ def relative_to_root(path: str, root: Path) -> str:
     return candidate.as_posix()
 
 
-def step_findings(command: str, block: list[str], lines: list[str], root: Path) -> list[tuple[str, str]]:
-    """`(file, finding)` pairs, keyed without line numbers so an edit above an old finding is not new."""
+def finding_line(text: str) -> int | None:
+    match = LINT_LINE_PATTERN.match(text.strip())
+    return int(match.group(1)) if match else None
+
+
+def step_findings(command: str, block: list[str], lines: list[str], root: Path) -> list[tuple[str, str, int | None]]:
+    """`(file, finding, line)`, keyed without line numbers so an edit above an old finding is not new."""
     category = failure_category(command)
-    found: list[tuple[str, str]] = []
+    found: list[tuple[str, str, int | None]] = []
     if category == "android_lint":
         reports = dict.fromkeys(LINT_REPORT_PATTERN.findall("\n".join(block)))
         for report in reports:
@@ -1427,7 +1466,7 @@ def step_findings(command: str, block: list[str], lines: list[str], root: Path) 
                 match = LINT_ISSUE_PATTERN.match(line.strip())
                 if match:
                     path = relative_to_root(match.group(1), root)
-                    found.append((path, f"{path} [{match.group(4)}] {match.group(3)}"))
+                    found.append((path, f"{path} [{match.group(4)}] {match.group(3)}", finding_line(line)))
         # Some AGP versions print the finding inline but omit the report path from an individual
         # task's failure block when multiple lint tasks run together. Preserve changed-file
         # classification in that case by reading the same diagnostic format directly.
@@ -1436,7 +1475,7 @@ def step_findings(command: str, block: list[str], lines: list[str], root: Path) 
                 match = LINT_ISSUE_PATTERN.match(line.strip())
                 if match:
                     path = relative_to_root(match.group(1), root)
-                    found.append((path, f"{path} [{match.group(4)}] {match.group(3)}"))
+                    found.append((path, f"{path} [{match.group(4)}] {match.group(3)}", finding_line(line)))
     elif category == "format":
         tasks = (gradle_invocation(command) or ("", []))[1]
         prefixes = [
@@ -1450,12 +1489,12 @@ def step_findings(command: str, block: list[str], lines: list[str], root: Path) 
                 continue
             path = relative_to_root(match.group(1), root)
             if not prefixes or any(path.startswith(prefix) for prefix in prefixes):
-                found.append((path, f"{path} {match.group(2)}"))
+                found.append((path, f"{path} {match.group(2)}", None))
     return found
 
 
 def step_diagnostics(command: str, block: list[str], lines: list[str], root: Path) -> list[str]:
-    return [key for _, key in step_findings(command, block, lines, root)]
+    return [key for _, key, _ in step_findings(command, block, lines, root)]
 
 
 def lint_report_total(block: list[str]) -> int | None:
@@ -1580,7 +1619,7 @@ def run_gradle_batch(
             ) or lines[-25:]
             findings = step_findings(command, block, lines, root)
             step["_findings"] = findings
-            step["_diagnostics"] = [key for _, key in findings]
+            step["_diagnostics"] = [key for _, key, _ in findings]
             if failure_category(command) == "android_lint":
                 step["_expected_findings"] = lint_report_total(block)
         elif outcome == "not_run":
@@ -1671,8 +1710,7 @@ def git_status_paths(target: Path) -> list[str]:
 def touched_files(target: Path) -> set[str]:
     """Every file this change touches, whatever its type: the scope lint findings are judged against."""
     names = set(source_changes(target)) | set(git_status_paths(target))
-    repo_map_path = cache_dir(target) / "repo-map.json"
-    base = read_json(repo_map_path).get("base_commit") if repo_map_path.exists() else None
+    base = diff_base(target)
     diff = subprocess.run(
         ["git", "-C", str(target), "diff", "--name-only", *([base] if base else [])],
         text=True, capture_output=True, check=False,
@@ -1690,40 +1728,87 @@ def tree_state(target: Path) -> dict[str, str]:
     return state
 
 
-def apply_lint_scope(target: Path, config: dict[str, Any], steps: list[dict[str, Any]]) -> list[str]:
-    """Waive lint and format failures whose findings all sit in files this change does not touch.
+HUNK_PATTERN = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 
-    Findings in a touched file still fail, whether or not they predate the branch. A failure whose
+
+def changed_lines(target: Path, relative: str, base: str | None) -> set[int] | None:
+    """Line numbers this change wrote in `relative`; None when every line counts as new (or unknown)."""
+    if not base or git_lines(target, "cat-file", "-e", f"{base}:{relative}") is None:
+        return None
+    result = subprocess.run(
+        ["git", "-C", str(target), "diff", "--no-ext-diff", "--unified=0", base, "--", relative],
+        text=True, capture_output=True, check=False,
+    )
+    if result.returncode != 0:
+        return None
+    lines: set[int] = set()
+    for row in result.stdout.splitlines():
+        match = HUNK_PATTERN.match(row)
+        if match:
+            start, count = int(match.group(1)), int(match.group(2) or 1)
+            lines.update(range(start, start + count))
+    return lines
+
+
+def apply_lint_scope(target: Path, config: dict[str, Any], steps: list[dict[str, Any]]) -> list[str]:
+    """Waive lint and format failures whose findings all predate this change.
+
+    `changed_lines` (the default) also waives an Android lint finding in a touched file when its line
+    is one this change did not write, so a problem the base branch already had never costs a fix
+    round. A finding without a line number, past the end of the file, or in a new file still fails.
+    `changed_files` keeps every finding in a touched file; `all` turns the waiver off. A failure whose
     findings cannot all be read (fewer parsed than the report announces, or none) also stays failed.
-    `quality_gates.lint_scope: "all"` turns the waiver off. Each waiver is recorded, never silent.
+    Each waiver is recorded, never silent.
     """
-    if (config.get("quality_gates") or {}).get("lint_scope", "changed_files") != "changed_files":
+    mode = (config.get("quality_gates") or {}).get("lint_scope", "changed_lines")
+    if mode not in ("changed_lines", "changed_files"):
         return []
     touched: set[str] | None = None
+    base = diff_base(target) if mode == "changed_lines" else None
+    written: dict[str, set[int] | None] = {}
     warnings: list[str] = []
+
+    def predates(path: str, line: int | None) -> bool:
+        if line is None or path not in touched:  # type: ignore[operator]
+            return False
+        if path not in written:
+            written[path] = changed_lines(target, path, base)
+        lines = written[path]
+        file = target / path
+        length = len(file.read_text(encoding="utf-8", errors="replace").splitlines()) if file.is_file() else 0
+        return lines is not None and 0 < line <= length and line not in lines
+
     for step in steps:
         if step["outcome"] != "failed" or failure_category(step["command"]) not in WAIVABLE_CATEGORIES:
             continue
-        findings: list[tuple[str, str]] = step.get("_findings") or []
+        findings: list[tuple[str, str, int | None]] = step.get("_findings") or []
         expected = step.get("_expected_findings")
         if not findings or (expected is not None and expected > len(findings)):
             continue
         touched = touched_files(target) if touched is None else touched
-        inside = [key for path, key in findings if path in touched]
+        line_scope = mode == "changed_lines" and failure_category(step["command"]) == "android_lint"
+        old = [key for path, key, line in findings if path in touched and line_scope and predates(path, line)]
+        inside = [
+            key for path, key, line in findings
+            if path in touched and not (line_scope and predates(path, line))
+        ]
         if inside:
             step["in_scope_findings"] = len(inside)
             continue
-        files = sorted({path for path, _ in findings})
+        files = sorted({path for path, _, _ in findings})
         step["outcome"] = "waived"
         step["waiver"] = {
-            "reason": "findings_outside_change_set",
+            "reason": "findings_on_unchanged_lines" if old else "findings_outside_change_set",
             "count": len(findings),
             "file_count": len(files),
             "files": files[:20],
+            **({"unchanged_lines": old[:20]} if old else {}),
         }
-        warnings.append(
-            f"`{step['command']}` waived: {len(findings)} finding(s) in {len(files)} file(s) this change does not touch"
+        where = (
+            f"{len(old)} of them on lines this change did not write" if old
+            else f"in {len(files)} file(s) this change does not touch"
         )
+        warnings.append(f"`{step['command']}` waived: {len(findings)} finding(s) {where}")
     return warnings
 
 
@@ -1888,7 +1973,7 @@ def gate_attempt(
         )
     spec_path = run_dir(target) / "ticket-spec.json"
     route = read_json(spec_path).get("route") or [] if spec_path.exists() else []
-    if route and "T3" not in route and len(changes) > EXPRESS_MAX_FILES:
+    if route and "T3" not in route and len(changes) > EXPRESS_MAX_FILES and not planner_ran(target):
         warnings.append(
             f"no Planner ran (express route) but {len(changes)} files changed; express allows {EXPRESS_MAX_FILES}"
         )
@@ -1921,6 +2006,16 @@ def gate_attempt(
         if not gate_steps_pass(unit_steps):
             break
     return steps, warnings
+
+
+def planner_ran(target: Path) -> bool:
+    """The host may run the Planner on an express route (a re-plan); its plan counts like any other."""
+    agent_dir = run_dir(target)
+    plan = agent_dir / "plan.md"
+    if plan.exists() and "Not required for this route." not in plan.read_text(encoding="utf-8"):
+        return True
+    metrics = read_json(agent_dir / "stage-metrics.json") if (agent_dir / "stage-metrics.json").exists() else {}
+    return bool(((metrics.get("stages") or {}).get("T3") or {}).get("tokens"))
 
 
 def run_gate_rounds(
@@ -2028,14 +2123,28 @@ def append_stage_log(
     with path.open("a+", encoding="utf-8") as handle:
         fcntl.flock(handle, fcntl.LOCK_EX)
         handle.seek(0)
+        shown_role = role or stage_label(stage)
         # A repeated command (a retried `start`, a double `update-spec`) must not log the same event twice.
-        for line in handle.read().splitlines()[-6:]:
+        # Nor does one round: the agent logs its `completed`, then the orchestrator logs it again with
+        # the tokens; metrics merge the two, and the chat log keeps the first line only.
+        for line in reversed(handle.read().splitlines()[-12:]):
             logged, _, rest = line[2:].partition(" ")
             try:
                 age = (now - datetime.strptime(logged, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)).total_seconds()
             except ValueError:
                 continue
             if rest.strip() == row and age <= STAGE_LOG_DEDUPE_SECONDS:
+                return
+            cells = [cell.strip() for cell in rest.strip().strip("|").split("|")]
+            if len(cells) < 3 or cells[0] != shown_role:
+                continue
+            if cells[1] in OPENING_STATUSES or cells[1] != status:
+                break  # a new round of this role began, or it ended differently: this line is news
+            said = len(cells) > 3 and cells[3] != ""
+            if (
+                status == "completed" and actor != "cli" and cells[2] != "cli" and age <= DUPLICATE_WINDOW_SECONDS
+                and (said or not safe_note)
+            ):
                 return
         handle.write(f"| {stamp} {row}\n")
 
@@ -2049,8 +2158,7 @@ def changed_paths(target: Path) -> tuple[list[str], list[str]]:
         recorded = None
     if recorded and recorded.exists():
         names.extend(str(item) for item in read_json(recorded).get("files", []))
-    repo_map_path = cache_dir(target) / "repo-map.json"
-    base = read_json(repo_map_path).get("base_commit") if repo_map_path.exists() else None
+    base = diff_base(target)
     diff_cmd = ["git", "-C", str(target), "diff", "--name-only"]
     if base:
         diff_cmd.append(base)
@@ -2906,6 +3014,33 @@ def execute_pipeline(target: Path, state: dict[str, Any], spec: dict[str, Any]) 
     return state
 
 
+VERDICT_STAGES = {"review.json": "T6", "device-report.md": "T7"}
+
+
+def still_valid_verdicts(target: Path, agent_dir: Path) -> dict[str, dict[str, Any]]:
+    """Review and device verdicts of the previous start that still describe the current source.
+
+    A `start` after a toolkit change used to wipe an approved review of an unchanged diff, and the
+    Reviewer ran again only to say the same thing. Only a passing verdict is kept.
+    """
+    path = agent_dir / "run-state.json"
+    stages = (read_json(path).get("stages") or {}) if path.exists() else {}
+    current = source_fingerprint(target)
+    kept: dict[str, dict[str, Any]] = {}
+    for artifact, stage in VERDICT_STAGES.items():
+        entry = stages.get(stage) or {}
+        if (
+            entry.get("status") == "completed" and entry.get("fingerprint") == current
+            and recorded_verdict(agent_dir, stage) in {"approved", "pass"}
+        ):
+            kept[artifact] = {key: entry[key] for key in ("status", "verdict", "fingerprint", "reviewed_tree", "note") if key in entry}
+    return kept
+
+
+def kept_stage_states(kept: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {VERDICT_STAGES[artifact]: entry for artifact, entry in kept.items()}
+
+
 def run(target: Path, ticket: dict[str, Any]) -> dict[str, Any]:
     started = time.monotonic()
     ensure_gitignore(target)
@@ -2920,9 +3055,12 @@ def run(target: Path, ticket: dict[str, Any]) -> dict[str, Any]:
     spec = keep_planner_decisions(agent_dir, spec, ticket)
     write_json(agent_dir / "ticket-spec.json", spec)
     write_json(agent_dir / TOOLKIT_FINGERPRINT_FILE, {"files": toolkit_fingerprint()})
-    # Starting a ticket again is a new run: verdicts of the previous one must not carry over.
+    kept = still_valid_verdicts(target, agent_dir)
+    # Starting a ticket again is a new run: verdicts of the previous one must not carry over,
+    # except a review or device verdict recorded for exactly the source that is there now.
     for verdict in RUN_VERDICTS:
-        (agent_dir / verdict).unlink(missing_ok=True)
+        if verdict not in kept:
+            (agent_dir / verdict).unlink(missing_ok=True)
     initialize_later_artifacts(agent_dir)
     # A new start is a new run: metrics from an earlier start of this ticket would be double-counted,
     # so they move to `earlier_runs` (kept, never added to this run's totals).
@@ -2941,7 +3079,7 @@ def run(target: Path, ticket: dict[str, Any]) -> dict[str, Any]:
         "run_id": str(uuid.uuid4()),
         "status": "running",
         "current_stage": "T1",
-        "stages": {"T0": {"status": "completed"}, "T1": {"status": "running"}},
+        "stages": {"T0": {"status": "completed"}, "T1": {"status": "running"}, **kept_stage_states(kept)},
         "pending_question": None,
         "answers": {},
         "created_at": int(time.time()),
@@ -3280,7 +3418,7 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
             if report.get("reason"):
                 notes.append(report["reason"])
             if report.get("waivers"):
-                notes.append(f"{len(report['waivers'])} lint step(s) waived: findings only in untouched files")
+                notes.append(f"{len(report['waivers'])} lint step(s) waived: findings this change did not introduce")
             formatted = (report.get("auto_format") or {}).get("formatted")
             if formatted:
                 notes.append(f"auto-formatted {len(formatted)} file(s)")

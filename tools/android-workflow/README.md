@@ -37,7 +37,10 @@ How the workflow runs (stages, agents, levels, stops) is described in one place 
   `outcome` (`passed`, `waived`, `failed`, `not_run`, `unverified`) in `gate-report.json`, and the
   full output goes to `RUN/gate-run<N>-attempt<M>-<unit>.log`.
 - **Lint scope.** Findings only in files the change does not touch are `waived` and disclosed in
-  the PR; anything in a touched file fails. `quality_gates.lint_scope: "all"` disables the waiver.
+  the PR, and so are Android lint findings on lines of a touched file that the change did not write
+  (`lint_scope: "changed_lines"`, the default; the base is the merge-base with the default branch
+  once it was merged in). `"changed_files"` fails every finding in a touched file; `"all"` disables
+  the waiver.
   `unverified` lint fails.
 - **Consumers.** Modules that reference a changed public declaration get compile and unit tests
   (up to `quality_gates.max_consumer_modules`, default 12).

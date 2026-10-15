@@ -56,7 +56,8 @@ every run, so prove each fact from a file; unknown stays empty.
   "application_id": "com.example.debug", "launch_activity": ".MainActivity"}}`.
   No formatter in the repo: `{"commands": {"format_check": "", "format_apply": ""}}` with a
   profile row saying so. Optional `quality_gates` keys, only when the project needs them:
-  `"lint_scope": "all"` (fail on findings in untouched files too), `"auto_format": false`.
+  `"lint_scope": "all"` (fail on findings in untouched files too) or `"changed_files"` (fail on
+  old findings in a touched file too), `"auto_format": false`.
 - Then `CLI setup --target TARGET --accept`. It refuses while a reason is unresolved; fix the
   row or ask.
 

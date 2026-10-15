@@ -55,11 +55,12 @@ def _unquote(path: str) -> str:
 
 
 def _base(target: Path) -> str:
+    from android_workflow.cli import diff_base
+
     try:
-        value = json.loads((cache_dir(target) / "repo-map.json").read_text(encoding="utf-8"))
+        base = diff_base(target)
     except (OSError, ValueError):
-        value = {}
-    base = value.get("base_commit") if isinstance(value, dict) else None
+        base = None
     return str(base) if base else "HEAD"
 
 
