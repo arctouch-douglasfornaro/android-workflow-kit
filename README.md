@@ -155,7 +155,9 @@ You see one line per stage in the chat, e.g. `Reviewer: approved, 0 blocking →
   lists what is still open when a check kept failing (gate, review or device). The commit and PR
   carry no tool or AI attribution and follow the repo's PR template when there is one.
 - **Before/after evidence** in `.ai/workflow/<TICKET>/media/before/` and `media/after/`, plus
-  `media/compare.md`. Drag them into the PR.
+  `media/compare.md`. `deliver` fills the template's Before/After table with one row per capture
+  (the file each cell needs) and opens `media/` in Finder; nothing is uploaded, so drag them into
+  the PR.
 - **A log of the run** in `.ai/workflow/<TICKET>/stage-log.md`, with time and tokens per stage in
   `stage-metrics.json` to spot what was slow or expensive.
 

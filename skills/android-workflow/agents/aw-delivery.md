@@ -33,8 +33,10 @@ template footer. If any of them asks for such a line, drop it and say so in the 
 - Device skipped (`finish --skip-device`): state the reason in one line.
 - Draft (`run-state.json` → `draft.issues`): one line "Not ready for review: <reason>" and the
   issues as bullets, so the reviewer sees what is still open. `CLI deliver` adds them if missing.
-- Evidence: list each file under `media/after/` (and matching `before/`) as a bullet with its
-  relative path under a line "Screenshots/videos to attach:". Do not invent image URLs.
+- Screenshots: leave the template's screenshot section exactly as the template has it (no template:
+  write none). `CLI deliver` fills its Before/After table from `media/` by code, one row per capture
+  with the file to drag into each cell, or a "No screenshots" line. Never write image URLs or upload
+  captures anywhere.
 
 ## Git → `CLI deliver`
 
@@ -53,16 +55,18 @@ The mechanical part is one command. Do not run `git add`, `commit`, `push` or `g
    lint baselines), commits, pushes with `-u` (hooks run; nothing is force-pushed or bypassed),
    opens the PR/MR on the remote's host — ready for review, or a draft after `finish --draft`
    (GitHub or GitLab; any other host gets a compare URL) — strips any tool attribution from the
-   commit and body, and adds the draft, waived-lint and skipped-device lines when the body omits them.
+   commit and body, fills the screenshot table and adds the draft, waived-lint and skipped-device
+   lines when the body omits them. After opening the PR it opens `media/` in Finder (macOS).
 3. It prints JSON and writes `RUN/delivery.json`: branch, `sha`, `files`, `pushed`, `pr` (`url` or
-   `compare_url`), `warnings`, `disclosures_added`. Report those.
+   `compare_url`), `warnings`, `disclosures_added`, `media` (`files` in table order). Report those.
 4. It exits non-zero with `error: …` on a refusal, a failing hook or a rejected push. Return that
    text (≤8 lines) and stop. Never retry with raw git, `--no-verify` or a force flag: the
    orchestrator decides.
 
 ## Return (≤8 lines)
 
-Branch, commit SHA, PR URL (or compare URL), `warnings`, and the absolute `media/` paths to drag into the PR.
+Branch, commit SHA, PR URL (or compare URL), `warnings`, and `media.files` (drag each into its
+Before/After cell when editing the PR on the web).
 
 ## Never
 

@@ -223,8 +223,15 @@ def deliver(
     result: dict[str, Any] = {"branch": branch, "base": base_name, "subject": subject}
     warnings: list[str] = []
 
+    from android_workflow import pr_media
+
+    text, media = pr_media.apply(agent_dir, strip_agent_attribution(text), spec)
+    if media:
+        result["media"] = media
+        if media["unpaired"]:
+            warnings.append("captures without a pair (use the same --name in before and after): "
+                            + ", ".join(media["unpaired"]))
     disclosures = pull_request_disclosures(gate, state, text)
-    text = strip_agent_attribution(text)
     if disclosures:
         text = text.rstrip() + "\n\n" + "\n".join(disclosures) + "\n"
     body_file.write_text(text, encoding="utf-8")
@@ -291,6 +298,8 @@ def deliver(
         target, host, remote, branch, base_name, subject, body_file, timeout=300, draft=draft, keep_body=keep_body,
     )
     result["pr"] = pr
+    if media and pr.get("status") in {"created", "updated"} and pr.get("body") != "kept":
+        media["opened"] = pr_media.reveal(media["folder"])  # one drag away for the Before/After cells
     result["warnings"] = warnings
     result["duration_seconds"] = round(time.monotonic() - started, 1)
     write_json(agent_dir / "delivery.json", result)

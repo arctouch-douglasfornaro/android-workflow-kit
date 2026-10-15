@@ -53,7 +53,9 @@ listed under `device` in `RUN/skills.json` (e.g. `android-screenshots`, `android
      --kind video` blocks while recording, so use it only for a static or self-running screen.
    - Maestro screenshots/videos: `CLI evidence ingest --target TARGET --phase <mode> --name <surface> --file <png|mp4>`
    At most one still per changed surface and one short clip per behavior.
-6. `after` only: `CLI evidence compare --target TARGET`.
+6. `after` only: `CLI evidence compare --target TARGET`. Its `unpaired` names have no capture in the
+   other phase: when they show the same screen, ingest the `after` file again under the `before`
+   name (`--name <before name>`) and delete the old `after` file, so the PR table pairs them.
 7. Real failure: rerun once. Second failure = FAIL (first failure only = flaky, note it).
 
 ## Writes (`after` mode)

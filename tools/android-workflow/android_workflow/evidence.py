@@ -226,11 +226,15 @@ def compare(target: Path) -> dict[str, Any]:
         lines.append(f"| `{name}` | {rows[-1]['before'] or '—'} | {rows[-1]['after'] or '—'} |")
     if not names:
         lines.append("| *(none)* | — | — |")
+    unpaired = [row["name"] for row in rows if bool(row["before"]) != bool(row["after"])]
+    if unpaired:
+        lines.extend(["", "Without a pair (the PR table needs the same name in before and after): "
+                      + ", ".join(f"`{name}`" for name in unpaired)])
     lines.extend(["", "Open the files on disk. Do not paste PNG/MP4 bytes into chat.", ""])
     path = media / COMPARE_NAME
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return {"path": str(path), "pairs": rows}
+    return {"path": str(path), "pairs": rows, "unpaired": unpaired}
 
 
 def evidence_summary(agent_dir: Path) -> str | None:
