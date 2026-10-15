@@ -8,12 +8,46 @@ quality gate and device checks, and refuses to finish without a real source diff
 
 **Goal:** a precise PR, fast and cheap to produce.
 
-```text
-Input (Jira / description) → Orchestrator (setup, branch, level)
-  → Planner → Implementer (code + unit tests) → Quality gate → Code reviewer → Device check → Delivery (commit, push, PR)
-  → PR Watcher (review comments, CI, base branch) ──→ merge once approved and green
-      fix rounds: gate / reviewer / device / PR comments ──→ Implementer
-      independent parts: Tech Lead → up to 3 Implementers at once → Tech Lead integrates → Quality gate
+```mermaid
+flowchart TD
+    IN(["📥 Input<br/>Jira / description"]) --> ORC["🎛️ Orchestrator<br/>setup · branch · level"]
+    ORC --> PL["🗺️ Planner"]
+    PL --> IMP["🛠️ Implementer<br/>code + unit tests"]
+    PL -. "independent parts" .-> TL
+
+    subgraph TEAM ["👥 Team mode"]
+        direction TB
+        TL["Tech Lead<br/>splits into slices"] --> PAR["🛠️🛠️🛠️ up to 3 Implementers<br/>at once"]
+        PAR --> TLI["Tech Lead<br/>integrates"]
+    end
+
+    subgraph CHECKS ["Checks · in parallel"]
+        direction LR
+        QG["✅ Quality gate"]
+        CR["🔍 Code reviewer"]
+    end
+
+    IMP --> QG & CR
+    TLI --> QG & CR
+    QG & CR --> DEV["📱 Device check"]
+    DEV --> DEL["🚀 Delivery<br/>commit · push · PR"]
+    DEL --> PRW["👀 PR Watcher<br/>review comments · CI · base branch"]
+    PRW --> MERGE(["🎉 Merge<br/>once approved and green"])
+
+    CR -. "fix round" .-> IMP
+    DEV -. "fix round" .-> IMP
+    PRW -. "PR comments / CI" .-> IMP
+
+    classDef io fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20
+    classDef agent fill:#e3f2fd,stroke:#1565c0,color:#0d47a1
+    classDef check fill:#fff8e1,stroke:#f9a825,color:#6d4c00
+    classDef team fill:#f3e5f5,stroke:#7b1fa2,color:#4a148c
+    class IN,MERGE io
+    class ORC,PL,IMP,DEL,PRW agent
+    class QG,CR,DEV check
+    class TL,PAR,TLI team
+    style TEAM fill:transparent,stroke:#7b1fa2,stroke-dasharray:4 3
+    style CHECKS fill:transparent,stroke:#f9a825,stroke-dasharray:4 3
 ```
 
 The workflow is described in one place: [`skills/android-workflow/SKILL.md`](skills/android-workflow/SKILL.md).
