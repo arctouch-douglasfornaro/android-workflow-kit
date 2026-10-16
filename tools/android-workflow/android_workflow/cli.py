@@ -2196,10 +2196,30 @@ def source_changes(target: Path) -> list[str]:
     return sorted(changed)
 
 
+def fingerprint_paths(target: Path) -> list[str]:
+    """The code changes plus every other file git tracks as changed or the Implementer recorded (a
+    README, a doc). A fix round that edits only docs is still a change the Reviewer must see; a stray
+    untracked file is not part of the change."""
+    _, tracked = changed_paths(target)
+    try:
+        recorded_file = run_dir(target) / "t4-files.json"
+    except FileNotFoundError:
+        recorded_file = None
+    recorded = [str(item) for item in read_json(recorded_file).get("files", [])] if recorded_file and recorded_file.exists() else []
+    kept = set(source_changes(target))
+    for name in set(tracked) | set(recorded):
+        if ".ai" in Path(name).parts:
+            continue
+        if BASELINE_NAME_PATTERN.search(name) and name not in tracked:
+            continue
+        kept.add(name)
+    return sorted(kept)
+
+
 def source_fingerprint(target: Path) -> str:
-    """Identity of the current source change; a gate, review or device verdict is only valid for it."""
+    """Identity of the current change; a gate, review or device verdict is only valid for it."""
     digest = hashlib.sha256()
-    for name in source_changes(target):
+    for name in fingerprint_paths(target):
         path = target / name
         digest.update(name.encode("utf-8") + b"\0")
         digest.update(path.read_bytes() if path.is_file() else b"<deleted>")

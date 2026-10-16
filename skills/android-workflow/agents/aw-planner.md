@@ -37,6 +37,10 @@ The only planning role for `/android-workflow`. One pass, short output.
    before/after still or clip helps the PR reviewer).
 5. Write the **navigation recipe** for the device agent: launch activity or deep link and the
    taps to reach the changed surface, grounded in code (NavHost routes, intents, test tags).
+   An AC about an error, a retry or an empty/offline state gets its own numbered recipe steps with
+   the way to force it on the device (airplane mode, `adb shell svc wifi disable`, a debug toggle)
+   and its proof is `both`, never "device optional". Only when nothing on a device can force it,
+   write `unit` and say why in one line.
 6. Test plan: which unit/Compose/Robolectric tests prove each AC and fail without the change.
 7. Skills: `RUN/skills.json` already lists the Android skills the CLI picked from the ticket and the
    likely files. If one clearly does not apply, or a listed project skill is missing for this change,

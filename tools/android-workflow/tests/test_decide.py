@@ -11,6 +11,7 @@ os.environ["ANDROID_WORKFLOW_NO_DEVICE_CHECK"] = "1"
 import contextlib
 import io
 import json
+import subprocess
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -225,6 +226,23 @@ class RunTests(unittest.TestCase):
         cli("log", "--target", self.target, "--stage", "Implementer", "--status", "completed", "--tokens", "1")
         answer = self.next()
         self.assertIn("without changing the code", answer.get("draft", ""))
+
+    def test_a_fix_round_that_edits_only_a_doc_goes_back_to_review(self) -> None:
+        readme = self.root / "app/README.md"
+        readme.write_text("# App\n\nPaging rule.\n", encoding="utf-8")
+        for args in (("init", "-q"), ("add", "-A"), ("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init")):
+            subprocess.run(["git", "-C", self.target, *args], check=True, capture_output=True)
+        self.checked()
+        readme.write_text("# App\n", encoding="utf-8")
+        self.next()
+        self.gate("passed")
+        self.review("changes_requested", [{"id": "R1", "file": "app/README.md"}])
+        self.assertEqual(self.next()["mode"], "fix")
+        readme.write_text("# App\n\nPaging rule.\n", encoding="utf-8")
+        cli("log", "--target", self.target, "--stage", "Implementer", "--status", "completed", "--tokens", "1")
+        answer = self.next()
+        self.assertNotIn("draft", answer)
+        self.assertEqual((answer["next"], answer["mode"]), ("checks", "delta"))
 
     def test_a_green_gate_resets_the_red_count(self) -> None:
         self.checked()

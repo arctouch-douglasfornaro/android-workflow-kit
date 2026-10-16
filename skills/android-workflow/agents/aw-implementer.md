@@ -32,7 +32,8 @@ conflict) when resumed.
   too. `waivers` in the gate report are findings in files this change does not touch: leave them.
   A failed step in a module listed under `consumer_modules` is a caller your change broke: fix the
   caller or keep the old API. A failed `feature docs` step names a doc that covers what you changed: update it the way
-  the profile's Feature overview docs section says.
+  the profile's Feature overview docs section says. Edit a doc line by line, never rewrite or
+  regenerate it: a rule you drop that the code still ships is a regression the review blocks.
 
 ## Work
 

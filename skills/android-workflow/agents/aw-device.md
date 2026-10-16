@@ -53,6 +53,9 @@ listed under `device` in `RUN/skills.json` (e.g. `android-screenshots`, `android
      --kind video` blocks while recording, so use it only for a static or self-running screen.
    - Maestro screenshots/videos: `CLI evidence ingest --target TARGET --phase <mode> --name <surface> --file <png|mp4>`
    At most one still per changed surface and one short clip per behavior.
+   In `after`, every recipe path is a behavior: the happy path and each error/retry path the recipe
+   can force each get a clip (`<surface>-happy`, `<surface>-error-retry`). A path you could not
+   force goes under Not verified with the reason; never drop it silently.
 6. `after` only: `CLI evidence compare --target TARGET`. Its `unpaired` names have no capture in the
    other phase: when they show the same screen, ingest the `after` file again under the `before`
    name (`--name <before name>`) and delete the old `after` file, so the PR table pairs them.
