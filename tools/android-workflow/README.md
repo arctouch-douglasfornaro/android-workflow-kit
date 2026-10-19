@@ -21,6 +21,7 @@ How the workflow runs (stages, agents, levels, stops) is described in one place 
 | `team --target APP [--check]` | Checks the Tech Lead's `team-plan.json` (one owner per file, at most 3 slices); `--check` writes `team-report.json`: which slice touched what, and what nobody owned |
 | `emulator --target APP [--wait\|--stop\|--status] [--avd NAME] [--headless]` | No device connected: starts an existing AVD in the background (`device.avd`, else the first). `--wait` until booted; `--stop` closes it only if the workflow started it. Never creates an AVD |
 | `gate --target APP` | Formatter, compile, unit tests, detekt, lint, consumer modules, secret scan |
+| `device replay --target APP [--serial S] [--phase before\|after]` | Runs the Device agent's saved Maestro flows (`RUN/media/flows/`) by code, a failing flow once more. `after` (default) installs the current build and files each flow's captures under `media/after/`; `before` runs on the installed base build and files them under `media/before/`. A flow names its own captures (`takeScreenshot: <name>`), that name is the evidence name; `_*.yaml` are helpers, a `<flow>.sh` runs instead of its yaml (`AW_SERIAL`, `AW_MAESTRO`, `AW_OUT`, `AW_FLOW`, `AW_PHASE`). Writes `replay.json` / `replay-before.json` with the time per flow, `install_seconds` and `over_budget` (`device.after_budget_seconds`, default 300; `device.flow_timeout_seconds`, default 180) |
 | `evidence capture\|ingest\|compare\|list --target APP` | Screenshots/videos in `media/{before,after}/` and `media/compare.md` |
 | `finish --target APP [--skip-device "reason"] [--keep-device "reason"] [--draft "reason"]` | Final check: gate, review and device belong to the code that ships. `--draft` turns what is still unresolved into a draft PR's known issues; `--keep-device` keeps an earlier device PASS for a PR feedback round with nothing visible on the device |
 | `deliver --target APP [--subject "ID: title"] [--no-commit\|--no-push\|--no-pr] [--keep-body]` | Commits app source only, pushes, opens the PR (as a draft after `finish --draft`). `--keep-body`: a PR feedback round leaves the open PR's description as it is |
@@ -57,6 +58,8 @@ Optional overrides read by the newer commands (all may be left out):
 | `device.avd` | the first AVD `emulator -list-avds` prints | `emulator`: which AVD to open when nothing is connected |
 | `device.emulator_headless` | `false` (a window you can watch) | `emulator`: `true` starts it with `-no-window` |
 | `device.boot_timeout_seconds` | `300` | `emulator --wait` |
+| `device.flow_timeout_seconds` | `180` | `device replay`: one flow's time limit |
+| `device.after_budget_seconds` | `300` | `device replay`: `over_budget` in `replay.json`, and the Device `after` agent's budget |
 | `team.max_parallel` | `3` (1–3) | `team`: how many Implementers may work at once |
 | `skills.max` | `4` (1–8) | `skills`: how many skills the Implementer reads |
 | `watch.auto_merge` | `true` | `pr`: merge when ready; `false` stops at "ready to merge" |

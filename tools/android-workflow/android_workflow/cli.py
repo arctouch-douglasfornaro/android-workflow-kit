@@ -108,7 +108,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "detekt": None,
         "install": "./gradlew installDebug",
     },
-    "device": {"app_module": None, "application_id": None, "launch_activity": None},
+    "device": {"app_module": None, "application_id": None, "launch_activity": None,
+               "flow_timeout_seconds": 180, "after_budget_seconds": 300},
     # Pure Kotlin/Java modules have no variants: `:data:compileKotlin`, not `compileDebugKotlin`.
     "jvm_modules": None,  # None = detect; a list recorded by Setup wins
     "jvm_module_commands": {
@@ -3331,10 +3332,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--stale", nargs="?", type=float, const=24.0, metavar="HOURS",
         help="remove unfinished runs (awaiting_host/paused/running) idle for HOURS (default 24)",
     )
-    device_parser = subparsers.add_parser("device", help="replay the saved Maestro flows on the current build")
+    device_parser = subparsers.add_parser("device", help="run the saved Maestro flows by code")
     device_parser.add_argument("action", choices=("replay",))
     device_parser.add_argument("--target", required=True, type=Path)
     device_parser.add_argument("--serial")
+    device_parser.add_argument("--phase", choices=("before", "after"), default="after",
+                               help="after (default): install the current build, run the flows, file media/after; "
+                                    "before: run them on the installed base build, file media/before")
     next_parser = subparsers.add_parser("next", help="the one thing to do now, decided from the run's files")
     next_parser.add_argument("--target", required=True, type=Path)
     next_parser.add_argument("--no-device", action="store_true")
@@ -3548,7 +3552,7 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
     if args.command == "device":
         from android_workflow.replay import replay
 
-        result = replay(target, serial=args.serial)
+        result = replay(target, serial=args.serial, phase=args.phase)
         return result, 0 if result["status"] in {"replayed", "partial"} else 1
     if args.command == "next":
         from android_workflow.decide import next_action

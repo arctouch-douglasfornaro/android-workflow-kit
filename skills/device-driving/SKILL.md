@@ -155,6 +155,7 @@ The device session is the most expensive part of a workflow run in both time and
   Cheapest first, for the same question: `assertVisible` in the flow → filtered text dump → `dumpsys` (cross-activity only) → screenshot (evidence only).
 - **Scope `logcat` reads.** Always `adb logcat -c` before the action, then read with a targeted filter (`grep -iE "exception|fatal|<feature-keyword>"`) and a `tail -N` cap — never read an unscoped, unfiltered log back into context.
 - **Batch related adb calls into one Bash invocation** (e.g. a tap, a short sleep, then the next tap, chained with `&&`/`;` in one command) rather than one tool call per micro-step — fewer round trips means less repeated context overhead across a long device session.
+- **Script it once, replay it after.** A flow written in `before` and replayed by `CLI device replay` costs no tokens and about the flow's own run time; hand-driving the same path in `after` costs a model round trip per tap. Fixed sleeps are the other waste: wait on a visible string, never a timer.
 - **One continuous recording beats many discrete screenshots** when a flow needs to be shown or verified across several steps — record it inside the Maestro flow (`startRecording` / `stopRecording`).
 
 ---
@@ -175,7 +176,7 @@ curl -Ls "https://get.maestro.mobile.dev" | bash                # installs to ~/
 **Fallback rule (the only time you drive with adb instead).** Installing Maestro is mandatory whenever a device is connected — a device being present but Maestro simply "not tried" is not acceptable. The single permitted reason to drive the UI with the [`adb-fallback.md`](./adb-fallback.md) primitives instead is that Maestro **genuinely cannot run here**: the install truly fails (no network, sandboxed CI, permissions) or a required capability has no Maestro equivalent. In that case record `Tool used: adb (Maestro unavailable — <reason>)` with the specific failure, and drive the rest with adb. This is an escape hatch for a real blocker, not a shortcut. Do the check/install **once per run** — `aw-device` owns recipe, AC and evidence in one session, so it probes once and reuses the result (installed path, or the recorded unavailability reason) for the whole pass. (`logcat` on adb per §6 is **not** covered by this rule — it always stays adb regardless of Maestro.)
 
 - CLI: `~/.maestro/bin/maestro` (or wherever the setup check above resolves it — no version pinned, whatever the installer lands is fine). No Maestro MCP — agents shell out via `Bash`.
-- Flows: reusable ones live in **`.maestro/`** (committed; see `.maestro/README.md` + `.maestro/_template.yaml`); one-off flows can live in the run folder `.ai/workflow/<ticket-id>/`.
+- Flows: reusable ones live in **`.maestro/`** (committed; see `.maestro/README.md` + `.maestro/_template.yaml`). In an android-workflow run they live in the run's **`media/flows/`**, written once by the Device `before` agent and replayed by code with `CLI device replay`; the rules that make them replayable are the *Flow contract* in `skills/android-workflow/agents/aw-device.md` (capture name = evidence name, no fixed pauses, `_nav.yaml` helpers, a `<flow>.sh` for what Maestro cannot do).
 
 **Run:**
 ```bash

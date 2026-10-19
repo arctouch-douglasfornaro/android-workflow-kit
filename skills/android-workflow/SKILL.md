@@ -124,7 +124,7 @@ CLI pr reply --target T --item ID (--body "…" | --skip "why")     CLI pr rereq
 CLI pr ci --target T --check NAME --as ours|unrelated|rerun --reason "…"
 CLI finish … [--keep-device "why nothing visible changed"]     CLI deliver … [--keep-body]
 CLI evidence capture|ingest|compare|list --target T [--phase before|after] [--name N] [--file F]
-CLI device replay --target T [--serial S]            (re-runs the saved Maestro flows on the current build)
+CLI device replay --target T [--serial S] [--phase before|after]   (runs the saved Maestro flows by code: `after` installs the current build, `before` uses the installed base build)
 CLI status|list --target T                          CLI clean --target T [--ticket ID | --stale [HOURS]]
 ```
 
@@ -165,7 +165,8 @@ CLI status|list --target T                          CLI clean --target T [--tick
      `also` lists commands to start in the same turn, in the background (the emulator, the base
      build, a second `next` that says whether to capture the device `before`). `slices` → one
      `aw-implementer` per slice in the same turn, each logged with `--stage Implementer --slice S<n>`.
-     `first` → run it before spawning. `replay` → pass it to `aw-device`.
+     `first` → run it before spawning. `replay` → pass it to `aw-device`. `budget_seconds` → pass it to
+     `aw-device` (`before` writes the flows while the Implementer works, `after` replays them and judges).
    - `checks`: run what `run` lists in the same turn: `CLI gate --target TARGET` (long command
      timeout, e.g. 30 min) and/or `agent` (`aw-reviewer`, `mode` `full` or `delta` with the `fixed`
      IDs) in the background. The review only reads code, so it never waits for the gate.

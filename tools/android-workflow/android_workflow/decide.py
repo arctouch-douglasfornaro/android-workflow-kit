@@ -32,6 +32,8 @@ TEAM_MIN_FILES = 4
 GATE_MAX_FIXES = 2      # the third red gate opens a draft PR
 REVIEW_MAX_FIXES = 1    # still blocking after one fix round: draft
 DEVICE_MAX_FAILS = 2    # the second device FAIL: draft
+BEFORE_BUDGET_SECONDS = 600  # the Device `before` agent stops here: the Implementer is working meanwhile
+AFTER_BUDGET_SECONDS = 300   # the Device `after` agent: replay, judge, a few hand-driven checks
 DECISIONS_FILE = "decisions.jsonl"
 
 
@@ -414,7 +416,8 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
             return _spawn("aw-device", "the change passed the gate and the review: verify it on the device",
                           stage="Device", mode="after", serial=current.get("serial"),
                           first="CLI emulator --target TARGET --wait" if current.get("status") == "booting" else None,
-                          replay=_replay_hint(agent_dir), note="after: verify the AC on the device")
+                          replay=_replay_hint(agent_dir), budget_seconds=AFTER_BUDGET_SECONDS,
+                          note="after: verify the AC on the device")
         reason = str(current.get("reason") or current.get("status") or "no device")
         if current.get("status") == "unauthorized":
             return _answer("ask_user", "a phone waits for its USB-debugging prompt", question="accept USB debugging on the phone")
@@ -478,10 +481,16 @@ def _background(spec: dict[str, Any], no_device: bool, implementer: bool = False
 
 def _device_before(target: Path, agent_dir: Path, spec: dict[str, Any], state: dict[str, Any], no_device: bool,
                    record: bool = True) -> dict[str, Any] | None:
-    """While the Implementer works: capture the device `before`, once, when a real base build exists."""
-    if no_device or "T7" not in (spec.get("route") or []) or not visual(spec) or state.get("device_before"):
+    """While the Implementer works: the Device `before` run, once, when a real base build exists.
+
+    It captures the current screen (a visual change) and, whatever the change, writes the Maestro flows the
+    `after` run replays by code. The Implementer edits meanwhile, and the gate and the review need no device,
+    so this time comes out of the wait before `after`, not out of the run."""
+    if no_device or "T7" not in (spec.get("route") or []) or state.get("device_before"):
         return None
     if any((agent_dir / "media" / "before").glob("*")) if (agent_dir / "media" / "before").is_dir() else False:
+        return None
+    if flows_saved(agent_dir):
         return None
     from android_workflow.prebuild import current_status
 
@@ -504,8 +513,13 @@ def _device_before(target: Path, agent_dir: Path, spec: dict[str, Any], state: d
         return _skip_before(target, f"no device ({current.get('status')})", record)
     if record:
         _mark_before(target, "spawned")
-    return _spawn("aw-device", "a base APK and a device are ready: capture the before state", stage="Device",
-                  mode="before", serial=current.get("serial"), note="before: capture the current screen")
+    capture = visual(spec)
+    return _spawn("aw-device", "a base APK and a device are ready: "
+                  + ("capture the before state and write the flows the after run replays" if capture
+                     else "write the flows the after run replays"),
+                  stage="Device", mode="before", serial=current.get("serial"), capture=capture,
+                  budget_seconds=BEFORE_BUDGET_SECONDS,
+                  note="before: capture the current screen and write the flows" if capture else "before: write the flows")
 
 
 def _skip_before(target: Path, reason: str, record: bool = True) -> None:
@@ -523,9 +537,15 @@ def _mark_before(target: Path, value: str) -> None:
         save_state(target, state)
 
 
+def flows_saved(agent_dir: Path) -> bool:
+    folder = agent_dir / "media" / "flows"
+    return folder.is_dir() and any(path.suffix in {".yaml", ".yml", ".sh"} and not path.name.startswith("_")
+                                   for path in folder.iterdir())
+
+
 def _replay_hint(agent_dir: Path) -> str | None:
-    flows = sorted((agent_dir / "media" / "flows").glob("*.yaml")) if (agent_dir / "media" / "flows").is_dir() else []
-    return "CLI device replay --target TARGET (re-runs the before flows on the new build)" if flows else None
+    return ("CLI device replay --target TARGET --serial SERIAL (installs the new build and re-runs the saved flows)"
+            if flows_saved(agent_dir) else None)
 
 
 def _keep_review_if_formatting_only(target: Path, agent_dir: Path, state: dict[str, Any], record: bool = True) -> bool:

@@ -36,7 +36,12 @@ The only planning role for `/android-workflow`. One pass, short output.
    notification, deep link, WorkManager or DI wiring at runtime) and `visual` (yes if a
    before/after still or clip helps the PR reviewer).
 5. Write the **navigation recipe** for the device agent: launch activity or deep link and the
-   taps to reach the changed surface, grounded in code (NavHost routes, intents, test tags).
+   taps to reach the changed surface, grounded in code (NavHost routes, intents, test tags). The Device
+   `before` agent turns it into Maestro flows that `after` replays by code, so write it as numbered
+   steps it can script with no guessing: each step `action → selector (text, test tag or id) → what is
+   visible next`, the preconditions (logged in, test data, flag), the deep link when the screen has one
+   (it beats tapping through screens), and for each behavior the **evidence name** it ends on
+   (`<surface>`, `<surface>-happy`, `<surface>-error-retry`).
    An AC about an error, a retry or an empty/offline state gets its own numbered recipe steps with
    the way to force it on the device (airplane mode, `adb shell svc wifi disable`, a debug toggle)
    and its proof is `both`, never "device optional". Only when nothing on a device can force it,

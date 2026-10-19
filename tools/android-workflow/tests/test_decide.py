@@ -421,8 +421,15 @@ while [ $# -gt 0 ]; do
 done
 name=$(basename "$flow" .yaml)
 if grep -q FAILME "$flow"; then echo "Assertion is false"; exit 1; fi
+if grep -q FLAKY "$flow" && [ ! -f "$flow.seen" ]; then touch "$flow.seen"; echo "flaky"; exit 1; fi
 mkdir -p "$out/2026/$name/takeScreenshot"
-printf 'after-%s' "$name" > "$out/2026/$name/takeScreenshot/$name.png"
+declared=$(grep -E '^ *- *(takeScreenshot|startRecording):' "$flow" | sed 's/^[^:]*: *//')
+if [ -n "$declared" ]; then
+  for d in $declared; do printf 'shot-%s' "$(basename "$d")" > "$out/2026/$name/takeScreenshot/$(basename "$d").png"; done
+  printf 'junk' > "$out/2026/$name/takeScreenshot/not-declared.png"
+else
+  printf 'after-%s' "$name" > "$out/2026/$name/takeScreenshot/$name.png"
+fi
 """
 
 
@@ -496,3 +503,70 @@ class ReplayTests(unittest.TestCase):
     def test_next_offers_the_replay_when_flows_exist(self) -> None:
         (self.flows / "a.yaml").write_text("- launchApp\n", encoding="utf-8")
         self.assertIn("device replay", decide._replay_hint(run_dir(self.root)))
+
+    def test_helpers_are_not_flows_and_a_script_replaces_the_flow_it_drives(self) -> None:
+        from android_workflow.replay import declared_names, flows
+
+        (self.flows / "_nav.yaml").write_text("- launchApp\n", encoding="utf-8")
+        (self.flows / "happy.yaml").write_text("- takeScreenshot: media/flows/x-happy\n- startRecording: x-clip\n", encoding="utf-8")
+        (self.flows / "error.yaml").write_text("- takeScreenshot: x-error\n", encoding="utf-8")
+        (self.flows / "error.sh").write_text("exit 0\n", encoding="utf-8")
+        self.assertEqual([path.name for path in flows(self.root)], ["error.sh", "happy.yaml"])
+        self.assertEqual(declared_names(self.flows / "happy.yaml"), ["x-clip", "x-happy"])
+        self.assertEqual(declared_names(self.flows / "error.sh"), ["x-error"])
+
+    def test_a_flow_files_what_it_declares_under_that_name_with_no_before_capture(self) -> None:
+        (self.flows / "happy.yaml").write_text("- launchApp\n- takeScreenshot: media/flows/x-happy\n", encoding="utf-8")
+        result, code = self.replay()
+        self.assertEqual((result["status"], code), ("replayed", 0))
+        self.assertEqual(result["flows"][0]["captured"], ["x-happy"])
+        self.assertEqual((run_dir(self.root) / "media/after/x-happy.png").read_bytes(), b"shot-x-happy")
+        self.assertFalse((run_dir(self.root) / "media/after/not-declared.png").exists())
+        self.assertIn("seconds", result["flows"][0])
+        self.assertIn("install_seconds", result)
+        self.assertFalse(result["over_budget"])
+
+    def test_a_flaky_flow_is_rerun_once(self) -> None:
+        (self.flows / "a.yaml").write_text("- FLAKY\n- takeScreenshot: a-shot\n", encoding="utf-8")
+        result, _ = self.replay()
+        self.assertEqual((result["status"], result["flows"][0]["attempts"]), ("replayed", 2))
+
+    def test_the_before_phase_runs_on_the_installed_build_and_files_under_before(self) -> None:
+        (self.flows / "happy.yaml").write_text("- takeScreenshot: x-happy\n", encoding="utf-8")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = main(["device", "replay", "--target", str(self.root), "--serial", "emu-1", "--phase", "before"])
+        text = out.getvalue()
+        result = json.loads(text[text.index("{"):])
+        self.assertEqual((result["status"], result["phase"], code), ("replayed", "before", 0))
+        self.assertTrue((run_dir(self.root) / "media/before/x-happy.png").is_file())
+        self.assertFalse((run_dir(self.root) / "media/after").exists())
+        self.assertFalse(any("installDebug" in call for call in gradle_calls(self.root)))
+        self.assertTrue((run_dir(self.root) / "replay-before.json").is_file())
+
+    def test_a_script_runs_with_the_device_and_the_flow_in_its_environment(self) -> None:
+        (self.flows / "err.yaml").write_text("- takeScreenshot: x-err\n", encoding="utf-8")
+        (self.flows / "err.sh").write_text(
+            '#!/bin/sh\n"$AW_MAESTRO" --device "$AW_SERIAL" test --test-output-dir "$AW_OUT" "$AW_FLOW"\n', encoding="utf-8")
+        os.chmod(self.flows / "err.sh", 0o755)
+        result, _ = self.replay()
+        self.assertEqual((result["status"], result["flows"][0]["flow"], result["flows"][0]["captured"]),
+                         ("replayed", "err.sh", ["x-err"]))
+
+    def before(self, **fields: object) -> dict | None:
+        agent_dir = run_dir(self.root)
+        with mock.patch("android_workflow.prebuild.current_status", return_value={"status": "passed"}), \
+                mock.patch("android_workflow.emulator.status", return_value={"status": "connected", "serial": "emu-1"}):
+            return decide._device_before(self.root, agent_dir, {"route": ["T7"], "surfaces": ["navigation"], **fields}, {},
+                                         False, record=False)
+
+    def test_the_before_run_writes_flows_even_when_nothing_is_visual(self) -> None:
+        answer = self.before(visual=False)
+        self.assertEqual((answer["agent"], answer["mode"], answer["capture"]), ("aw-device", "before", False))
+        self.assertEqual(answer["budget_seconds"], decide.BEFORE_BUDGET_SECONDS)
+        self.assertTrue(self.before(visual=True)["capture"])
+
+    def test_the_before_run_is_skipped_once_flows_are_saved(self) -> None:
+        (self.flows / "a.yaml").write_text("- launchApp\n", encoding="utf-8")
+        self.assertIsNone(self.before(visual=True))
+

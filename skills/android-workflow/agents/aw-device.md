@@ -13,10 +13,42 @@ listed under `device` in `RUN/skills.json` (e.g. `android-screenshots`, `android
 
 ## Modes
 
+Speed rule: the slow part of a device run is an agent looking at the screen before every tap. So the
+way to the changed screen is found **once**, in `before`, while the Implementer works (that time is
+free), and saved as flows. `after` runs those flows by code and only judges.
+
 - `before`: the prebuilt base APK (`RUN/prebuild.json` at `status: passed`; the orchestrator only
   spawns this mode then). The Implementer edits source meanwhile, so never build in this mode.
-  Capture the current state of the surface only. No verdict.
-- `after`: reviewed build. Verify the device AC from `plan.md` and capture evidence.
+  **Flow author.** Reach the surface, save the flows (see Flow contract), prove them with
+  `CLI device replay --target TARGET --serial <serial> --phase before` (runs them on the installed base
+  build and files the captures under `media/before/`). Capture the current state of the surface only
+  (`capture: true`; when `capture` is false the flows only need to reach the screen and assert it). No
+  verdict. Stop at `budget_seconds` (600): flows that work are kept, the rest are listed in your
+  return as "not scripted".
+- `after`: reviewed build. Verify the device AC from `plan.md` and capture evidence. Budget
+  `budget_seconds` (300) from start to `device-report.md`: replay, judge, a few hand-driven checks.
+
+## Flow contract (what makes `after` fast)
+
+Flows live in `RUN/media/flows/`, one per behavior in the plan's recipe (`<surface>-happy`,
+`<surface>-error-retry`):
+
+- **The capture name is the evidence name.** `takeScreenshot: <surface>` / `startRecording: <surface>-happy`
+  use the final name, with no `-raw` suffix and no renaming afterwards. The replay files each flow's
+  captures under that name in `before` and in `after`, so `compare.md` pairs them with no extra work.
+- **No fixed pauses.** Never a `NEVER_PRESENT_PAUSE`/sleep step; wait on something visible
+  (`extendedWaitUntil` / `assertVisible` / `waitForAnimationToEnd`). A recording that needs the screen to
+  rest ends on a wait for the state it shows.
+- **Shared navigation in a helper** named `_nav.yaml`, pulled in with `runFlow: _nav.yaml`. Files starting
+  with `_` are never run alone. Same selectors as the plan's recipe (text / test tag / id, never
+  coordinates). When the recipe has a deep link, start the flow with it through adb in a `.sh`
+  instead of tapping through screens.
+- **What Maestro cannot do goes in `<flow>.sh` next to `<flow>.yaml`** (turn the network off at a marker,
+  grant a permission, set a debug toggle). The `.sh` runs instead of the yaml and gets `AW_SERIAL`,
+  `AW_MAESTRO`, `AW_OUT`, `AW_FLOW` (the yaml) and `AW_PHASE`; it runs Maestro itself with
+  `"$AW_MAESTRO" --device "$AW_SERIAL" test --test-output-dir "$AW_OUT" "$AW_FLOW"`. The replay turns
+  wifi and data back on after any script, but the script restores what it changed too.
+- Recordings ≤15 s; at most one still per surface.
 
 ## Inputs
 
@@ -33,20 +65,26 @@ listed under `device` in `RUN/skills.json` (e.g. `android-screenshots`, `android
    `device.application_id` from `CLI setup` / the profile (flavored variants included). Record
    package, versionName and APK path.
 2. `after` with saved flows (the orchestrator passes `replay`): run `CLI device replay --target TARGET
-   --serial <serial>` first. It installs the current build and re-runs every flow in
-   `RUN/media/flows/` by code, files the captures under `media/after/` with their `before` names and
-   writes `media/compare.md` and `RUN/replay.json`. `replayed` → skip steps 3, 5 and 6 (navigation, capture
+   --serial <serial>` first, before anything else. It installs the current build and re-runs every flow in
+   `RUN/media/flows/` by code (a failing flow is rerun once), files the captures under `media/after/`
+   with the names the flows declare and writes `media/compare.md` and `RUN/replay.json` (time per flow,
+   `install_seconds`, `over_budget`). `replayed` → skip steps 3, 5 and 6 (navigation, capture
    and compare are done) and judge the AC in step 4 from those files (open only the `after` captures
-   you need); drive by hand only an AC no flow reaches or one that needs logcat. `partial` → drive only the failed flows. `failed`, `install_failed`, `no_maestro` → the
-   normal path below. A replay is evidence, never a verdict by itself.
+   you need); drive by hand only an AC no flow reaches or one that needs logcat. `partial` → drive only
+   the failed flows, and fix those flows for the next round. `failed`, `install_failed`, `no_maestro` →
+   the normal path below (then save the flows you drove, so the next round replays). A replay is
+   evidence, never a verdict by itself. Hand-driving is capped: at most 12 device steps for what no flow
+   reaches; past the budget, finish the check in hand and list every AC still open under Not verified
+   with the reason.
 3. Launch and follow the navigation recipe (express level has none: derive it from the
    profile's Device rows and the NavHost/intent code for the changed screen) with a Maestro flow saved in
-   `RUN/media/flows/<name>.yaml`. Assert the target screen was reached (text/testTag) before
-   judging anything. Recipe wrong → fix the flow, not the app.
+   `RUN/media/flows/<name>.yaml` following the Flow contract. Assert the target screen was reached
+   (text/testTag) before judging anything. Recipe wrong → fix the flow, not the app. In `before`, this is
+   the whole job: write, run and fix each flow until it passes on the base build.
 4. `after`: for each device AC write expected vs observed. Capture logcat for the app pid in
    the same session when the AC involves events, errors or lifecycle.
-5. Evidence, same `--name` in both modes (name the flow's `takeScreenshot` the same, so a replay
-   files it under the right name):
+5. Evidence, same `--name` in both modes (the flow's `takeScreenshot`/`startRecording` already carry it, so
+   a replay files it under the right name; only hand-driven captures need these commands):
    - still: `CLI evidence capture --target TARGET --phase <mode> --name <surface>`
    - gesture, animation or multi-step flow: record inside the Maestro flow
      (`startRecording` / `stopRecording`, ≤15 s), then ingest the `.mp4`. `evidence capture
@@ -65,7 +103,8 @@ listed under `device` in `RUN/skills.json` (e.g. `android-screenshots`, `android
 
 `RUN/device-report.md` with headings exactly: Status (first line `PASS` | `FAIL` | `BLOCKED`),
 Device (model, API, serial), Scenarios (AC → expected / observed), Evidence (media paths),
-Not verified. Must be >400 bytes so the CLI keeps it. Then
+Not verified. End the file with one `Timing:` line (not a heading): install / replay / hand-driven seconds, from `replay.json`.
+Must be >400 bytes so the CLI keeps it. Then
 `CLI log --target TARGET --stage Device --status completed --note "<verdict>"`.
 
 ## Return (≤8 lines)
