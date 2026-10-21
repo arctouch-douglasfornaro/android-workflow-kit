@@ -28,7 +28,11 @@ template footer. If any of them asks for such a line, drop it and say so in the 
 
 - Template present: copy its headings, order, checkboxes and HTML comments. Fill only those
   sections. 2–3 lines of prose total. Put review concerns and "Not verified" where the template
-  has room; otherwise one line.
+  has room; otherwise one line. Leave every checkbox as the template has it: `CLI deliver` decides
+  them by code (it ticks the ticket link when the body names the ticket, leaves the rest for the
+  human, and removes an item whose `<!-- Delete if … -->` condition holds, e.g. no strings changed).
+- A PARTIAL device check the developer accepted (`run-state.json` → `device_partial`): one line with
+  what stays unverified on a device (`CLI deliver` adds it if missing).
 - No template: 2–3 sentences, no extra headings.
 - Device skipped (`finish --skip-device`): state the reason in one line.
 - Draft (`run-state.json` → `draft.issues`): one line "Not ready for review: <reason>" and the

@@ -7,6 +7,8 @@ import os
 os.environ["ANDROID_WORKFLOW_NO_WATCH"] = "1"
 os.environ.setdefault("ANDROID_WORKFLOW_OFFICE_HOME", __import__("tempfile").mkdtemp(prefix="aw-office-"))
 os.environ["ANDROID_WORKFLOW_NO_DEVICE_CHECK"] = "1"
+# Machine-wide state (build slots, device leases, base checkouts): a throwaway folder, never the developer's.
+os.environ.setdefault("ANDROID_WORKFLOW_STATE_HOME", __import__("tempfile").mkdtemp(prefix="aw-state-"))
 
 import contextlib
 import io
@@ -135,9 +137,13 @@ class RunTests(unittest.TestCase):
                                                          "concerns": [], "suggestions": []}), encoding="utf-8")
         cli("log", "--target", self.target, "--stage", "Reviewer", "--status", "completed", "--tokens", "1", "--note", status)
 
-    def device_report(self, verdict: str) -> None:
+    def device_report(self, verdict: str, replayed: bool = True) -> None:
         (self.rundir / "device-report.md").write_text(f"# Status\n\n{verdict}\n\n# Device\n\nemulator\n" + "x" * 420,
                                                   encoding="utf-8")
+        if replayed:  # what `CLI device replay` writes: a PASS stands on flows that replayed on this source
+            (self.rundir / "replay.json").write_text(json.dumps({
+                "status": "replayed", "fingerprint": source_fingerprint(self.root),
+                "flows": [{"flow": "screen.yaml", "status": "passed"}]}), encoding="utf-8")
         cli("log", "--target", self.target, "--stage", "Device", "--status", "completed", "--tokens", "1", "--note", verdict)
 
     def test_the_level_is_written_at_start_and_a_flag_wins(self) -> None:
@@ -350,7 +356,7 @@ class RunTests(unittest.TestCase):
         with mock.patch("android_workflow.emulator.status", return_value={"status": "connected", "serial": "emu-1"}):
             self.next()
             self.device_report("PASS")
-            (self.rundir / "media/after").mkdir(parents=True)
+            (self.rundir / "media/after").mkdir(parents=True, exist_ok=True)  # the after spawn made it
             (self.rundir / "media/after/screen.png").write_bytes(b"png")
             self.assertEqual(self.next()["command"], "CLI finish --target TARGET")
         cli("finish", "--target", self.target)
@@ -374,7 +380,7 @@ class RunTests(unittest.TestCase):
         with mock.patch("android_workflow.emulator.status", return_value={"status": "connected", "serial": "emu-1"}):
             self.next()
             self.device_report("PASS")
-            (self.rundir / "media/after").mkdir(parents=True)
+            (self.rundir / "media/after").mkdir(parents=True, exist_ok=True)  # the after spawn made it
             (self.rundir / "media/after/screen.png").write_bytes(b"png")
             cli("finish", "--target", self.target)
             self.implement("val a = 7")

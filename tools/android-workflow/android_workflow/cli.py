@@ -2047,8 +2047,21 @@ def markdown_section_value(content: str, heading: str) -> str:
 
 
 def device_report_status(device: str) -> str:
+    """The report's verdict word: `PASS`, `FAIL`, `BLOCKED` or `PARTIAL` (anything after it is a note)."""
     first = markdown_section_value(device, "Status").splitlines()
-    return first[0].strip().lower() if first else ""
+    if not first:
+        return ""
+    words = re.findall(r"[a-z_]+", first[0].strip().lower())
+    return words[0] if words else ""
+
+
+NOTHING = re.compile(r"(?i)^\s*[-*]?\s*(none|n/?a|nothing|—|-)?\s*\.?\s*$")
+
+
+def device_report_anomalies(device: str) -> list[str]:
+    """What the Device saw and could not explain (`# Anomalies`): it makes a PASS a partial one."""
+    body = markdown_section_value(device, "Anomalies")
+    return [line.strip() for line in body.splitlines() if line.strip() and not NOTHING.match(line)]
 
 
 STUB_PR_MARKER = "See the diff and `implementation-notes.md`"
@@ -2324,9 +2337,18 @@ def run_quality_gate(target: Path) -> dict[str, Any]:
         write_json(agent_dir / "gate-report.json", report)
         return report
     extras: dict[str, Any] = {}
-    steps, warnings, duration = run_gate_rounds(
-        target, config, change_set, needs_device, run_number=run_number, extras=extras,
-    )
+    from android_workflow.locks import build_slot
+
+    def slot_wait(holders: list[dict[str, Any]]) -> None:
+        busy = ", ".join(str(item.get("label")) for item in holders) or "other builds"
+        append_stage_log(agent_dir, "T5", "waiting", "cli", f"every build slot is busy ({busy}); the gate waits")
+
+    with build_slot(f"gate {agent_dir.name} ({target.name})", config, on_wait=slot_wait) as slot:
+        steps, warnings, duration = run_gate_rounds(
+            target, config, change_set, needs_device, run_number=run_number, extras=extras,
+        )
+    if slot["waited_seconds"] >= 1:
+        extras["waited_for_build_slot_seconds"] = slot["waited_seconds"]
     scan = secret_scan(target)
     gate_status = "passed" if gate_steps_pass(steps) and scan["status"] == "passed" else "failed"
     waivers = [
@@ -2385,6 +2407,18 @@ def close_clock(entry: dict[str, Any], now: float) -> float | None:
 
 # Stages run by an agent, whose tokens the host's transcript can tell when the orchestrator passes none.
 TOKEN_STAGES = frozenset({"T0", "T3", "T4", "T4L", "T6", "T7", "T8", "T10"})
+
+
+def measured_round(target: Path, agent_dir: Path, stage: str, slice_id: str | None, since: Any) -> dict[str, Any] | None:
+    """This round's tokens and the total it processed, from the host's transcript (None: not readable)."""
+    if stage not in TOKEN_STAGES or not isinstance(since, (int, float)):
+        return None
+    from android_workflow.usage import measure_round
+
+    try:
+        return measure_round(target, agent_dir, stage, slice_id, float(since))
+    except Exception:  # noqa: BLE001 - a host's file format changed
+        return None
 
 
 def measured_tokens(target: Path, agent_dir: Path, stage: str, slice_id: str | None, since: Any) -> tuple[int | None, str | None]:
@@ -2532,7 +2566,15 @@ def _log_stage(
             raise ValueError("--slice is only for the Implementer")
         slice_id = normalize_slice(slice_id)
     shown = slice_role(slice_id) if slice_id else role
+    if stage == "T7" and status == "completed":
+        unproven = device_pass_unproven(target, agent_dir)
+        if unproven:
+            raise ValueError(unproven)
     append_stage_log(agent_dir, stage, status, actor, note, role=shown)
+    if stage == "T7" and status not in OPENING_STATUSES:
+        from android_workflow.locks import release
+
+        release(agent_dir)  # the Device round is over: another run may use the device
     if stage == "T4" and files:
         kept = [
             item
@@ -2583,8 +2625,18 @@ def _log_stage(
     if wait_seconds and seconds is not None:
         seconds = max(seconds - wait_seconds, 0)
     source = "reported" if tokens is not None else None
-    if status not in OPENING_STATUSES and tokens is None and not duplicate:
-        tokens, source = measured_tokens(target, agent_dir, stage, None, round_start)
+    if status not in OPENING_STATUSES and stage in TOKEN_STAGES:
+        # The host's transcript wins over a reported figure: orchestrators round or estimate it.
+        measured = measured_round(target, agent_dir, stage, None, round_start)
+        if measured:
+            if tokens is not None and tokens != measured["tokens"]:
+                entry["tokens_reported"] = tokens
+            if duplicate and entry.get("tokens_source") not in (None, "reported"):
+                tokens = None  # the round's measured figure is already counted
+            else:
+                tokens, source = measured["tokens"], measured["host"]
+            if measured.get("processed"):
+                entry["processed_tokens"] = measured["processed"]
     if source and status not in OPENING_STATUSES:
         entry["tokens_source"] = source
     if duplicate:
@@ -2620,6 +2672,11 @@ def _log_stage(
             state.update({"status": "completed", "current_stage": None})
         else:
             state.update({"status": "running", "current_stage": later[0] if later else "T8"})
+    if status == "completed" and stage == "T7" and not duplicate and isinstance(round_start, (int, float)):
+        from android_workflow.evidence import archive_stale_after
+
+        # Captures of an earlier source (older than this round) never reach the PR table.
+        archive_stale_after(target, source_fingerprint(target), before=float(round_start))
     if status == "completed" and stage in {"T6", "T7"}:
         verdict = recorded_verdict(agent_dir, stage)
         fingerprint = source_fingerprint(target)
@@ -2851,13 +2908,48 @@ def recorded_verdict(agent_dir: Path, stage: str) -> str:
             return "changes_requested"
         return str(review.get("status") or "not_run")
     path = agent_dir / "device-report.md"
-    status = device_report_status(path.read_text(encoding="utf-8")) if path.exists() else ""
-    return {"passed": "pass", "failed": "fail"}.get(status, status or "not_run")
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    status = device_report_status(text) if text else ""
+    verdict = {"passed": "pass", "failed": "fail"}.get(status, status or "not_run")
+    if verdict == "pass" and device_report_anomalies(text):
+        return "partial"
+    return verdict
+
+
+MAESTRO_UNAVAILABLE = re.compile(r"(?im)^\W*maestro:\s*unavailable\b\W*(\S.{3,})$")
+
+
+def device_pass_unproven(target: Path, agent_dir: Path) -> str | None:
+    """Why a Device PASS cannot be recorded yet, or None.
+
+    A PASS stands on flows the next round can replay: `RUN/replay.json` from `CLI device replay` for
+    this very source with at least one flow passed. Hand-driving with adb taps and sleeps is what made
+    every device round start from zero. The one way out is a report line `Maestro: unavailable — <why>`
+    (Maestro truly cannot run here), which the PR then discloses."""
+    path = agent_dir / "device-report.md"
+    if not path.is_file():
+        return None
+    text = path.read_text(encoding="utf-8")
+    if recorded_verdict(agent_dir, "T7") not in {"pass", "partial"} or MAESTRO_UNAVAILABLE.search(text):
+        return None
+    replayed = read_json(agent_dir / "replay.json") if (agent_dir / "replay.json").is_file() else {}
+    proven = replayed.get("fingerprint") == source_fingerprint(target) and any(
+        (item or {}).get("status") == "passed" for item in replayed.get("flows") or [])
+    if proven:
+        return None
+    reason = ("no saved flow was replayed" if not replayed
+              else "the last replay is for an earlier source" if replayed.get("fingerprint") != source_fingerprint(target)
+              else "no flow passed in the last replay")
+    return (f"a Device PASS needs replayable flows ({reason}): `CLI device scaffold --target TARGET`, fill the "
+            "selectors, `CLI device replay --target TARGET --serial SERIAL`, then log again. If Maestro truly cannot "
+            "run, add the line `Maestro: unavailable — <why>` to device-report.md. A round with nothing visible to "
+            "verify keeps the earlier PASS with `finish --keep-device \"<why>\"` instead")
 
 
 def media_files(agent_dir: Path, phase: str) -> list[Path]:
     folder = agent_dir / "media" / phase
-    return sorted(path for path in folder.glob("*") if path.is_file()) if folder.is_dir() else []
+    return sorted(path for path in folder.glob("*") if path.is_file() and not path.name.startswith(".")) \
+        if folder.is_dir() else []
 
 
 def verification_errors(
@@ -2866,6 +2958,7 @@ def verification_errors(
     state: dict[str, Any],
     gate: dict[str, Any],
     skip_device: str | None,
+    accept_partial: str | None = None,
 ) -> list[str]:
     """Every verdict must exist and belong to the current source, so a late fix cannot ship unverified."""
     agent_dir = run_dir(target)
@@ -2880,7 +2973,11 @@ def verification_errors(
         errors.append("review is missing or stale; re-review the change and `log --stage Reviewer`")
     if "T7" in spec["route"] and not skip_device:
         device = state.get("stages", {}).get("T7", {})
-        if recorded_verdict(agent_dir, "T7") != "pass":
+        verdict = recorded_verdict(agent_dir, "T7")
+        if verdict == "partial" and not accept_partial:
+            errors.append("device-report.md is PARTIAL (Not verified or Anomalies); ask the developer, then "
+                          "`finish --accept-partial \"<what stays unverified>\"` or `finish --draft`")
+        elif verdict not in {"pass", "partial"}:
             errors.append("device-report.md is not PASS; run the Device stage and `log --stage Device`")
         elif device.get("fingerprint") != current:
             errors.append("device verdict is missing or stale; re-run the Device stage and `log --stage Device`")
@@ -2913,8 +3010,11 @@ def finish_run(
     draft: str | None = None,
     no_device: bool = False,
     keep_device: str | None = None,
+    accept_partial: str | None = None,
 ) -> dict[str, Any]:
     """Final check before the PR. With `draft`, unresolved checks become known issues of a draft PR.
+    `accept_partial` is the developer's answer to a PARTIAL device check: ship it ready for review,
+    with what stays unverified disclosed in the PR.
 
     `skip_device` is refused while a device is connected: "no device" is checked, not believed. The
     developer's own `--no-device` (`no_device`) is the only way to skip a device that is there.
@@ -2941,7 +3041,7 @@ def finish_run(
     gate = read_json(agent_dir / "gate-report.json")
     if keep_device and "T7" in spec["route"] and not skip_device:
         device = state.get("stages", {}).get("T7", {})
-        if recorded_verdict(agent_dir, "T7") != "pass":
+        if recorded_verdict(agent_dir, "T7") not in {"pass", "partial"}:
             raise ValueError("--keep-device needs an earlier device PASS in this run; run the Device stage")
         device["fingerprint"] = source_fingerprint(target)
         device["kept"] = keep_device
@@ -2961,7 +3061,10 @@ def finish_run(
             "the workflow toolkit changed during this run (" + ", ".join(changed_toolkit)
             + "); a human must review that change"
         )
-    issues.extend(verification_errors(target, spec, state, gate, skip_device))
+    issues.extend(verification_errors(target, spec, state, gate, skip_device, accept_partial))
+    if accept_partial and not issues:
+        state["device_partial"] = accept_partial
+        append_stage_log(agent_dir, "T7", "accepted", "host", f"partial device check accepted: {accept_partial}")
     if issues and not draft:
         raise ValueError(
             "not verified: " + "; ".join(issues)
@@ -3281,6 +3384,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="a PR feedback round with nothing visible on the device: keep the earlier device PASS",
     )
     finish_parser.add_argument(
+        "--accept-partial", metavar="WHAT", dest="accept_partial",
+        help="the developer accepted a PARTIAL device check: ready for review, WHAT stays unverified (in the PR)",
+    )
+    finish_parser.add_argument(
         "--draft",
         metavar="REASON",
         help="the run stopped after the code was written: deliver a draft PR that lists what is unresolved",
@@ -3293,10 +3400,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     prebuild_parser.add_argument("--status", action="store_true", help="report without starting")
     prebuild_parser.add_argument(
         "--if-running", action="store_true", dest="if_running",
-        help="with --wait: wait only for a base build already running; never start one (the Implementer's first edit)",
+        help="report only (kept for older prompts): the base builds in its own checkout, so editing never waits for it",
     )
     prebuild_parser.add_argument("--force", action="store_true", help="build even if the route has no device stage")
-    prebuild_parser.add_argument("--timeout", type=float, default=1800.0)
+    prebuild_parser.add_argument("--timeout", type=float, help="seconds --wait waits (default: the base build's own timeout)")
     deliver_parser = subparsers.add_parser(
         "deliver", help="commit, push and open the PR for a finished run (no agent needed)",
     )
@@ -3332,13 +3439,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--stale", nargs="?", type=float, const=24.0, metavar="HOURS",
         help="remove unfinished runs (awaiting_host/paused/running) idle for HOURS (default 24)",
     )
-    device_parser = subparsers.add_parser("device", help="run the saved Maestro flows by code")
-    device_parser.add_argument("action", choices=("replay",))
+    device_parser = subparsers.add_parser(
+        "device", help="Maestro flows by code: replay them, scaffold them from the plan, install the current build",
+    )
+    device_parser.add_argument("action", choices=("replay", "scaffold", "install", "release"))
     device_parser.add_argument("--target", required=True, type=Path)
     device_parser.add_argument("--serial")
     device_parser.add_argument("--phase", choices=("before", "after"), default="after",
                                help="after (default): install the current build, run the flows, file media/after; "
-                                    "before: run them on the installed base build, file media/before")
+                                    "before: run them on the base build (the cached base APK when there is one), file media/before")
+    device_parser.add_argument("--install-base", action="store_true", dest="install_base",
+                               help="with --phase before: install the cached base APK first (the late before)")
     next_parser = subparsers.add_parser("next", help="the one thing to do now, decided from the run's files")
     next_parser.add_argument("--target", required=True, type=Path)
     next_parser.add_argument("--no-device", action="store_true")
@@ -3361,6 +3472,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     emulator_parser.add_argument("--wait", action="store_true", help="block until the device has booted")
     emulator_parser.add_argument("--stop", action="store_true", help="close the emulator, only if the workflow started it")
     emulator_parser.add_argument("--status", action="store_true", help="report without starting anything")
+    emulator_parser.add_argument(
+        "--wait-free", action="store_true", dest="wait_free",
+        help="block until a ready device no other run is using is free for this run (starts one more "
+             "emulator first when device.max_emulators > 1)",
+    )
     emulator_parser.add_argument("--avd", help="AVD to start (default: device.avd in the project overrides, else the first)")
     emulator_parser.add_argument("--headless", action="store_true", help="start without a window")
     emulator_parser.add_argument("--timeout", type=float, help="seconds --wait waits for the boot (default 300)")
@@ -3502,7 +3618,7 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
         with run_lock(target):
             return finish_run(
                 target, skip_device=args.skip_device, draft=args.draft, no_device=args.no_device,
-                keep_device=args.keep_device,
+                keep_device=args.keep_device, accept_partial=args.accept_partial,
             ), 0
     if args.command == "prebuild":
         from android_workflow.prebuild import current_status, start_prebuild, wait_prebuild
@@ -3510,13 +3626,11 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
         if args.status:
             return current_status(target), 0
         if args.if_running:
-            record = current_status(target)
-            if record.get("status") == "running":
-                record = wait_prebuild(target, timeout=args.timeout)
-            return {**record, "may_edit": record.get("status") != "running"}, 0
+            # The base builds in its own checkout: the Implementer never waits for it to edit.
+            return {**current_status(target), "may_edit": True}, 0
         record = start_prebuild(target, force=args.force)
         if args.wait and record.get("status") == "running":
-            record = wait_prebuild(target, timeout=args.timeout)
+            record = wait_prebuild(target, timeout=args.timeout) if args.timeout else wait_prebuild(target)
         return record, 0 if record.get("status") in {"running", "passed", "skipped"} else 1
     if args.command == "deliver":
         from android_workflow.delivery import deliver
@@ -3552,7 +3666,25 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
     if args.command == "device":
         from android_workflow.replay import replay
 
-        result = replay(target, serial=args.serial, phase=args.phase)
+        if args.action == "scaffold":
+            from android_workflow.flows import scaffold
+
+            config_path = cache_dir(target) / "project-config.json"
+            return scaffold(target, read_json(config_path) if config_path.is_file() else {}), 0
+        if args.action == "release":
+            from android_workflow.locks import release
+
+            return {"released": release(run_dir(target), serial=args.serial)}, 0
+        if args.action == "install":
+            from android_workflow.replay import install_current
+
+            serial = args.serial or connected_device(target)
+            if not serial:
+                return {"status": "no_device"}, 1
+            result = install_current(target, serial)
+            return result, 0 if result["status"] == "installed" else 1
+        result = replay(target, serial=args.serial, phase=args.phase,
+                        install_base_apk=True if args.install_base else None)
         return result, 0 if result["status"] in {"replayed", "partial"} else 1
     if args.command == "next":
         from android_workflow.decide import next_action

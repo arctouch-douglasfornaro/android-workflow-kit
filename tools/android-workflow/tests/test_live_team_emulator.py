@@ -10,6 +10,8 @@ os.environ["ANDROID_WORKFLOW_NO_WATCH"] = "1"
 os.environ.setdefault("ANDROID_WORKFLOW_OFFICE_HOME", __import__("tempfile").mkdtemp(prefix="aw-office-"))
 # The developer's own emulator may be connected; tests never ask adb.
 os.environ["ANDROID_WORKFLOW_NO_DEVICE_CHECK"] = "1"
+# Machine-wide state (build slots, device leases, base checkouts): a throwaway folder, never the developer's.
+os.environ.setdefault("ANDROID_WORKFLOW_STATE_HOME", __import__("tempfile").mkdtemp(prefix="aw-state-"))
 
 import argparse
 import fcntl
@@ -673,6 +675,7 @@ class FakeSdk:
         self.env = mock.patch.dict(os.environ, {
             "ANDROID_HOME": str(sdk), "ANDROID_SDK_ROOT": "", "HOME": str(home), "PATH": "/usr/bin:/bin",
             "FAKE_SDK_STATE": str(self.state), "FAKE_AVDS": self.avds,
+            "ANDROID_WORKFLOW_STATE_HOME": str(home / ".cache" / "android-workflow"),
         })
         self.env.start()
         return target, self.state

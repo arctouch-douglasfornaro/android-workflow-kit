@@ -37,10 +37,9 @@ conflict) when resumed.
 
 ## Work
 
-0. Before your **first edit**: `CLI prebuild --target TARGET --wait --if-running --timeout 90`. It
-   returns at once when no base build runs; while one runs it waits up to 90 s (under a host's
-   command timeout), so repeat it until it answers `may_edit: true`. The `before` capture needs the
-   unmodified app: read and plan meanwhile, never edit before that answer.
+0. Edit right away: the base APK for the `before` capture builds in its own checkout, outside
+   TARGET, so nothing waits for it. Build only what your change needs (compile and test the affected
+   modules); never `assemble`/`install` the whole app, the Device stage does that.
 1. Read each `SKILL.md` listed under `implementer` in `RUN/skills.json` (a path without a leading
    `/` is relative to `TARGET`; follow the files it points to only when the change needs them), and
    no other skill. Where a project skill and a kit skill disagree, the project skill wins.

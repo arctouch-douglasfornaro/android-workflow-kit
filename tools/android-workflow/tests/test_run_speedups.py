@@ -8,6 +8,8 @@ os.environ["ANDROID_WORKFLOW_NO_WATCH"] = "1"
 os.environ.setdefault("ANDROID_WORKFLOW_OFFICE_HOME", __import__("tempfile").mkdtemp(prefix="aw-office-"))
 # The developer's own emulator may be connected; tests never ask adb.
 os.environ["ANDROID_WORKFLOW_NO_DEVICE_CHECK"] = "1"
+# Machine-wide state (build slots, device leases, base checkouts): a throwaway folder, never the developer's.
+os.environ.setdefault("ANDROID_WORKFLOW_STATE_HOME", __import__("tempfile").mkdtemp(prefix="aw-state-"))
 
 import json
 import subprocess

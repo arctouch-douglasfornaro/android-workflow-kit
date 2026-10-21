@@ -8,6 +8,8 @@ os.environ["ANDROID_WORKFLOW_NO_WATCH"] = "1"
 os.environ.setdefault("ANDROID_WORKFLOW_OFFICE_HOME", __import__("tempfile").mkdtemp(prefix="aw-office-"))
 # The developer's own emulator may be connected; tests never ask adb.
 os.environ["ANDROID_WORKFLOW_NO_DEVICE_CHECK"] = "1"
+# Machine-wide state (build slots, device leases, base checkouts): a throwaway folder, never the developer's.
+os.environ.setdefault("ANDROID_WORKFLOW_STATE_HOME", __import__("tempfile").mkdtemp(prefix="aw-state-"))
 
 import json
 import re
@@ -676,14 +678,15 @@ class VerificationTests(unittest.TestCase):
             (run_dir(root) / "device-report.md").write_text(
                 "# Status\n\nPASS\n\n# Device\n\nPixel 8, API 35\n\n# Scenarios\n\n"
                 + "- AC1: expected button, observed button.\n" * 12
-                + "\n# Evidence\n\n- media/after/profile.png\n\n# Not verified\n\n- None.\n",
+                + "\n# Evidence\n\n- media/after/profile.png\n\n# Not verified\n\n- None.\n"
+                + "\nMaestro: unavailable — the test machine has no Maestro\n",
                 encoding="utf-8",
             )
             main(["log", "--target", str(root), "--stage", "T7", "--status", "completed"])
             with self.assertRaises(ValueError) as raised:
                 finish_verified(root)
             after = run_dir(root) / "media/after"
-            after.mkdir(parents=True)
+            after.mkdir(parents=True, exist_ok=True)  # the Device round's end left its fingerprint marker
             (after / "profile.png").write_bytes(b"png")
             state = finish_verified(root)
         self.assertIn("no media/after evidence", str(raised.exception))

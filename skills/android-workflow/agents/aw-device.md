@@ -19,14 +19,18 @@ free), and saved as flows. `after` runs those flows by code and only judges.
 
 - `before`: the prebuilt base APK (`RUN/prebuild.json` at `status: passed`; the orchestrator only
   spawns this mode then). The Implementer edits source meanwhile, so never build in this mode.
-  **Flow author.** Reach the surface, save the flows (see Flow contract), prove them with
-  `CLI device replay --target TARGET --serial <serial> --phase before` (runs them on the installed base
-  build and files the captures under `media/before/`). Capture the current state of the surface only
-  (`capture: true`; when `capture` is false the flows only need to reach the screen and assert it). No
-  verdict. Stop at `budget_seconds` (600): flows that work are kept, the rest are listed in your
-  return as "not scripted".
+  **Flow author.** `CLI device scaffold --target TARGET` first, fill the flows in (see Flow contract),
+  prove them with `CLI device replay --target TARGET --serial <serial> --phase before` (installs the
+  cached base APK, runs the flows and files the captures under `media/before/`). Capture the current
+  state of the surface only (`capture: true`; when `capture` is false the flows only need to reach the
+  screen and assert it). No verdict. Stop at `budget_seconds` (600): flows that work are kept, the rest
+  are listed in your return as "not scripted". End with the `done` command the orchestrator passed
+  (`CLI log --target TARGET --stage Device --status flows_ready --note "<n> flow(s) saved"`): it frees
+  the device for other runs.
 - `after`: reviewed build. Verify the device AC from `plan.md` and capture evidence. Budget
   `budget_seconds` (300) from start to `device-report.md`: replay, judge, a few hand-driven checks.
+  When no `before` ran (no base APK in time, or another run had the device), this round writes the
+  flows: the CLI replays them on the base APK afterwards for the `before` column, with no agent.
 
 ## Flow contract (what makes `after` fast)
 
@@ -53,9 +57,14 @@ Flows live in `RUN/media/flows/`, one per behavior in the plan's recipe (`<surfa
 ## Inputs
 
 - `TARGET`, `RUN`, CLI, mode, `plan.md` (navigation recipe, device AC, `visual`).
-- `adb devices` must show exactly one ready device, or the orchestrator's serial
-  (`ANDROID_SERIAL`, the `serial` from `CLI emulator`). None ready → return `BLOCKED` (never PASS
-  without a device). Never start, wipe or close an emulator yourself: the orchestrator does that.
+- `serial`: the device `CLI next` leased to this run. Use only that serial (`adb -s`, `maestro
+  --device`), never another one: another run may be installing its own build on it right now. Not
+  ready → return `BLOCKED` (never PASS without a device). Never start, wipe or close an emulator
+  yourself: the orchestrator does that.
+- Never run Gradle (`gradlew assemble…`/`install…`): `CLI device replay` installs the current build,
+  and `CLI device install --target TARGET --serial <serial>` does it alone (inside the machine's build
+  slots, with the APK's sha256 in its answer). That answer is your proof of the build; no sha256
+  checks around every capture.
 
 ## Work
 
@@ -64,7 +73,14 @@ Flows live in `RUN/media/flows/`, one per behavior in the plan's recipe (`<surfa
    usable APK → return `BLOCKED: no prebuilt base APK` and stop. `after` always builds the current tree. Use
    `device.application_id` from `CLI setup` / the profile (flavored variants included). Record
    package, versionName and APK path.
-2. `after` with saved flows (the orchestrator passes `replay`): run `CLI device replay --target TARGET
+2. `after` with no saved flows (the orchestrator passes `scaffold`): run `CLI device scaffold --target
+   TARGET` first. It writes `_nav.yaml` (the recipe as numbered TODOs) and one flow per evidence name,
+   each already capturing under that name, and lists `known_flows`: flows earlier tickets proved on
+   this app. Copy the steps of a known flow that reaches the same screen; fill the remaining TODOs with
+   selectors from a filtered UI dump (device-driving §2), then `CLI device replay --target TARGET --serial
+   <serial>`, fix what fails and replay again. That is the normal path, not a fallback: a PASS needs a
+   replay of this very source with a flow passed (`log` refuses it otherwise).
+   `after` with saved flows (the orchestrator passes `replay`): run `CLI device replay --target TARGET
    --serial <serial>` first, before anything else. It installs the current build and re-runs every flow in
    `RUN/media/flows/` by code (a failing flow is rerun once), files the captures under `media/after/`
    with the names the flows declare and writes `media/compare.md` and `RUN/replay.json` (time per flow,
@@ -74,15 +90,21 @@ Flows live in `RUN/media/flows/`, one per behavior in the plan's recipe (`<surfa
    the failed flows, and fix those flows for the next round. `failed`, `install_failed`, `no_maestro` →
    the normal path below (then save the flows you drove, so the next round replays). A replay is
    evidence, never a verdict by itself. Hand-driving is capped: at most 12 device steps for what no flow
-   reaches; past the budget, finish the check in hand and list every AC still open under Not verified
-   with the reason.
+   reaches, never with coordinates or fixed sleeps; past the budget, finish the check in hand and list
+   every AC still open under Not verified with the reason. Only when Maestro truly cannot run here
+   (device-driving §9) write the line `Maestro: unavailable — <the failure>` in the report: it is the
+   one way a PASS is recorded without a replay, and the PR says so.
 3. Launch and follow the navigation recipe (express level has none: derive it from the
    profile's Device rows and the NavHost/intent code for the changed screen) with a Maestro flow saved in
    `RUN/media/flows/<name>.yaml` following the Flow contract. Assert the target screen was reached
    (text/testTag) before judging anything. Recipe wrong → fix the flow, not the app. In `before`, this is
    the whole job: write, run and fix each flow until it passes on the base build.
 4. `after`: for each device AC write expected vs observed. Capture logcat for the app pid in
-   the same session when the AC involves events, errors or lifecycle.
+   the same session when the AC involves events, errors or lifecycle. A performance ticket (a perf
+   skill in `RUN/skills.json`): the scaffold adds a `.sh` per flow that saves `dumpsys gfxinfo`; the
+   replay files it as `<flow>-gfxinfo.txt` and puts frames, janky % and p50/p90/p99 in `replay.json`
+   (`frames`). Report before vs after from those numbers; on an emulator say they compare the two
+   builds on that emulator only (software rendering), and prefer a phone when one is connected.
 5. Evidence, same `--name` in both modes (the flow's `takeScreenshot`/`startRecording` already carry it, so
    a replay files it under the right name; only hand-driven captures need these commands):
    - still: `CLI evidence capture --target TARGET --phase <mode> --name <surface>`
@@ -98,12 +120,19 @@ Flows live in `RUN/media/flows/`, one per behavior in the plan's recipe (`<surfa
    other phase: when they show the same screen, ingest the `after` file again under the `before`
    name (`--name <before name>`) and delete the old `after` file, so the PR table pairs them.
 7. Real failure: rerun once. Second failure = FAIL (first failure only = flaky, note it).
+8. Leave the test account as you found it: undo what the checks changed (a starred term, a setting,
+   a downloaded set). What you could not undo goes in the report under Not verified as "State left
+   on the account: …".
 
 ## Writes (`after` mode)
 
-`RUN/device-report.md` with headings exactly: Status (first line `PASS` | `FAIL` | `BLOCKED`),
-Device (model, API, serial), Scenarios (AC → expected / observed), Evidence (media paths),
-Not verified. End the file with one `Timing:` line (not a heading): install / replay / hand-driven seconds, from `replay.json`.
+`RUN/device-report.md` with headings exactly: Status (first line `PASS` | `PARTIAL` | `FAIL` |
+`BLOCKED`), Device (model, API, serial), Scenarios (AC → expected / observed), Evidence (media paths),
+Not verified, Anomalies. `PARTIAL`: every AC you checked passed, but a device AC stayed unverified,
+or you saw something you could not explain (it goes under Anomalies, never only in prose). The CLI
+then asks the developer whether to ship ready, ship as a draft or run the Device again; a `PASS`
+with anything under Anomalies counts as `PARTIAL`. Write `None.` under an empty Anomalies. End the
+file with one `Timing:` line (not a heading): install / replay / hand-driven seconds, from `replay.json`.
 Must be >400 bytes so the CLI keeps it. Then
 `CLI log --target TARGET --stage Device --status completed --note "<verdict>"`.
 

@@ -8,6 +8,8 @@ os.environ["ANDROID_WORKFLOW_NO_WATCH"] = "1"
 os.environ.setdefault("ANDROID_WORKFLOW_OFFICE_HOME", __import__("tempfile").mkdtemp(prefix="aw-office-"))
 # The developer's own emulator may be connected; tests never ask adb.
 os.environ["ANDROID_WORKFLOW_NO_DEVICE_CHECK"] = "1"
+# Machine-wide state (build slots, device leases, base checkouts): a throwaway folder, never the developer's.
+os.environ.setdefault("ANDROID_WORKFLOW_STATE_HOME", __import__("tempfile").mkdtemp(prefix="aw-state-"))
 # Delivery opens media/ in Finder after a real PR; tests never do.
 os.environ["ANDROID_WORKFLOW_NO_OPEN"] = "1"
 
@@ -247,16 +249,39 @@ class PrebuildTests(unittest.TestCase):
         self.assertEqual(finished["status"], "passed")
         self.assertTrue(finished["apks"][0]["path"].endswith("app-debug.apk"))
 
-    def test_source_edited_during_the_build_taints_it(self) -> None:
+    def test_the_base_builds_in_its_own_checkout_so_edits_never_reach_it(self) -> None:
         with AndroidProject() as root:
             script = root / "build.sh"
-            script.write_text("#!/bin/sh\nsleep 1\n", encoding="utf-8")
+            script.write_text(
+                "#!/bin/sh\nsleep 1\nmkdir -p app/build/outputs/apk/debug\n"
+                "cp app/src/main/java/com/example/ProfileScreen.kt app/build/outputs/apk/debug/app-debug.apk\n",
+                encoding="utf-8")
             script.chmod(0o755)
             self.prepared(root, str(script))
+            original = (root / "app/src/main/java/com/example/ProfileScreen.kt").read_text(encoding="utf-8")
             start_prebuild(root)
             (root / "app/src/main/java/com/example/ProfileScreen.kt").write_text("class Edited\n", encoding="utf-8")
             finished = wait_prebuild(root, timeout=60, poll=0.2)
-        self.assertEqual(finished["status"], "tainted")
+            apk = Path(finished["apks"][0]["path"]).read_text(encoding="utf-8")
+            built_in = finished["checkout"]
+        self.assertEqual(finished["status"], "passed")
+        self.assertEqual(apk, original)  # the base, not the edit
+        self.assertFalse(built_in.startswith(str(root)))
+
+    def test_a_second_run_on_the_same_base_gets_the_cached_apk_at_once(self) -> None:
+        with AndroidProject() as root:
+            script = root / "build.sh"
+            script.write_text("#!/bin/sh\nmkdir -p app/build/outputs/apk/debug\necho apk > app/build/outputs/apk/debug/app-debug.apk\n",
+                              encoding="utf-8")
+            script.chmod(0o755)
+            self.prepared(root, str(script))
+            start_prebuild(root)
+            first = wait_prebuild(root, timeout=60, poll=0.2)
+            (run_dir(root) / "prebuild.json").unlink()  # a new run, same base commit
+            again = start_prebuild(root)
+        self.assertEqual(first["status"], "passed")
+        self.assertEqual((again["status"], again["cached"]), ("passed", True))
+        self.assertEqual(again["apks"][0]["sha256"], first["apks"][0]["sha256"])
 
     def test_a_failing_build_is_reported(self) -> None:
         with AndroidProject() as root:
@@ -272,13 +297,14 @@ class PrebuildTests(unittest.TestCase):
             result = start_prebuild(root)
         self.assertEqual(result["status"], "skipped")
 
-    def test_skipped_once_the_source_has_changed(self) -> None:
+    def test_starts_even_after_the_source_has_changed(self) -> None:
         with AndroidProject() as root:
             self.prepared(root, "/usr/bin/true")
             implement(root)
             result = start_prebuild(root)
-        self.assertEqual(result["status"], "skipped")
-        self.assertIn("source already changed", result["reason"])
+            if result.get("status") == "running":
+                wait_prebuild(root, timeout=60, poll=0.2)
+        self.assertNotEqual(result["status"], "skipped")
 
     def test_dead_worker_is_not_left_running(self) -> None:
         with AndroidProject() as root:

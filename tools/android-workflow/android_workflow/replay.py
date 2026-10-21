@@ -79,10 +79,12 @@ def install(target: Path, config: dict[str, Any], serial: str, log: Path) -> tup
     command = (config.get("commands") or {}).get("install")
     if not command:
         return False, "no install command recorded by Setup"
+    from android_workflow.locks import build_slot
+
     timeout = int((config.get("execution") or {}).get("command_timeout_seconds") or 900) * 2
     env = {**os.environ, "ANDROID_SERIAL": serial}
     try:
-        with log.open("w", encoding="utf-8") as handle:
+        with log.open("w", encoding="utf-8") as handle, build_slot(f"device install ({target.name})", config):
             result = subprocess.run(shlex.split(command) + ["--console=plain"], cwd=target, env=env, stdout=handle,
                                     stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, timeout=timeout, check=False)
     except subprocess.TimeoutExpired:
@@ -92,6 +94,92 @@ def install(target: Path, config: dict[str, Any], serial: str, log: Path) -> tup
     if result.returncode != 0:
         return False, f"the install failed (exit {result.returncode}): {_tail(log, 5)}"
     return True, command
+
+
+def base_apk(target: Path, config: dict[str, Any]) -> Path | None:
+    """The base APK the base build recorded for this run (`RUN/prebuild.json`), the app's own first."""
+    from android_workflow.prebuild import current_status
+
+    record = current_status(target)
+    if record.get("status") != "passed":
+        return None
+    apks = [Path(str(item.get("path"))) for item in record.get("apks") or [] if Path(str(item.get("path"))).is_file()]
+    if not apks:
+        return None
+    install = str((config.get("commands") or {}).get("install") or "")
+    module = install.split(":")[1] if install.count(":") >= 2 else ""
+    preferred = [path for path in apks if module and module in str(path)]
+    return (preferred or apks)[0]
+
+
+def install_base(adb: str, serial: str, apk: Path, log: Path) -> tuple[bool, str]:
+    """`adb install` the cached base APK (`-d`: the base may carry a lower version code)."""
+    try:
+        with log.open("w", encoding="utf-8") as handle:
+            result = subprocess.run([adb, "-s", serial, "install", "-r", "-d", str(apk)], stdout=handle,
+                                    stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, timeout=600, check=False)
+    except subprocess.TimeoutExpired:
+        return False, "the base install timed out"
+    except OSError as error:
+        return False, f"could not run adb: {error}"
+    if result.returncode != 0 or "Failure" in _tail(log, 5):
+        return False, f"the base install failed: {_tail(log, 5)}"
+    return True, str(apk)
+
+
+def _adb() -> str:
+    return shutil.which("adb") or str(Path.home() / "Library/Android/sdk/platform-tools/adb")
+
+
+JANKY = re.compile(r"Janky frames:\s*(\d+)\s*\(([\d.]+)%\)")
+TOTAL_FRAMES = re.compile(r"Total frames rendered:\s*(\d+)")
+PERCENTILE = re.compile(r"^(\d+)th percentile:\s*(\d+)ms", re.M)
+
+
+def _frame_stats(folder: Path, flow: str, target: Path, phase: str) -> dict[str, Any] | None:
+    """A perf flow's `dumpsys gfxinfo` (`<name>-gfxinfo.txt` in its output): filed under
+    `media/<phase>/` and summed up (frames, janky %, p50/p90/p99) for the before/after comparison."""
+    found = sorted(folder.rglob("*gfxinfo*.txt"))
+    if not found:
+        return None
+    text = found[0].read_text(encoding="utf-8", errors="replace")
+    destination = media_dir(target) / phase / f"{flow}-gfxinfo.txt"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(found[0], destination)
+    stats: dict[str, Any] = {"file": str(destination)}
+    total, janky = TOTAL_FRAMES.search(text), JANKY.search(text)
+    if total:
+        stats["frames"] = int(total.group(1))
+    if janky:
+        stats["janky_frames"], stats["janky_percent"] = int(janky.group(1)), float(janky.group(2))
+    for percentile, millis in PERCENTILE.findall(text):
+        if percentile in {"50", "90", "99"}:
+            stats[f"p{percentile}_ms"] = int(millis)
+    return stats
+
+
+def install_current(target: Path, serial: str) -> dict[str, Any]:
+    """`CLI device install`: the current build on `serial`, inside a build slot and the device's lease,
+    with the APK's sha256 so the report can prove what it judged. The Device agent never runs Gradle."""
+    from android_workflow.base import find_apks
+    from android_workflow.cli import read_json
+    from android_workflow.locks import device_lease
+
+    config_path = cache_dir(target) / "project-config.json"
+    config = read_json(config_path) if config_path.is_file() else {}
+    log = run_dir(target) / "device-install.log"
+    with device_lease(serial, run_dir(target), timeout=1200) as held:
+        if not held:
+            return {"status": "device_busy", "serial": serial}
+        started = time.time()
+        installed, detail = install(target, config, serial, log)
+    if not installed:
+        return {"status": "install_failed", "reason": detail, "log": str(log)}
+    apks = find_apks(target, 0.0)  # an up-to-date build installs without writing the APK again
+    apk = apks[0] if apks else None
+    return {"status": "installed", "serial": serial, "command": detail, "seconds": round(time.time() - started, 1),
+            "package": (config.get("device") or {}).get("application_id"),
+            **({"apk": str(apk), "sha256": hashlib.sha256(apk.read_bytes()).hexdigest()} if apk else {})}
 
 
 def _drop_phase(target: Path, phase: str, names: list[str]) -> None:
@@ -111,7 +199,7 @@ def _drop_phase(target: Path, phase: str, names: list[str]) -> None:
 
 def _restore_network(serial: str) -> None:
     """A script that turned the network off must never leave it off."""
-    adb = shutil.which("adb") or str(Path.home() / "Library/Android/sdk/platform-tools/adb")
+    adb = _adb()
     for service in ("wifi", "data"):
         try:
             subprocess.run([adb, "-s", serial, "shell", "svc", service, "enable"], capture_output=True,
@@ -147,29 +235,43 @@ def _run_flow(flow: Path, maestro: str, serial: str, folder: Path, target: Path,
     return code, str(log)
 
 
-def replay(target: Path, serial: str | None = None, phase: str = "after") -> dict[str, Any]:
-    """Run every saved flow and file what it captured under `media/<phase>/`.
+def replay(target: Path, serial: str | None = None, phase: str = "after", install_base_apk: bool | None = None,
+           lease_timeout: float = 1200.0) -> dict[str, Any]:
+    """Run every saved flow and file what it captured under `media/<phase>/`, holding the device's
+    lease the whole time (another run's Device stage waits, and so does this replay for theirs).
 
-    `after` installs the current build first; `before` runs on the base build the Device agent already
-    installed. Returns what was captured per flow, with the time each step took."""
-    from android_workflow.cli import append_stage_log, read_json, source_fingerprint
+    `after` installs the current build first. `before` installs the cached base APK when the base
+    build has one (`install_base_apk`, default: when no `before` agent installed it already, i.e. the
+    late `before` after the `after` round), else runs on the build already installed. Returns what was
+    captured per flow, with the time each step took."""
     from android_workflow.emulator import status as device_status
-    from android_workflow.evidence import compare, ingest
+    from android_workflow.locks import device_lease
 
     if phase not in {"before", "after"}:
         return {"status": "failed", "reason": "phase must be before or after"}
-    agent_dir = run_dir(target)
-    saved = flows(target)
-    if not saved:
+    if not flows(target):
         return {"status": "no_flows", "next": "drive the app by hand (device-driving skill) and save the flow in media/flows/"}
-    maestro = maestro_path()
-    if not maestro:
-        return {"status": "no_maestro", "next": "install Maestro (device-driving §9), then replay again"}
     if not serial:
         current = device_status(target)
         if current.get("status") not in {"connected", "ready"}:
             return {"status": "no_device", "reason": current.get("reason") or current.get("status")}
         serial = str(current.get("serial"))
+    with device_lease(serial, run_dir(target), timeout=lease_timeout) as held:
+        if not held:
+            return {"status": "device_busy", "serial": serial,
+                    "reason": f"another run kept {serial} for over {int(lease_timeout)}s"}
+        return _replay(target, serial, phase, install_base_apk)
+
+
+def _replay(target: Path, serial: str, phase: str, install_base_apk: bool | None) -> dict[str, Any]:
+    from android_workflow.cli import append_stage_log, read_json, source_fingerprint
+    from android_workflow.evidence import compare, ingest
+
+    agent_dir = run_dir(target)
+    saved = flows(target)
+    maestro = maestro_path()
+    if not maestro:
+        return {"status": "no_maestro", "next": "install Maestro (device-driving §9), then replay again"}
     config_path = cache_dir(target) / "project-config.json"
     config = read_json(config_path) if config_path.is_file() else {}
     device_config = config.get("device") or {}
@@ -182,9 +284,25 @@ def replay(target: Path, serial: str | None = None, phase: str = "after") -> dic
     started = time.monotonic()
     install_seconds = 0.0
     result_file = agent_dir / (REPLAY_FILE if phase == "after" else f"replay-{phase}.json")
-    if phase == "after":
+    explicit = install_base_apk is True
+    if phase == "before" and install_base_apk is None:
+        install_base_apk = True  # the cached base when there is one, else the build already installed
+    base = base_apk(target, config) if phase == "before" and install_base_apk else None
+    # Without a cached base, the installed build is the base only while no `after` build has been
+    # installed yet (the `before` agent's own proof). After an `after` round it is the new build.
+    device_rounds = ((read_json(agent_dir / "run-state.json").get("stages") or {}).get("T7") or {}).get("history") \
+        if (agent_dir / "run-state.json").is_file() else None
+    after_installed = (agent_dir / REPLAY_FILE).is_file() or bool(device_rounds)
+    if phase == "before" and base is None and (explicit or after_installed):
+        result = {"status": "no_base_apk", "reason": "the base build has no APK yet (`CLI prebuild --target TARGET --wait`)"}
+        result_file.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+        return result
+    if phase == "after" or base is not None:
         installing = time.monotonic()
-        installed, detail = install(target, config, serial, out / "install.log")
+        if base is not None:
+            installed, detail = install_base(_adb(), serial, base, out / "install.log")
+        else:
+            installed, detail = install(target, config, serial, out / "install.log")
         install_seconds = round(time.monotonic() - installing, 1)
         if not installed:
             result = {"status": "install_failed", "reason": detail, "log": str(out / "install.log"),
@@ -209,15 +327,20 @@ def replay(target: Path, serial: str | None = None, phase: str = "after") -> dic
             attempts = 2
         allowed = set(declared[flow.name]) | (set(known) if phase == "after" else set())
         captured = []
-        if code == 0:  # a failed flow's files are failure screenshots, never evidence
+        # A failed flow's files are failure screenshots, never evidence. On the base build a flow that
+        # looks for the new element fails by design: what it captured before that step is the before.
+        if code == 0 or (phase == "before" and allowed):
             for media in sorted([*folder.rglob("*.png"), *folder.rglob("*.mp4")]):
                 if allowed and media.stem not in allowed:
                     continue  # only the names this flow declares (or the before capture used)
                 item = ingest(target, phase, media.stem, media)
                 captured.append(item["name"])
-        status = "passed" if code == 0 and (captured or phase == "before" and not allowed) else "failed"
+        metrics = _frame_stats(folder, flow.stem, target, phase)
+        status = "passed" if code == 0 and (captured or metrics or phase == "before" and not allowed) else \
+            "partial" if phase == "before" and captured else "failed"
         results.append({"flow": flow.name, "status": status, "exit_code": code, "captured": captured,
                         "attempts": attempts, "seconds": round(time.monotonic() - flow_started, 1),
+                        **({"frames": metrics} if metrics else {}),
                         **({"log_tail": _tail(Path(log))} if code else {}),
                         **({"reason": "the flow captured nothing it declares"} if code == 0 and not captured and status == "failed" else {})})
     expected_after = owned if phase == "after" else sorted({name for names in declared.values() for name in names})
@@ -228,12 +351,15 @@ def replay(target: Path, serial: str | None = None, phase: str = "after") -> dic
     ) if phase == "after" and after.is_dir() else []
     missing = sorted(name for name in expected_after if not (target_dir.is_dir() and any(target_dir.glob(name + ".*"))))
     passed = sum(item["status"] == "passed" for item in results)
+    if phase == "before":  # before evidence is whatever the base build could show
+        passed = sum(item["status"] in {"passed", "partial"} for item in results)
     status = "replayed" if passed == len(results) else "partial" if passed else "failed"
     total = round(time.monotonic() - started, 1)
     result = {
         "status": status, "phase": phase, "serial": serial, "fingerprint": source_fingerprint(target),
         "flows": results, "identical_to_before": identical, "missing_from_after" if phase == "after" else "missing": missing,
         "install_seconds": install_seconds, "duration_seconds": total, "budget_seconds": budget,
+        **({"base_apk": str(base)} if base is not None else {}),
         "over_budget": phase == "after" and total > budget,
         "next": {
             "replayed": "judge each device AC from media/after (and compare.md); drive by hand only what no flow covers"
@@ -243,6 +369,10 @@ def replay(target: Path, serial: str | None = None, phase: str = "after") -> dic
         }[status],
     }
     compare(target)
+    if phase == "after" and status == "replayed":
+        from android_workflow.flows import remember
+
+        result["library"] = remember(target)  # the next ticket on this screen copies these flows
     result_file.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     note = f"{passed}/{len(results)} flow(s) {'replayed on the new build' if phase == 'after' else 'run on the base build'}" \
            f" in {total}s" + (f" (install {install_seconds}s)" if phase == "after" else "")

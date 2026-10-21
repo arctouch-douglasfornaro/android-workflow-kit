@@ -23,6 +23,16 @@ MANIFEST_NAME = "manifest.json"
 COMPARE_NAME = "compare.md"
 
 
+STATE_HOME_ENV = "ANDROID_WORKFLOW_STATE_HOME"
+
+
+def state_home() -> Path:
+    """Machine-wide state every run of every app shares: the emulator record, build slots, device
+    leases, the base checkouts and their APKs. `ANDROID_WORKFLOW_STATE_HOME` moves it (tests)."""
+    configured = os.environ.get(STATE_HOME_ENV)
+    return Path(configured).expanduser() if configured else Path.home() / ".cache" / "android-workflow"
+
+
 def ticket_slug(ticket_id: str | None) -> str:
     raw = str(ticket_id or "LOCAL").strip() or "LOCAL"
     slug = re.sub(r"[^A-Za-z0-9._-]+", "-", raw)

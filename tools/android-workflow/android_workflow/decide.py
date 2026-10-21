@@ -389,9 +389,19 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
     if "T7" in route:
         device_state = stages.get("T7") or {}
         device_verdict = recorded_verdict(agent_dir, "T7")
-        device_now = device_state.get("fingerprint") == fingerprint and device_verdict in {"pass", "fail", "blocked"}
+        device_now = device_state.get("fingerprint") == fingerprint and device_verdict in {"pass", "fail", "blocked", "partial"}
+        if device_now and device_verdict in {"pass", "partial"}:
+            late = _late_before(target, agent_dir, spec, state, record)
+            if late:
+                return late
         if device_now and device_verdict == "pass":
             return _finish(spec)
+        if device_now and device_verdict == "partial":
+            if state.get("finished_fingerprint"):  # a PR round: the developer decides, nothing is pushed yet
+                return _answer("ask_user", "the device check is partial (PR round)", question=PARTIAL_QUESTION,
+                               options=_partial_options(), then="CLI next --target TARGET")
+            return _answer("ask_user", "the device check is partial: some AC were not verified on the device",
+                           question=PARTIAL_QUESTION, options=_partial_options())
         if device_now and device_verdict == "blocked":
             return _draft("the device check is blocked: see device-report.md", state)
         fails = failed_rounds(device_state, {"fail"}, device_verdict if device_now else None, fingerprint)
@@ -412,11 +422,18 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
             current = device_status(target)
         except Exception:  # noqa: BLE001 - no SDK: no device
             current = {"status": "unavailable", "reason": "adb is not available"}
-        if current.get("status") in {"connected", "ready", "booting"}:
+        if current.get("status") == "booting":  # lease it once it is up, then hand it to the Device
+            return _answer("wait_device", "the emulator is booting", command="CLI emulator --target TARGET --wait",
+                           then="CLI next --target TARGET")
+        if current.get("status") in {"connected", "ready"}:
+            serial, busy = _claim_device(agent_dir, current, record)
+            if busy is not None:
+                return busy
             return _spawn("aw-device", "the change passed the gate and the review: verify it on the device",
-                          stage="Device", mode="after", serial=current.get("serial"),
-                          first="CLI emulator --target TARGET --wait" if current.get("status") == "booting" else None,
-                          replay=_replay_hint(agent_dir), budget_seconds=AFTER_BUDGET_SECONDS,
+                          stage="Device", mode="after", serial=serial,
+                          replay=_replay_hint(agent_dir),
+                          scaffold=None if flows_saved(agent_dir) else "CLI device scaffold --target TARGET",
+                          budget_seconds=AFTER_BUDGET_SECONDS,
                           note="after: verify the AC on the device")
         reason = str(current.get("reason") or current.get("status") or "no device")
         if current.get("status") == "unauthorized":
@@ -496,8 +513,10 @@ def _device_before(target: Path, agent_dir: Path, spec: dict[str, Any], state: d
 
     build = current_status(target)
     if build.get("status") == "running":
+        # Bounded: the Implementer may return first, and then the run moves on (the late before
+        # replays the flows on the base APK once it exists).
         return _answer("wait_prebuild", "the base build is still running; the before capture needs it",
-                       command="CLI prebuild --target TARGET --wait", then="CLI next --target TARGET")
+                       command="CLI prebuild --target TARGET --wait --timeout 600", then="CLI next --target TARGET")
     if build.get("status") != "passed":
         return _skip_before(target, f"no base APK (prebuild {build.get('status')})", record)
     from android_workflow.emulator import status as device_status
@@ -511,6 +530,10 @@ def _device_before(target: Path, agent_dir: Path, spec: dict[str, Any], state: d
                        then="CLI next --target TARGET")
     if current.get("status") not in {"connected", "ready"}:
         return _skip_before(target, f"no device ({current.get('status')})", record)
+    serial, busy = _claim_device(agent_dir, current, record)
+    if busy is not None:
+        return None  # another run is on the device: the late `before` (after the `after`) covers it
+    current = {**current, "serial": serial}
     if record:
         _mark_before(target, "spawned")
     capture = visual(spec)
@@ -518,8 +541,84 @@ def _device_before(target: Path, agent_dir: Path, spec: dict[str, Any], state: d
                   + ("capture the before state and write the flows the after run replays" if capture
                      else "write the flows the after run replays"),
                   stage="Device", mode="before", serial=current.get("serial"), capture=capture,
-                  budget_seconds=BEFORE_BUDGET_SECONDS,
+                  budget_seconds=BEFORE_BUDGET_SECONDS, scaffold="CLI device scaffold --target TARGET",
+                  done='CLI log --target TARGET --stage Device --status flows_ready --note "<n> flow(s) saved"',
                   note="before: capture the current screen and write the flows" if capture else "before: write the flows")
+
+
+PARTIAL_QUESTION = ("The device check is partial: device-report.md lists AC it could not verify (Not verified) or "
+                    "something it could not explain (Anomalies). Open the PR ready for review with that disclosed, "
+                    "open it as a draft, or run the Device again on what is open?")
+
+
+def _partial_options() -> dict[str, str]:
+    return {
+        "ready": 'CLI finish --target TARGET --accept-partial "<what stays unverified, in one line>"',
+        "draft": 'CLI finish --target TARGET --draft "device check partial: see device-report.md"',
+        "again": "spawn aw-device mode after with the report's Not verified and Anomalies items, then CLI next",
+    }
+
+
+def _claim_device(agent_dir: Path, current: dict[str, Any], record: bool) -> tuple[str | None, dict[str, Any] | None]:
+    """A ready device no other run is using, leased to this run (when `record`), or the `wait_device`
+    answer when every device is taken. Two runs never install their builds on one device at once."""
+    from android_workflow.locks import acquire, free_serials, lease_of
+
+    serials = [str(current.get("serial"))] if current.get("serial") else []
+    serials += [str(serial) for serial in current.get("devices") or [] if str(serial) not in serials]
+    free = free_serials(serials, agent_dir)
+    if free:
+        if record:
+            acquire(free[0], agent_dir, mode="agent")
+        return free[0], None
+    holders = {serial: Path(str((lease_of(serial) or {}).get("run") or "?")).name for serial in serials}
+    return None, _answer("wait_device", "another run is using the device: " + ", ".join(
+        f"{serial} ({ticket})" for serial, ticket in holders.items()),
+        command="CLI emulator --target TARGET --wait-free", then="CLI next --target TARGET")
+
+
+def _late_before(target: Path, agent_dir: Path, spec: dict[str, Any], state: dict[str, Any],
+                 record: bool) -> dict[str, Any] | None:
+    """The `before` the run could not take while the Implementer worked (no base APK yet, or the
+    device was busy): the `after` round saved its flows, so the base APK replays them by code, with
+    no agent. Visual changes only, once per run."""
+    if not visual(spec) or not flows_saved(agent_dir) or (agent_dir / "replay-before.json").is_file():
+        return None
+    before = agent_dir / "media" / "before"
+    if before.is_dir() and any(before.iterdir()):
+        return None
+    if str(state.get("device_before") or "").startswith(("late: replaying", "late: skipped")):
+        return None  # tried once already
+    from android_workflow.prebuild import current_status
+
+    build = current_status(target)
+    if build.get("status") == "running":
+        return _answer("wait_prebuild", "the base build is still running; the late before capture needs it",
+                       command="CLI prebuild --target TARGET --wait --timeout 900", then="CLI next --target TARGET")
+    if build.get("status") != "passed":
+        if build.get("status") == "failed" or state.get("device_before") == "late: building":
+            if record:
+                _mark_before(target, f"late: skipped, no base APK (prebuild {build.get('status')})")
+            return None
+        if record:
+            _mark_before(target, "late: building")
+        return _answer("wait_prebuild", "no base APK yet: build the base for the late before capture",
+                       command="CLI prebuild --target TARGET --force --wait", then="CLI next --target TARGET")
+    from android_workflow.emulator import status as device_status
+
+    try:
+        current = device_status(target)
+    except Exception:  # noqa: BLE001
+        current = {"status": "unavailable"}
+    if current.get("status") not in {"connected", "ready"}:
+        if record:
+            _mark_before(target, f"late: skipped, no device ({current.get('status')})")
+        return None
+    if record:
+        _mark_before(target, "late: replaying")
+    return _answer("replay_before", "the after flows exist: replay them on the base APK for the before captures",
+                   command=f"CLI device replay --target TARGET --serial {current.get('serial')} --phase before --install-base",
+                   then="CLI next --target TARGET")
 
 
 def _skip_before(target: Path, reason: str, record: bool = True) -> None:

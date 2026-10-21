@@ -137,17 +137,29 @@ command only to change one of them:
 1. **Branch** — on the base branch it creates `<user>/<TICKET>-<slug>`; on any other branch it keeps working there.
 2. **Setup (first run only)** — learns the project's patterns and quality tools and saves them in `.ai/project-profile.md`. Later tickets reuse it.
 3. **Depth** — picks `express`, `standard` or `full` from the ticket (see *Depth* in the table above).
-4. **Planner** — reads the code and writes verifiable acceptance criteria. Meanwhile the emulator boots (when no device is connected) and the unchanged app is built in the background.
+4. **Planner** — reads the code and writes verifiable acceptance criteria. Meanwhile the emulator boots (when no device is connected) and the unchanged app is built in the background, in its own checkout (`~/.cache/android-workflow/base/<repo>/`), never in yours: it cannot race the Implementer, it builds incrementally from one ticket to the next, and its APK is cached by commit (a second ticket on the same base gets it at once).
 5. **Implementer** — reads the Android skills this ticket needs (picked automatically: your app's own skills first, e.g. its Compose or testing rules, then the kit's), writes the change and the unit tests that prove it. In parallel, if a device is connected, the **before** screenshots are captured.
    When the plan has independent parts (different modules, data and UI) the **Tech Lead** splits it into slices, up to
    **3 Implementers** build them at the same time, each owning its own files, and the Tech Lead integrates them before the gate.
 6. **Quality gate** — formatter, compile, unit tests, detekt and lint for the modules touched. Failures go back to the Implementer (up to 2 times).
 7. **Code reviewer** — an independent review of the diff: bugs, side effects, callers, duplication, project conventions. Blocking findings go back to the Implementer once.
-8. **Device check** — installs the app, navigates to the change and captures the **after** screenshots or video.
+8. **Device check** — installs the app, navigates to the change with Maestro flows (`CLI device scaffold` writes them from the plan, and lists flows earlier tickets proved, to copy) and captures the **after** screenshots or video. A PASS stands on flows replayed for the code that ships, so the next round replays them for free. When the **before** could not be captured while the Implementer worked, the same flows are replayed on the base APK afterwards. A check that left an AC unverified or saw something odd is **PARTIAL**: you choose ready, draft or another device round.
 9. **PR** — commits only app code, pushes and opens the PR.
 10. **PR Watcher** — follows the PR until it is merged. See below.
 
 You see one line per stage in the chat, e.g. `Reviewer: approved, 0 blocking → review.json`.
+
+### Two tickets at once
+
+Run two workflows side by side (each with `--worktree`, in its own session). The CLI keeps them from
+stepping on each other:
+
+- **Builds**: the gate, the base build and the device install take one of a few machine-wide build
+  slots and wait for a free one (`execution.max_parallel_builds`, default 2).
+- **Device**: one run's Device stage at a time per device; the other run waits for it (`next` says
+  which run holds it). With `"device": {"max_emulators": 2}` in `.ai/android-workflow.json` it starts
+  a second emulator instead (another AVD, or the same one read-only).
+- **Base build**: one per repository at a time, shared by commit.
 
 ### 4. What you get
 

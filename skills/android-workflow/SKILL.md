@@ -111,10 +111,11 @@ python3 ~/.ai/bin/feature_workspace.py --repo-root T --ticket ID --title "…" [
 CLI next     --target T [--no-device] [--no-watch] [--level express|standard] [--dry-run]   (the next action)
 CLI setup    --target T [--source-repo MAIN]        CLI start    --target T --id ID --title "…" [--type bug --reproduction "…"] [--level L]
 CLI resume   --target T --question-id Q --answer "…" CLI update-spec --target T --surfaces ui --acceptance "a|b"
-CLI prebuild --target T [--wait [--if-running]|--status]           CLI gate     --target T
-CLI emulator --target T [--wait] [--stop]           CLI team     --target T [--check]
+CLI prebuild --target T [--wait [--timeout S]|--status] [--force]   CLI gate     --target T
+CLI emulator --target T [--wait] [--wait-free] [--stop]            CLI team     --target T [--check]
 CLI skills   --target T [--add NAME] [--drop NAME]    CLI delta    --target T   (since the last review)
-CLI finish   --target T [--skip-device "r"] [--no-device] [--draft "r"] CLI deliver  --target T [--subject "ID: …"] [--no-push|--no-pr]
+CLI finish   --target T [--skip-device "r"] [--no-device] [--draft "r"] [--accept-partial "what"]
+CLI deliver  --target T [--subject "ID: …"] [--no-push|--no-pr]
 CLI log --target T --stage <Role> --status started --note "<what it is about to do>"
 CLI log --target T --stage <Role> --status completed --note "…" [--file P]… [--tokens N] [--wait-seconds S]
 CLI log … --stage Implementer --slice S2 …           (one Implementer of a team)
@@ -124,7 +125,8 @@ CLI pr reply --target T --item ID (--body "…" | --skip "why")     CLI pr rereq
 CLI pr ci --target T --check NAME --as ours|unrelated|rerun --reason "…"
 CLI finish … [--keep-device "why nothing visible changed"]     CLI deliver … [--keep-body]
 CLI evidence capture|ingest|compare|list --target T [--phase before|after] [--name N] [--file F]
-CLI device replay --target T [--serial S] [--phase before|after]   (runs the saved Maestro flows by code: `after` installs the current build, `before` uses the installed base build)
+CLI device replay --target T [--serial S] [--phase before|after] [--install-base]   (runs the saved Maestro flows by code: `after` installs the current build, `before` the cached base APK)
+CLI device scaffold|install|release --target T [--serial S]   (flow templates from the plan's recipe; the current build on the device; give the device back)
 CLI status|list --target T                          CLI clean --target T [--ticket ID | --stale [HOURS]]
 ```
 
@@ -165,17 +167,24 @@ CLI status|list --target T                          CLI clean --target T [--tick
      `also` lists commands to start in the same turn, in the background (the emulator, the base
      build, a second `next` that says whether to capture the device `before`). `slices` → one
      `aw-implementer` per slice in the same turn, each logged with `--stage Implementer --slice S<n>`.
-     `first` → run it before spawning. `replay` → pass it to `aw-device`. `budget_seconds` → pass it to
-     `aw-device` (`before` writes the flows while the Implementer works, `after` replays them and judges).
+     `first` → run it before spawning. `replay`, `scaffold`, `done` and `serial` → pass them to `aw-device`
+     (the serial is leased to this run: no other run's Device uses it meanwhile). `budget_seconds` → pass
+     it to `aw-device` (`before` writes the flows while the Implementer works, `after` replays them and judges).
    - `checks`: run what `run` lists in the same turn: `CLI gate --target TARGET` (long command
      timeout, e.g. 30 min) and/or `agent` (`aw-reviewer`, `mode` `full` or `delta` with the `fixed`
      IDs) in the background. The review only reads code, so it never waits for the gate.
    - `fix` (a team): resume the Implementer of each slice in `routes` with its IDs (logged with its
      `--slice`), the Tech Lead for `Tech Lead`.
-   - `wait`, `wait_prebuild`, `wait_device`: an agent or a build is still running; run `command` if
-     given (long timeout or in the background), else wait for the agent's return, then `next`.
+   - `wait`, `wait_prebuild`, `wait_device`: an agent, a build or another run's Device stage is still
+     running; run `command` if given (long timeout or in the background), else wait for the agent's
+     return, then `next`. `wait_device` names the run that holds the device; `CLI emulator --wait-free`
+     returns when a device is free for this run (or starts one more emulator when
+     `device.max_emulators` > 1).
+   - `replay_before`: run `command` (the saved flows on the cached base APK, no agent: the `before`
+     column the run could not capture earlier), then `next`.
    - `finish`: run `command` as is. With `draft`, the PR opens as a draft listing what is open.
-   - `ask_user`: ask `question` once (batched), then run `then`.
+   - `ask_user`: ask `question` once (batched), then run `then`. With `options` (a PARTIAL device
+     check), offer them as the choices and run the one the developer picks.
    - `watch` / `done`: step 5 / the Done summary; run `also` (it closes the emulator the workflow
      started) first.
 
@@ -195,7 +204,10 @@ CLI status|list --target T                          CLI clean --target T [--tick
    still blocking after one fix, the second device FAIL in a row, a BLOCKED device or a fix round
    that changed nothing (in a PR round: `ask_user`, push nothing, never a draft); an approved review kept
    when only formatting changed since; the device `before` only with a passed base build and a
-   device; `finish --skip-device "<reason>"` only when adb sees no device.
+   free device, else a late `before` that replays the `after` flows on the base APK; a Device PASS
+   only on flows replayed for the current source (or `Maestro: unavailable — <why>`); a PASS with
+   Anomalies, or `PARTIAL`, asks the developer; `finish --skip-device "<reason>"` only when adb sees
+   no device.
    The gate itself: formatter (fixing first when it can), then compile, unit tests, detekt and lint
    for the touched modules in one build, plus compile and unit tests for modules that use a changed
    declaration, and a secret scan. Lint or format findings only in files the change does not touch,
@@ -242,10 +254,18 @@ CLI status|list --target T                          CLI clean --target T [--tick
     failing optional check blocks until the watcher calls it `unrelated`. Your own comments on the PR
     are yours: the watcher only answers other people and bots. Threads are answered, never resolved.
 
-Overlaps that cannot race on the working tree are safe: Planner with the base build and the
-emulator boot, the Implementer's reading with the base build (it edits only after
-`prebuild --wait --if-running`), the Implementer with the `before` capture, the gate with the
-Reviewer, Implementers of a team with each other (one owner per file).
+Overlaps that cannot race on the working tree are safe: Planner and Implementer with the base build
+(it builds the base commit in its own checkout, `~/.cache/android-workflow/base/<repo>/`, never in
+TARGET) and the emulator boot, the Implementer with the `before` capture, the gate with the Reviewer,
+Implementers of a team with each other (one owner per file).
+
+**Two runs at once** (two tickets, two worktrees) share the machine, and the CLI keeps them apart:
+- heavy builds (gate, base build, Device install) take one of `execution.max_parallel_builds` slots
+  (default 2; `ANDROID_WORKFLOW_BUILD_SLOTS`) and wait for a free one, logged in the stage log;
+- one base build per repository at a time; its APKs are cached by base commit, so the second run on
+  the same base gets them at once;
+- a device is leased to one run's Device stage at a time (`next` answers `wait_device` when the other
+  run holds it); the lease ends when that stage logs `completed` or `flows_ready`.
 
 ## Run files
 
@@ -282,7 +302,9 @@ Speak in **role names**, never bare T-codes. One line per stage:
 `{Role}: {result} → {artifact}`. Example: `Reviewer: approved, 0 blocking → review.json`.
 Durable log: `RUN/stage-log.md`; time and tokens per stage: `RUN/stage-metrics.json` (used to
 debug runs and find improvements). Every `log` for an agent stage passes the token total that
-agent's result reports (`--tokens N`); never estimate. When the agent already logged its own
+agent's result reports (`--tokens N`); never estimate. When the host's transcript names the agent
+(Claude Code, Codex) the CLI's own reading wins and a different `--tokens` is kept as
+`tokens_reported`; `processed_tokens` adds up every request of the round (cached input included). When the agent already logged its own
 `completed` (with `--file`), log `completed` again with `--tokens`: a second `completed` of the same
 round merges into the first, it is not counted twice (and the chat log keeps one line). A `log …
 --status started` that warns the toolkit code changed since `start` → run `CLI start` for the ticket
@@ -310,7 +332,10 @@ issue, then `aw-delivery` delivers a **draft** PR that lists them. Tell the user
 
 `finish` exited 0, TARGET has a source diff outside `.ai/workflow/`, and — unless a `--no-*` flag
 stopped earlier — the PR is open (and, while watching, until it is merged, closed or handed to the developer): ready for review when the gate passed, the review is `approved`
-and the device is PASS (or not required); a draft with its open issues otherwise.
+and the device is PASS (or not required, or PARTIAL and accepted by the developer); a draft with its open
+issues otherwise.
+If the PR Watcher was still watching, say in one line that it stops with this session and that
+`/android-workflow <ID> --watch` resumes it.
 Show: PR URL (and whether it is a draft), changed files, stage log path, and the absolute `media/before` and
 `media/after` paths so the user can drag the evidence into the PR. End with `office_message` from
 `CLI status --target TARGET`, as is, on its own line (also when you stop to ask the user).

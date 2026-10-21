@@ -199,6 +199,40 @@ def ingest(target: Path, phase: str, name: str, source: Path) -> dict[str, Any]:
     return {**item, "abs_path": str(destination)}
 
 
+ROUND_MARKER = ".fingerprint"
+HISTORY = "history"
+
+
+def archive_stale_after(target: Path, fingerprint: str, before: float | None = None) -> str | None:
+    """When a Device `after` round on new source ends: move the earlier round's captures (files older
+    than `before`, the round's start) out of `media/after/` to `media/history/<their fingerprint>/after/`,
+    so the PR table only ever shows the code that ships. A round on the same source keeps them, and a
+    round that never ran (`finish --keep-device`) moves nothing. Returns the archive path, if any."""
+    after = media_dir(target) / "after"
+    marker = after / ROUND_MARKER
+    previous = marker.read_text(encoding="utf-8").strip() if marker.is_file() else ""
+    files = [path for path in after.iterdir() if path.is_file() and path.name != ROUND_MARKER
+             and (before is None or path.stat().st_mtime < before - 1)] if after.is_dir() else []
+    archived = None
+    if files and previous != fingerprint:
+        label = previous or datetime.now(timezone.utc).strftime("round-%Y%m%dT%H%M%SZ")
+        destination = media_dir(target) / HISTORY / label / "after"
+        destination.mkdir(parents=True, exist_ok=True)
+        for path in files:
+            shutil.move(str(path), str(destination / path.name))
+        moved = {path.stem for path in files}
+        manifest = load_manifest(target)
+        items = manifest.get("items") or []
+        old = [item for item in items if item.get("phase") == "after" and item.get("name") in moved]
+        manifest["items"] = [item for item in items if item not in old]
+        manifest.setdefault("history", []).append({"fingerprint": previous or None, "path": str(destination), "items": old})
+        save_manifest(target, manifest)
+        archived = str(destination)
+    after.mkdir(parents=True, exist_ok=True)
+    marker.write_text(fingerprint + "\n", encoding="utf-8")
+    return archived
+
+
 def compare(target: Path) -> dict[str, Any]:
     """Pair this ticket's before and after captures by name in `media/compare.md`."""
     run = run_dir(target)

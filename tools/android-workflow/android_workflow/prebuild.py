@@ -1,21 +1,22 @@
-"""Build the base APK in the background while the Planner reads code.
+"""Build the base APK in the background while the Planner and the Implementer work.
 
-The base build only needs the unmodified source, and the Planner never edits it, so the two can
-overlap. The build is discovered from the project's recorded `build` command, and it is refused
-once the source has changed: an APK built from a half-edited tree would not be the "before" state.
+The build runs in the repository's base checkout (`base.py`), never in the ticket's own checkout, so
+it cannot race the Implementer's Gradle runs or pick up its edits, and it may start at any point of
+the run. Its APKs are cached by base commit: a second run on the same base gets them at once.
+`RUN/prebuild.json` records the outcome for the Device `before` and the late `before` replay.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import shlex
 import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Any
 
+from android_workflow.base import DEFAULT_BASE_TIMEOUT
 from android_workflow.paths import cache_dir, run_dir
 
 TOOLKIT_ROOT = Path(__file__).resolve().parent.parent
@@ -53,19 +54,6 @@ def pid_alive(pid: int | None) -> bool:
     return True
 
 
-def find_apks(target: Path, since: float) -> list[dict[str, Any]]:
-    """Debuggable-looking APKs written by the build, newest first."""
-    found = []
-    for path in target.glob("**/build/outputs/apk/**/*.apk"):
-        try:
-            stat = path.stat()
-        except OSError:
-            continue
-        if stat.st_mtime >= since - 1 and "androidTest" not in path.parts:
-            found.append({"path": str(path), "bytes": stat.st_size, "mtime": stat.st_mtime})
-    return sorted(found, key=lambda item: item["mtime"], reverse=True)
-
-
 def current_status(target: Path) -> dict[str, Any]:
     record = read_record(target)
     starting = record.get("pid") is None and time.time() - float(record.get("started_at") or 0) < 30
@@ -76,7 +64,8 @@ def current_status(target: Path) -> dict[str, Any]:
 
 
 def start_prebuild(target: Path, force: bool = False) -> dict[str, Any]:
-    from android_workflow.cli import read_json, source_changes
+    from android_workflow.base import base_commit, cached, repository
+    from android_workflow.cli import read_json
 
     existing = current_status(target)
     if existing.get("status") in {"running", "passed"}:
@@ -85,21 +74,32 @@ def start_prebuild(target: Path, force: bool = False) -> dict[str, Any]:
     spec = read_json(spec_path) if spec_path.is_file() else {}
     if not force and "T7" not in (spec.get("route") or []):
         return {"status": "skipped", "reason": "no device stage in this run's route"}
-    if source_changes(target):
-        return {"status": "skipped", "reason": "source already changed; a base build is no longer possible"}
     config_path = cache_dir(target) / "project-config.json"
     config = read_json(config_path) if config_path.is_file() else {}
     command = (config.get("commands") or {}).get("build")
     if not command:
         return {"status": "skipped", "reason": "no build command recorded by Setup"}
+    repo, sha = repository(target), base_commit(target)
+    if not repo or not sha:
+        return {"status": "skipped", "reason": "no git base commit to build"}
     log = run_dir(target) / "prebuild.log"
+    now = time.time()
+    hit = cached(repo["id"], sha)
+    if hit:
+        record = {"status": "passed", "command": command, "sha": sha, "repo": repo["id"], "cached": True,
+                  "started_at": now, "finished_at": now, "duration_seconds": 0.0, "apks": hit}
+        write_record(target, record)
+        return record
+    execution = config.get("execution") or {}
     record = {
         "status": "running",
         "command": command,
+        "sha": sha,
+        "repo": repo["id"],
         "log": str(log),
-        "started_at": time.time(),
+        "started_at": now,
         "pid": None,
-        "timeout_seconds": (config.get("execution") or {}).get("command_timeout_seconds", 900) * 2,
+        "timeout_seconds": execution.get("base_build_timeout_seconds") or DEFAULT_BASE_TIMEOUT,
     }
     write_record(target, record)
     code = (
@@ -117,39 +117,34 @@ def start_prebuild(target: Path, force: bool = False) -> dict[str, Any]:
 
 
 def worker(target_text: str) -> None:
-    from android_workflow.cli import source_changes
+    from android_workflow.base import build
+    from android_workflow.cli import read_json
 
     target = Path(target_text)
     record = read_record(target)
     started = record.get("started_at") or time.time()
-    log = Path(record["log"])
-    log.parent.mkdir(parents=True, exist_ok=True)
+    config_path = cache_dir(target) / "project-config.json"
+    config = read_json(config_path) if config_path.is_file() else {}
+
+    def waiting(why: str) -> None:
+        write_record(target, {**read_record(target), "waiting": why})
+
     try:
-        with log.open("w", encoding="utf-8") as handle:
-            result = subprocess.run(
-                shlex.split(record["command"]) + ["--console=plain"],
-                cwd=target, stdout=handle, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                timeout=record.get("timeout_seconds") or 1800, check=False,
-            )
-        code = result.returncode
-    except subprocess.TimeoutExpired:
-        code = 124
-    except OSError:
-        code = 127
-    tainted = bool(source_changes(target))
-    status = "failed" if code else ("tainted" if tainted else "passed")
+        result = build(target, record["command"], config=config, log=Path(record["log"]),
+                       timeout=float(record.get("timeout_seconds") or DEFAULT_BASE_TIMEOUT), on_wait=waiting)
+    except Exception as error:  # noqa: BLE001 - the record must never stay "running"
+        result = {"status": "failed", "reason": f"the base build crashed: {error}"}
+    final = {key: value for key, value in read_record(target).items() if key != "waiting"}
     write_record(target, {
-        **record,
-        "status": status,
-        "exit_code": code,
+        **final,
+        **result,
         "duration_seconds": round(time.time() - started, 1),
         "finished_at": time.time(),
-        "apks": find_apks(target, started) if code == 0 else [],
-        **({"reason": "source changed while the base build ran; rebuild the base before capturing"} if tainted and not code else {}),
+        "apks": result.get("apks") or [],
     })
 
 
-def wait_prebuild(target: Path, timeout: float = 1800.0, poll: float = 2.0) -> dict[str, Any]:
+def wait_prebuild(target: Path, timeout: float = float(DEFAULT_BASE_TIMEOUT), poll: float = 2.0) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     while True:
         record = current_status(target)

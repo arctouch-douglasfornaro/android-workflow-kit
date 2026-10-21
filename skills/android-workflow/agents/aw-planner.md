@@ -40,8 +40,10 @@ The only planning role for `/android-workflow`. One pass, short output.
    `before` agent turns it into Maestro flows that `after` replays by code, so write it as numbered
    steps it can script with no guessing: each step `action → selector (text, test tag or id) → what is
    visible next`, the preconditions (logged in, test data, flag), the deep link when the screen has one
-   (it beats tapping through screens), and for each behavior the **evidence name** it ends on
-   (`<surface>`, `<surface>-happy`, `<surface>-error-retry`).
+   (it beats tapping through screens), and for each behavior the **evidence name** it ends on, on the
+   step's own line as ``Capture `<surface>-happy` `` (`<surface>`, `<surface>-happy`,
+   `<surface>-error-retry`): `CLI device scaffold` makes one flow per name it finds there. Never name a
+   device serial or tell the Device which emulator to avoid: the CLI leases a device to the run.
    An AC about an error, a retry or an empty/offline state gets its own numbered recipe steps with
    the way to force it on the device (airplane mode, `adb shell svc wifi disable`, a debug toggle)
    and its proof is `both`, never "device optional". Only when nothing on a device can force it,

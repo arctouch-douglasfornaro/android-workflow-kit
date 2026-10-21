@@ -292,6 +292,32 @@ def agent_tokens(found: list[Transcript], stage: str, slice_id: str | None, sinc
     return (best[1], best[2]) if best else None
 
 
+def processed_tokens(found: list[Transcript], stage: str, slice_id: str | None, since: float) -> int | None:
+    """Every token this stage's agents sent and received since `since`, summed over their requests
+    (cached input included): what the round cost the host, beside the context size `agent_tokens` gives."""
+    total = 0
+    seen = False
+    for item in found:
+        if not _matches(item, stage, slice_id):
+            continue
+        for when, tokens in item.records:
+            if when >= since:
+                total += tokens
+                seen = True
+    return total if seen else None
+
+
+def measure_round(target: Path, run: Path, stage: str, slice_id: str | None, since: float) -> dict[str, Any] | None:
+    """`{tokens, host, processed}` for one stage's round, or None when no transcript names it."""
+    if os.environ.get("ANDROID_WORKFLOW_NO_USAGE"):
+        return None
+    found = transcripts(target, run, since)
+    latest = agent_tokens(found, stage, slice_id, since)
+    if not latest:
+        return None
+    return {"tokens": latest[0], "host": latest[1], "processed": processed_tokens(found, stage, slice_id, since)}
+
+
 def measure(target: Path, run: Path, stage: str, slice_id: str | None, since: float) -> tuple[int, str] | None:
     """One stage's agent, for `log`: what it used in the round that began at `since`."""
     if os.environ.get("ANDROID_WORKFLOW_NO_USAGE"):

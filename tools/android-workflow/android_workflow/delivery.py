@@ -95,6 +95,8 @@ def pull_request_disclosures(gate: dict[str, Any], state: dict[str, Any], body: 
         lines.append(
             f"**Lint:** {findings} finding(s) in {files} file(s) this PR does not touch predate it and were left as is."
         )
+    if state.get("device_partial") and "not verified" not in lower:
+        lines.append(f"**Device:** partly verified; not verified on a device: {state['device_partial']}")
     device = (state.get("stages") or {}).get("T7") or {}
     if device.get("status") == "skipped" and device.get("reason") not in (None, "not_required"):
         if "device" not in lower:
@@ -166,6 +168,63 @@ def open_pull_request(
     return {"status": "created", "url": urls[-1] if urls else None, "draft": draft}
 
 
+CHECKBOX = re.compile(r"^(\s*[-*]\s+\[)([ xX])(\]\s+)(.*)$")
+COMMENT = re.compile(r"<!--(.*?)-->")
+STRINGS_FILE = re.compile(r"(^|/)res/values[^/]*/strings[^/]*\.xml$")
+
+
+def _item_key(text: str) -> str:
+    return re.sub(r"\s+", " ", COMMENT.sub("", text)).strip().lower()
+
+
+def _drop_condition(comment: str, visual: bool, changed: list[str]) -> bool | None:
+    """A template line's `<!-- Delete if … -->`: True to delete it for this change, None when unknown."""
+    text = comment.lower()
+    if "delete" not in text:
+        return None
+    if "string" in text:
+        return not any(STRINGS_FILE.search(path) for path in changed)
+    if "ui" in re.findall(r"[a-z]+", text) or "visual" in text:
+        return not visual
+    return None
+
+
+def normalize_checklist(body: str, template: str, ticket_id: str | None, visual: bool, changed: list[str]) -> tuple[str, list[str]]:
+    """The template's checklist, decided by code instead of the author's guess.
+
+    Each checklist item from the template goes back to the template's own state (a human ticks what a
+    human must check), except the ticket link, ticked when the body names the ticket. An item whose
+    `<!-- Delete if … -->` condition holds for this change (no strings changed, not a UI change) is
+    removed. Returns the body and one note per change made."""
+    template_items = {}
+    for line in template.splitlines():
+        match = CHECKBOX.match(line)
+        if match:
+            template_items[_item_key(match.group(4))] = (match.group(2), " ".join(COMMENT.findall(match.group(4))))
+    if not template_items:
+        return body, []
+    notes: list[str] = []
+    out: list[str] = []
+    others = "\n".join(line for line in body.splitlines() if not CHECKBOX.match(line))
+    names_ticket = bool(ticket_id) and str(ticket_id) in others
+    for line in body.splitlines():
+        match = CHECKBOX.match(line)
+        key = _item_key(match.group(4)) if match else None
+        if not match or key not in template_items:
+            out.append(line)
+            continue
+        state, comment = template_items[key]  # the template's comment, even when the author dropped it
+        if _drop_condition(comment, visual, changed):
+            notes.append(f"removed: {key}")
+            continue
+        if re.search(r"\b(jira|issue|ticket)\b", key) and re.search(r"\blink", key) and names_ticket:
+            state = "x"
+        if state.lower() != match.group(2).lower():
+            notes.append(f"{'ticked' if state == 'x' else 'unticked'}: {key}")
+        out.append(f"{match.group(1)}{state}{match.group(3)}{match.group(4)}")
+    return "\n".join(out) + ("\n" if body.endswith("\n") else ""), notes
+
+
 def deliver(
     target: Path,
     subject: str | None = None,
@@ -231,6 +290,16 @@ def deliver(
         if media["unpaired"]:
             warnings.append("captures without a pair (use the same --name in before and after): "
                             + ", ".join(media["unpaired"]))
+    template_path = spec.get("pr_template")
+    if template_path and (target / template_path).is_file():
+        from android_workflow.cli import source_changes
+        from android_workflow.decide import visual
+
+        text, checklist = normalize_checklist(
+            text, (target / template_path).read_text(encoding="utf-8"), (spec.get("ticket") or {}).get("id"),
+            visual(spec), source_changes(target))
+        if checklist:
+            result["checklist"] = checklist
     disclosures = pull_request_disclosures(gate, state, text)
     if disclosures:
         text = text.rstrip() + "\n\n" + "\n".join(disclosures) + "\n"

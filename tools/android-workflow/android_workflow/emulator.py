@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from android_workflow.paths import cache_dir
+from android_workflow.paths import cache_dir, state_home
 
 RECORD_NAME = "emulator.json"
 DEFAULT_BOOT_TIMEOUT = 300.0
@@ -31,7 +31,7 @@ PORTS = range(5554, 5586, 2)
 
 
 def _record_path(_target: Path | None = None) -> Path:
-    return Path.home() / ".cache" / "android-workflow" / RECORD_NAME
+    return state_home() / RECORD_NAME
 
 
 def _read_record(target: Path) -> dict[str, Any]:
@@ -197,7 +197,7 @@ def status(target: Path) -> dict[str, Any]:
     if ours:
         serial = ours.get("serial")
         state = "ready" if serial in ready and _booted(adb, serial) else "booting"
-        return {**ours, "status": state, "started_by_workflow": True}
+        return {**ours, "status": state, "started_by_workflow": True, "devices": ready}
     if ready:
         # Several devices: an emulator first (a phone may be in the developer's hand), then the first one.
         serial = next((item for item in ready if item.startswith("emulator-")), ready[0])
@@ -323,11 +323,145 @@ def stop(target: Path, grace: float = 20.0) -> dict[str, Any]:
     return {"status": "stopped", "avd": record.get("avd"), "serial": record.get("serial")}
 
 
+EXTRA_NAME = "emulators-extra.json"
+DEFAULT_FREE_TIMEOUT = 1800.0
+
+
+def _extra_path() -> Path:
+    return state_home() / EXTRA_NAME
+
+
+def _extras() -> list[dict[str, Any]]:
+    try:
+        value = json.loads(_extra_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return [item for item in value if isinstance(item, dict) and _pid_alive(item.get("pid"))] if isinstance(value, list) else []
+
+
+def _save_extras(items: list[dict[str, Any]]) -> None:
+    path = _extra_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(items, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def _running_avds(adb: str, serials: list[str]) -> set[str]:
+    names = set()
+    for serial in serials:
+        if serial.startswith("emulator-"):
+            result = _run([adb, "-s", serial, "emu", "avd", "name"], timeout=10)
+            if result and result.returncode == 0 and result.stdout.strip():
+                names.add(result.stdout.strip().splitlines()[0].strip())
+    return names
+
+
+def start_extra(target: Path) -> dict[str, Any]:
+    """One more emulator for parallel runs (`device.max_emulators` > 1): an AVD that is not running
+    yet, else the configured one read-only (`-read-only` lets one AVD run twice). Closed by `stop`
+    once no live run uses it."""
+    adb, emulator = adb_path(target), emulator_path(target)
+    if not adb or not emulator:
+        return {"status": "unavailable", "reason": "adb or the emulator was not found"}
+    settings = _overrides(target)
+    listed = devices(adb)
+    running = _running_avds(adb, [item["serial"] for item in listed])
+    avds = list_avds(emulator)
+    wanted = settings.get("avd")
+    idle = [name for name in avds if name not in running]
+    chosen = (wanted if wanted in idle else idle[0]) if idle else (wanted if wanted in avds else (avds[0] if avds else None))
+    if not chosen:
+        return {"status": "unavailable", "reason": "no Android Virtual Device to start"}
+    taken = {item["serial"] for item in listed} | {item.get("serial") for item in _extras()}
+    port = next((number for number in PORTS if f"emulator-{number}" not in taken), None)
+    if port is None:
+        return {"status": "unavailable", "reason": "every emulator port is taken"}
+    command = [emulator, "-avd", chosen, "-port", str(port), "-no-snapshot-save", "-no-boot-anim"]
+    if chosen in running:
+        command.append("-read-only")
+    if settings.get("emulator_headless"):
+        command.append("-no-window")
+    log = state_home() / f"emulator-{port}.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with log.open("w", encoding="utf-8") as handle:
+        try:
+            process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=handle, stderr=subprocess.STDOUT,
+                                       start_new_session=True)
+        except OSError as error:
+            return {"status": "unavailable", "reason": f"could not start the emulator: {error}"}
+    record = {"serial": f"emulator-{port}", "pid": process.pid, "avd": chosen, "users": [str(target)],
+              "started_at": time.time(), "log": str(log), "command": command}
+    _save_extras([*_extras(), record])
+    return {**record, "status": "booting", "started_by_workflow": True}
+
+
+def _stop_extras(target: Path, grace: float = 20.0) -> list[str]:
+    """The extra emulators this app's run used: closed when no other live run still uses them."""
+    adb = adb_path(target)
+    kept, stopped = [], []
+    for record in _extras():
+        users = [user for user in record.get("users") or [] if user != str(target) and _still_using(user)]
+        if users:
+            kept.append({**record, "users": users})
+            continue
+        if adb:
+            _run([adb, "-s", str(record["serial"]), "emu", "kill"], timeout=15)
+        deadline = time.monotonic() + grace
+        while _pid_alive(record.get("pid")) and time.monotonic() < deadline:
+            time.sleep(0.5)
+        if _pid_alive(record.get("pid")):
+            try:
+                os.killpg(int(record["pid"]), signal.SIGTERM)
+            except OSError:
+                pass
+        stopped.append(str(record["serial"]))
+    _save_extras(kept)
+    return stopped
+
+
+def wait_free(target: Path, timeout: float | None = None, poll: float = 5.0) -> dict[str, Any]:
+    """Block until a ready device is free for this run (no other run's lease on it), starting one
+    more emulator first when `device.max_emulators` allows it. Returns the serial to use."""
+    from android_workflow.locks import free_serials, lease_of
+    from android_workflow.paths import run_dir
+
+    run = run_dir(target)
+    limit = timeout if timeout is not None else DEFAULT_FREE_TIMEOUT
+    deadline = time.monotonic() + limit
+    adb = adb_path(target)
+    started_extra = False
+    while True:
+        current = status(target)
+        serials = [str(current["serial"])] if current.get("serial") else []
+        serials += [str(item) for item in current.get("devices") or [] if str(item) not in serials]
+        ready = [serial for serial in serials if adb and _booted(adb, serial)]
+        free = free_serials(ready, run)
+        if free:
+            return {**current, "status": "free", "serial": free[0]}
+        maximum = int(_overrides(target).get("max_emulators") or 1)
+        if not started_extra and maximum > 1 and len(_extras()) + 1 < maximum:
+            extra = start_extra(target)
+            started_extra = True
+            if extra.get("status") != "booting":
+                current = {**current, "extra": extra}
+        if time.monotonic() >= deadline:
+            holders = {serial: Path(str((lease_of(serial) or {}).get("run") or "?")).name for serial in serials}
+            return {"status": "busy", "serial": None, "holders": holders,
+                    "reason": f"every device stayed in use by another run for {int(limit)}s"}
+        time.sleep(poll)
+
+
 def dispatch_emulator(target: Path, args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     if args.stop:
-        return stop(target), 0
+        result = stop(target)
+        extras = _stop_extras(target)
+        return ({**result, "extras_stopped": extras} if extras else result), 0
     if args.status:
         return status(target), 0
+    if getattr(args, "wait_free", False):
+        result = wait_free(target, timeout=args.timeout)
+        return result, 0 if result.get("status") == "free" else 1
     result = start(target, avd=args.avd, headless=True if args.headless else None)
     if args.wait and result.get("status") in {"booting", "connected"}:
         result = wait(target, timeout=args.timeout)
