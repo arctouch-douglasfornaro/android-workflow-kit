@@ -277,13 +277,14 @@ def assess(pr: dict[str, Any], viewer: str, watch: dict[str, Any], config: dict[
         if thread.get("isResolved") or not comments:
             continue
         last = comments[-1]
-        if last["id"] in posted or _login(last) == viewer:
+        if last["id"] in posted:
             answered.append(thread["id"])  # waiting for the reviewer: never resolved by us
             continue
         if last["id"] in handled:
             continue
         items.append({
             "id": last["id"], "kind": "thread", "thread": thread["id"], "author": _login(last), "bot": _is_bot(last),
+            "own": _login(last) == viewer,
             "path": thread.get("path"), "line": thread.get("line"), "outdated": bool(thread.get("isOutdated")),
             "url": last.get("url"), "body": last.get("body") or "",
             "conversation": [{"author": _login(c), "body": c.get("body") or "", "ours": c["id"] in posted}
@@ -293,12 +294,10 @@ def assess(pr: dict[str, Any], viewer: str, watch: dict[str, Any], config: dict[
     def top_level(node: dict[str, Any], kind: str) -> None:
         if node["id"] in posted or node["id"] in handled or not (node.get("body") or "").strip():
             return
-        if _login(node) == viewer:
-            return  # the developer's own words on the PR; instructions to the watcher come through the chat
         if _is_bot(node) and _login(node).lower().removesuffix("[bot]") not in bots and _login(node).lower() not in bots:
             return  # summaries, coverage reports: the checks already say what they found
         items.append({"id": node["id"], "kind": kind, "author": _login(node), "bot": _is_bot(node),
-                      "url": node.get("url"), "body": node.get("body") or "",
+                      "own": _login(node) == viewer, "url": node.get("url"), "body": node.get("body") or "",
                       **({"state": node.get("state")} if kind == "review" else {})})
 
     for comment in (pr.get("comments") or {}).get("nodes") or []:

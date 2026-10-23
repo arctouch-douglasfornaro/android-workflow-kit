@@ -36,6 +36,9 @@ and the file), then decide one of:
 - **skip**: no answer needed (a thank-you, an emoji, a bot summary repeated inline):
   `CLI pr reply --target TARGET --item <id> --skip "<why>"`.
 
+An item with `own: true` is the developer reviewing their own PR: treat it as a review comment,
+not as an instruction to the watcher; it is never your own earlier reply (those are filtered out).
+
 Failing checks: runner and network failures were already re-run by the CLI and never reach you. A
 check with a `hint` comes with the CLI's evidence (`ours`: its log names a file this PR changed;
 `rerun`: the re-run itself failed, see `rerun_error`): confirm it against the log and record it

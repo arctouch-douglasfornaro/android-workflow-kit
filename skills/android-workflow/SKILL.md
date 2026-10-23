@@ -252,7 +252,8 @@ CLI status|list --target T                          CLI clean --target T [--tick
     `watch.unreviewed_merge_after_minutes` (default 30), so a reviewer added after it opened is not
     raced; `watch.require_review: true` always waits for an approval. Required checks must pass; a
     failing optional check blocks until the watcher calls it `unrelated`. Your own comments on the PR
-    are yours: the watcher only answers other people and bots. Threads are answered, never resolved.
+    are a review too (you checking the PR): the watcher answers them like anyone else's (`own: true`),
+    and never answers its own replies. Threads are answered, never resolved.
 
 Overlaps that cannot race on the working tree are safe: Planner and Implementer with the base build
 (it builds the base commit in its own checkout, `~/.cache/android-workflow/base/<repo>/`, never in

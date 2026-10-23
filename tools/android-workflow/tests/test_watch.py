@@ -100,11 +100,15 @@ class AssessTests(unittest.TestCase):
         self.assertEqual(result["items"][0]["thread"], "T_1")
         self.assertEqual(result["items"][0]["path"], "app/Main.kt")
 
-    def test_a_thread_whose_last_word_is_ours_or_the_developers_waits_for_the_reviewer(self) -> None:
+    def test_a_thread_whose_last_word_is_ours_waits_for_the_reviewer(self) -> None:
         ours = thread(("C1", user("ana"), "Rename this"), ("C2", user(ME), "Done in abc123"))
         self.assertEqual(decide(pull_request(reviewThreads={"nodes": [ours]}), fresh_watch(posted=["C2"]))["action"], "merge")
-        by_hand = thread(("C1", bot("cursor"), "Stale reload"), ("C2", user(ME), "No longer applies"))
-        self.assertEqual(decide(pull_request(reviewThreads={"nodes": [by_hand]}))["action"], "merge")
+
+    def test_the_developers_own_review_comment_is_work(self) -> None:
+        by_hand = thread(("C1", user(ME), "This should use the shared dialog"))
+        result = decide(pull_request(reviewThreads={"nodes": [by_hand]}))
+        self.assertEqual([item["id"] for item in result["items"]], ["C1"])
+        self.assertTrue(result["items"][0]["own"])
 
     def test_a_new_reviewer_reply_after_ours_is_work_again(self) -> None:
         convo = thread(("C1", user("ana"), "Rename"), ("C2", user(ME), "Done"), ("C3", user("ana"), "Also the test"))
@@ -118,7 +122,7 @@ class AssessTests(unittest.TestCase):
         handled = thread(("C1", user("ana"), "Nit"))
         self.assertEqual(decide(pull_request(reviewThreads={"nodes": [handled]}), fresh_watch(handled={"C1": {}}))["action"], "merge")
 
-    def test_bot_review_threads_count_but_bot_summaries_and_own_comments_do_not(self) -> None:
+    def test_bot_review_threads_and_own_comments_count_but_bot_summaries_do_not(self) -> None:
         comments = {"nodes": [
             {"id": "IC1", "author": bot("codecov"), "body": "Coverage report", "url": "u"},
             {"id": "IC2", "author": user(ME), "body": "cc @ana", "url": "u"},
@@ -126,9 +130,11 @@ class AssessTests(unittest.TestCase):
         ]}
         pr = pull_request(comments=comments, reviewThreads={"nodes": [thread(("C1", bot("cursor"), "Bug: race"))]})
         result = decide(pr)
-        self.assertEqual(sorted(item["id"] for item in result["items"]), ["C1", "IC3"])
+        self.assertEqual(sorted(item["id"] for item in result["items"]), ["C1", "IC2", "IC3"])
         self.assertTrue(next(item for item in result["items"] if item["id"] == "C1")["bot"])
-        self.assertEqual(len(decide(pr, bots=["codecov"])["items"]), 3)
+        self.assertTrue(next(item for item in result["items"] if item["id"] == "IC2")["own"])
+        self.assertEqual(len(decide(pr, bots=["codecov"])["items"]), 4)
+        self.assertEqual(len(decide(pr, fresh_watch(posted=["IC2"]))["items"]), 2)
 
     def test_a_review_body_with_changes_requested_is_work(self) -> None:
         reviews = {"nodes": [{"id": "R1", "author": user("ana"), "state": "CHANGES_REQUESTED", "body": "Use the shared dialog", "url": "u"},
