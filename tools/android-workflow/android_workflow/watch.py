@@ -8,7 +8,9 @@ decides what to do about it (`aw-pr-watcher`).
 The next action is one of:
 - `respond`: new comments or failing checks to handle (written in full to `RUN/pr-inbox.json`);
 - `sync`: the base moved on (`behind`) or the branch conflicts with it;
-- `merge`: every check this PR needs passed and every requested reviewer approved;
+- `merge`: every check this PR needs passed and the PR is approved (GitHub's review decision, with
+  no change request open); a reviewer still requested does not hold an approved PR back unless
+  `watch.wait_for_requested_reviewers` is set;
 - `wait`: checks still run or reviewers have not answered yet (`waiting_for` says which);
 - `needs_user`: too many fix rounds; `merged` / `closed`: the PR is over.
 
@@ -38,6 +40,8 @@ DEFAULT_WATCH = {
     # PR opened is not raced. `require_review: true` always waits for an approval.
     "unreviewed_merge_after_minutes": 30,
     "require_review": False,
+    # An approved PR merges although another requested reviewer has not answered yet; true waits for them all.
+    "wait_for_requested_reviewers": False,
     # A check that is not required and still pending stops blocking this long after the last push.
     "optional_check_grace_minutes": 30,
     "merge_method": None,  # squash | merge | rebase; default: the first the repository allows, in that order
@@ -367,7 +371,8 @@ def assess(pr: dict[str, Any], viewer: str, watch: dict[str, Any], config: dict[
         waiting.append("failing checks: " + ", ".join(blocking_failed[:6]))
     if blocking_pending:
         waiting.append("checks running: " + ", ".join(blocking_pending[:6]))
-    if requested:
+    approved_pr = pr.get("reviewDecision") == "APPROVED" and bool(approved) and not changes_requested
+    if requested and (config.get("wait_for_requested_reviewers") or not approved_pr):
         waiting.append("review from " + ", ".join(requested))
     rereview = [login for login in changes_requested if login not in requested]
     if rereview:

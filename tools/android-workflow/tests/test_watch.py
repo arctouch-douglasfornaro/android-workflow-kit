@@ -193,6 +193,13 @@ class AssessTests(unittest.TestCase):
             {"author": user("ana"), "state": "APPROVED"}, {"author": user("bob"), "state": "CHANGES_REQUESTED"}]})
         self.assertIn("re-review from bob", decide(changes)["waiting_for"])
 
+    def test_an_approved_pr_merges_although_another_requested_reviewer_has_not_answered(self) -> None:
+        pending = pull_request(reviewRequests={"nodes": [{"requestedReviewer": user("bob")}]})  # ana approved
+        self.assertEqual(decide(pending)["action"], "merge")
+        held = decide(pending, wait_for_requested_reviewers=True)
+        self.assertEqual(held["action"], "wait")
+        self.assertIn("review from bob", held["waiting_for"])
+
     def test_without_reviewers_it_merges_only_after_the_pr_has_been_open_a_while(self) -> None:
         nobody = {"latestOpinionatedReviews": {"nodes": []}, "reviewDecision": None}
         young = decide(pull_request(createdAt=stamp(300), **nobody))

@@ -256,8 +256,9 @@ CLI status|list --target T                          CLI clean --target T [--tick
     The rest reach `aw-pr-watcher` with a `hint` (`ours` when the log names a file this PR changed).
     - `merged` / `closed` → `CLI log --stage "PR Watcher" --status completed --note "<merged|closed>"`,
       stop. `needs_user` (too many rounds, or watched for `watch.max_hours`) → tell the developer and stop.
-    Merge rule: every reviewer requested on the PR must approve and nobody may still be asking for
-    changes; without any reviewer, the PR merges once green and open for
+    Merge rule: the PR is approved (GitHub's review decision) and nobody may still be asking for
+    changes; a reviewer still requested who has not answered does not hold an approved PR back
+    (`watch.wait_for_requested_reviewers: true` waits for them all); without any reviewer, the PR merges once green and open for
     `watch.unreviewed_merge_after_minutes` (default 30), so a reviewer added after it opened is not
     raced; `watch.require_review: true` always waits for an approval. Required checks must pass; a
     failing optional check blocks until the watcher calls it `unrelated`. Your own comments on the PR
