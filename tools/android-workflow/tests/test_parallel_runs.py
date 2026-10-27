@@ -19,6 +19,7 @@ from unittest import mock
 
 from android_workflow import decide, locks
 from android_workflow.cli import read_json, source_fingerprint
+from android_workflow.paths import cache_dir
 from android_workflow.delivery import normalize_checklist
 from android_workflow.evidence import archive_stale_after, load_manifest, record_item
 from android_workflow.flows import evidence_names, recipe, scaffold
@@ -97,12 +98,35 @@ class DeviceLeaseTests(unittest.TestCase):
             self.assertEqual(locks.free_serials(["emu-1", "emu-2"], b), ["emu-2"])
             self.assertEqual(locks.free_serials(["emu-1"], a), ["emu-1"])  # its own lease
 
-    def test_the_lease_ends_with_the_device_round(self) -> None:
+    def test_the_lease_lasts_until_the_run_finishes(self) -> None:
         with StateHome() as home:
             a, b = self.run_folder(home, "A-1", True), self.run_folder(home, "B-1", True)
             locks.acquire("emu-1", a)
             (a / "run-state.json").write_text(json.dumps({"stages": {"T7": {"status": "completed"}}}), encoding="utf-8")
+            self.assertEqual(locks.free_serials(["emu-1"], b), [])  # between rounds it is still A's device
+            (a / "run-state.json").write_text(json.dumps({"status": "completed", "stages": {}}), encoding="utf-8")
             self.assertEqual(locks.free_serials(["emu-1"], b), ["emu-1"])
+
+    def test_a_run_left_idle_lets_its_device_go(self) -> None:
+        with StateHome() as home:
+            a, b = self.run_folder(home, "A-1", True), self.run_folder(home, "B-1", True)
+            locks.acquire("emu-1", a)
+            old = time.time() - locks.LEASE_IDLE_SECONDS - 60
+            (a / "run-state.json").write_text(json.dumps({"updated_at": old, "stages": {}}), encoding="utf-8")
+            with locks._leases() as live:
+                live["emu-1"]["since"] = old
+            self.assertEqual(locks.free_serials(["emu-1"], b), ["emu-1"])
+
+    def test_a_command_still_on_the_device_keeps_it_after_the_run_lets_go(self) -> None:
+        with StateHome() as home:
+            a, b = self.run_folder(home, "A-1", True), self.run_folder(home, "B-1", True)
+            locks.acquire("emu-1", a)
+            locks.acquire("emu-1", a, pid=os.getpid())  # an install still running
+            self.assertEqual(locks.release(a), [])  # the stage ended under it: the device is not given back yet
+            (a / "run-state.json").write_text(json.dumps({"status": "completed", "stages": {}}), encoding="utf-8")
+            self.assertIsNone(locks.acquire("emu-1", b))
+            locks.release(a, serial="emu-1", pid=os.getpid())  # the install exits
+            self.assertIsNotNone(locks.acquire("emu-1", b))
 
     def test_a_command_lease_dies_with_its_process(self) -> None:
         with StateHome() as home:
@@ -149,6 +173,35 @@ class DecideDeviceTests(test_decide.RunTests):
                 lease = locks.lease_of("emu-1")
         self.assertEqual((answer["next"], answer["command"]), ("wait_device", "CLI emulator --target TARGET --wait"))
         self.assertIsNone(lease)
+
+    def test_a_returned_implementer_whose_completed_was_never_logged_is_named(self) -> None:
+        with StateHome():
+            self.start("--level", "express")
+            test_decide.cli("update-spec", "--target", self.target, "--acceptance", "a", "--surfaces", "ui")
+            self.assertEqual(self.next()["agent"], "aw-implementer")
+            waiting = self.next()
+            (self.root / test_decide.SCREEN).write_text("package com.example\nclass ProfileScreen { val a = 1 }\n",
+                                                        encoding="utf-8")
+            (self.rundir / "implementation-notes.md").write_text("# Decisions\n\nDone.\n", encoding="utf-8")
+            stuck = self.next()
+        self.assertNotIn("if_returned", waiting)
+        self.assertEqual(stuck["next"], "wait")
+        self.assertIn("--stage Implementer --status completed", stuck["if_returned"])
+
+    def test_the_base_build_starts_only_for_a_change_with_something_to_see(self) -> None:
+        with StateHome():
+            ui = self.start("--level", "standard", "--surfaces", "ui")
+            visual = self.next()
+        self.assertIn("T7", ui["route"])
+        self.assertIn("CLI prebuild --target TARGET", visual["also"])
+        self.tearDown()
+        self.setUp()
+        with StateHome():
+            audio = self.start("--level", "standard", "--surfaces", "audio")
+            silent = self.next()
+        self.assertIn("T7", audio["route"])
+        self.assertIn("CLI emulator --target TARGET", silent["also"])
+        self.assertNotIn("CLI prebuild --target TARGET", silent["also"])
 
     def test_the_device_spawn_leases_the_device_to_this_run(self) -> None:
         with StateHome():
@@ -337,6 +390,25 @@ class ScaffoldTests(test_decide.RunTests):
         self.assertTrue(os.access(flows / "start-round-error-retry.sh", os.X_OK))
         self.assertEqual(again["written"], [])  # never overwrites a flow the agent filled in
 
+    def test_an_audio_ticket_gets_a_logcat_flow_that_keeps_only_the_matching_lines(self) -> None:
+        self.start("--level", "express")
+        spec = read_json(self.rundir / "ticket-spec.json")
+        (self.rundir / "ticket-spec.json").write_text(json.dumps({**spec, "surfaces": ["audio"]}), encoding="utf-8")
+        result = scaffold(self.root, {"device": {"event_log_source": "EventLogInterceptorManager"}})
+        script = (self.rundir / "media/flows" / f"{result['evidence_names'][0]}.sh").read_text(encoding="utf-8")
+        self.assertIn("PATTERN='EventLogInterceptorManager.*TODO_event_name'", script)
+        self.assertIn("*TODO*) echo", script)  # an unfilled pattern fails instead of matching every event
+        self.assertIn('logcat -d | grep -E "$PATTERN"', script)
+        self.assertNotIn("logcat -d >", script)  # never the full log
+
+    def test_an_ac_about_audio_keeps_the_device_stage(self) -> None:
+        self.start("--level", "express")
+        test_decide.cli("update-spec", "--target", str(self.root), "--surfaces", "",
+                        "--acceptance", "Opening a card plays its audio once|One autoplay event is logged")
+        spec = read_json(self.rundir / "ticket-spec.json")
+        self.assertEqual(spec["surfaces_from_ac"], ["audio", "analytics"])
+        self.assertIn("T7", spec["route"])
+
 
 @own_tests
 class TokenTests(test_decide.RunTests):
@@ -384,6 +456,70 @@ class LateBeforeReplayTests(test_decide.ReplayTests):
         self.assertEqual(result["status"], "no_base_apk")
 
 
+@own_tests
+class DeviceBuildTests(test_decide.ReplayTests):
+    """The after APK is built before the device is held, then only `adb install`ed on it."""
+
+    def with_apk_build(self) -> Path:
+        script = self.root / "make-apk.sh"
+        leases = Path(os.environ[STATE_HOME_ENV]) / "locks" / "device-leases.json"
+        script.write_text("#!/bin/sh\n"
+                          f"cat '{leases}' > leases-during-build.json 2>/dev/null || echo '{{}}' > leases-during-build.json\n"
+                          "echo build >> build-calls.log\n"
+                          "mkdir -p app/build/outputs/apk/debug\n"
+                          "printf 'apk' > app/build/outputs/apk/debug/app-debug.apk\n", encoding="utf-8")
+        script.chmod(0o755)
+        config_path = cache_dir(self.root) / "project-config.json"
+        config = read_json(config_path)
+        config["commands"]["build"] = "./make-apk.sh"
+        config.setdefault("device", {})["app_module"] = ":app"
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+        (self.bin / "adb").write_text('#!/bin/sh\necho "$@" >> "$(dirname "$0")/adb-calls.log"\necho Success\n',
+                                      encoding="utf-8")
+        os.chmod(self.bin / "adb", 0o755)
+        return self.root / "app/build/outputs/apk/debug/app-debug.apk"
+
+    def test_the_apk_is_built_with_no_device_held_and_adb_installed_once_per_source(self) -> None:
+        (self.flows / "profile.yaml").write_text("- takeScreenshot: profile\n", encoding="utf-8")
+        with StateHome():
+            apk = self.with_apk_build()
+            first, code = self.replay()
+            during = read_json(self.root / "leases-during-build.json")
+            again, _ = self.replay()  # same source: the APK is reused, not built again
+        calls = (self.bin / "adb-calls.log").read_text(encoding="utf-8")
+        self.assertEqual((first["status"], code), ("replayed", 0))
+        self.assertNotIn("emu-1", during)  # the build ran before the device was leased
+        self.assertIn(f"-s emu-1 install -r {apk}", calls)
+        self.assertFalse(any("installDebug" in call for call in test_decide.gradle_calls(self.root)))
+        self.assertEqual(first["apk"], str(apk))
+        self.assertIn("build_seconds", first)
+        self.assertFalse(first["over_budget"])
+        self.assertEqual((self.root / "build-calls.log").read_text(encoding="utf-8").count("build"), 1)
+        self.assertEqual(again["build_seconds"], 0.0)
+
+    def test_a_failed_build_never_takes_the_device(self) -> None:
+        (self.flows / "profile.yaml").write_text("- takeScreenshot: profile\n", encoding="utf-8")
+        with StateHome():
+            self.with_apk_build()
+            (self.root / "make-apk.sh").write_text("#!/bin/sh\necho 'e: Broken.kt:1 boom'\nexit 1\n", encoding="utf-8")
+            result, code = self.replay()
+            lease = locks.lease_of("emu-1")
+        self.assertEqual((result["status"], code), ("install_failed", 1))
+        self.assertIn("boom", result["reason"])
+        self.assertIsNone(lease)
+        self.assertFalse((self.bin / "adb-calls.log").exists())
+
+    def test_a_logcat_flow_passes_on_its_event_count(self) -> None:
+        (self.flows / "autoplay-events.yaml").write_text("- launchApp\n", encoding="utf-8")
+        (self.flows / "autoplay-events.sh").write_text(
+            '#!/bin/sh\nprintf "I EventLog: autoplay_audio\\n" > "$AW_OUT/autoplay-events-events.txt"\n', encoding="utf-8")
+        os.chmod(self.flows / "autoplay-events.sh", 0o755)
+        with StateHome():
+            result, code = self.replay()
+        self.assertEqual(result["flows"][0]["status"], "passed")
+        self.assertEqual(result["flows"][0]["events"]["matches"], 1)
+
+
 class WaitFreeTests(unittest.TestCase):
     def test_waits_until_the_other_run_leaves_the_device(self) -> None:
         from android_workflow import emulator
@@ -398,7 +534,7 @@ class WaitFreeTests(unittest.TestCase):
 
             def leave() -> None:
                 time.sleep(0.3)
-                (other / "run-state.json").write_text(json.dumps({"stages": {"T7": {"status": "completed"}}}),
+                (other / "run-state.json").write_text(json.dumps({"status": "completed", "stages": {}}),
                                                       encoding="utf-8")
 
             threading.Thread(target=leave).start()

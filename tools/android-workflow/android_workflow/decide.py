@@ -35,6 +35,7 @@ DEVICE_MAX_FAILS = 2    # the second device FAIL: draft
 BEFORE_BUDGET_SECONDS = 600  # the Device `before` agent stops here: the Implementer is working meanwhile
 AFTER_BUDGET_SECONDS = 300   # the Device `after` agent: replay, judge, a few hand-driven checks
 DECISIONS_FILE = "decisions.jsonl"
+BOOTING = "booting"  # how a `wait_device` for a device starting for this run begins its `why`
 
 
 # --- level -------------------------------------------------------------------------------------
@@ -274,6 +275,8 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
             return _answer("watch", "the PR is open", command="CLI pr wait --target TARGET", also=stop)
         return _answer("done", "the run is delivered", command="CLI status --target TARGET", also=stop)
 
+    if record and not no_device and "T7" in (spec.get("route") or []):
+        _want_device(agent_dir)
     level = str(spec.get("level") or "standard")
     planner = stages.get("T3") or {}
     if (level == "standard" and spec.get("express_allowed") and spec.get("level_source") == "cli"
@@ -312,8 +315,12 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
         device = _device_before(target, agent_dir, spec, state, no_device, record)
         if device:
             return device
-        return _answer("wait", "the Implementer is working" + (f" ({', '.join(working)})" if working else ""),
-                       agent="aw-implementer")
+        done = not working and not implementation_errors(target)
+        return _answer("wait", "the Implementer is working" + (f" ({', '.join(working)})" if working else "")
+                       + ("; its notes look complete" if done else ""), agent="aw-implementer",
+                       # A returned agent whose `completed` was never logged leaves `next` waiting forever.
+                       if_returned='CLI log --target TARGET --stage Implementer --status completed --note "<summary>", '
+                                   "then CLI next --target TARGET" if done else None)
     if lead.get("status") == "started":
         return _answer("wait", "the Tech Lead is working", agent="aw-tech-lead")
 
@@ -366,6 +373,8 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
             fixed=[item.get("id") for item in review_blocking(review)] if delta and "reviewer" in todo else None,
             stage="Reviewer" if "reviewer" in todo else None,
             note=("delta review of the fix" if delta else "independent review of the diff") if "reviewer" in todo else None,
+            also=["CLI device build --target TARGET (background: the APK the Device installs, built before it "
+                  "takes a device)"] if "gate" in todo and "T7" in (spec.get("route") or []) and not no_device else None,
         )
 
     findings: list[str] = []
@@ -416,30 +425,28 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
             return _answer("wait", "the Device agent is working", agent="aw-device")
         if no_device:
             return _finish(spec, skip="the developer asked for --no-device", no_device=True)
-        from android_workflow.emulator import status as device_status
-
-        try:
-            current = device_status(target)
-        except Exception:  # noqa: BLE001 - no SDK: no device
-            current = {"status": "unavailable", "reason": "adb is not available"}
-        if current.get("status") == "booting":  # lease it once it is up, then hand it to the Device
-            return _answer("wait_device", "the emulator is booting", command="CLI emulator --target TARGET --wait",
-                           then="CLI next --target TARGET")
-        if current.get("status") in {"connected", "ready"}:
-            serial, busy = _claim_device(agent_dir, current, record)
-            if busy is not None:
-                return busy
+        serial, waiting, reason = _device_for(target, agent_dir, record)
+        if waiting is not None:
+            return waiting
+        if serial:
             return _spawn("aw-device", "the change passed the gate and the review: verify it on the device",
                           stage="Device", mode="after", serial=serial,
                           replay=_replay_hint(agent_dir),
                           scaffold=None if flows_saved(agent_dir) else "CLI device scaffold --target TARGET",
                           budget_seconds=AFTER_BUDGET_SECONDS,
                           note="after: verify the AC on the device")
-        reason = str(current.get("reason") or current.get("status") or "no device")
-        if current.get("status") == "unauthorized":
-            return _answer("ask_user", "a phone waits for its USB-debugging prompt", question="accept USB debugging on the phone")
         return _finish(spec, skip=f"no device: {reason}")
     return _finish(spec)
+
+
+def _want_device(agent_dir: Path) -> None:
+    """Tell the machine this run has a Device stage ahead, so a free emulator stays open for it."""
+    from android_workflow.locks import want
+
+    try:
+        want(agent_dir)
+    except OSError:
+        pass
 
 
 def _finish(spec: dict[str, Any], skip: str | None = None, no_device: bool = False) -> dict[str, Any]:
@@ -490,7 +497,9 @@ def _fix_round(agent_dir: Path, team: dict[str, Any], findings: list[str], revie
 def _background(spec: dict[str, Any], no_device: bool, implementer: bool = False) -> list[str]:
     if "T7" not in (spec.get("route") or []) or no_device:
         return []
-    steps = ["CLI emulator --target TARGET", "CLI prebuild --target TARGET"]
+    # A change with nothing to see starts no base build: it writes its flows in `after` (or in `before`
+    # when another run's base build is already cached) and leaves the build slot to the gates.
+    steps = ["CLI emulator --target TARGET", *(["CLI prebuild --target TARGET"] if visual(spec) else [])]
     if implementer:
         steps.append("CLI next --target TARGET (in the same turn: it says whether to capture the device `before`)")
     return steps
@@ -519,28 +528,19 @@ def _device_before(target: Path, agent_dir: Path, spec: dict[str, Any], state: d
                        command="CLI prebuild --target TARGET --wait --timeout 600", then="CLI next --target TARGET")
     if build.get("status") != "passed":
         return _skip_before(target, f"no base APK (prebuild {build.get('status')})", record)
-    from android_workflow.emulator import status as device_status
-
-    try:
-        current = device_status(target)
-    except Exception:  # noqa: BLE001
-        current = {"status": "unavailable"}
-    if current.get("status") == "booting":
-        return _answer("wait_device", "the emulator is booting", command="CLI emulator --target TARGET --wait",
-                       then="CLI next --target TARGET")
-    if current.get("status") not in {"connected", "ready"}:
-        return _skip_before(target, f"no device ({current.get('status')})", record)
-    serial, busy = _claim_device(agent_dir, current, record)
-    if busy is not None:
-        return None  # another run is on the device: the late `before` (after the `after`) covers it
-    current = {**current, "serial": serial}
+    serial, waiting, reason = _device_for(target, agent_dir, record)
+    if waiting is not None:
+        # Booting for this run: wait for it. Every device busy: the late `before` (after the `after`) covers it.
+        return waiting if waiting["why"].startswith(BOOTING) else None
+    if not serial:
+        return _skip_before(target, f"no device ({reason})", record)
     if record:
         _mark_before(target, "spawned")
     capture = visual(spec)
     return _spawn("aw-device", "a base APK and a device are ready: "
                   + ("capture the before state and write the flows the after run replays" if capture
                      else "write the flows the after run replays"),
-                  stage="Device", mode="before", serial=current.get("serial"), capture=capture,
+                  stage="Device", mode="before", serial=serial, capture=capture,
                   budget_seconds=BEFORE_BUDGET_SECONDS, scaffold="CLI device scaffold --target TARGET",
                   done='CLI log --target TARGET --stage Device --status flows_ready --note "<n> flow(s) saved"',
                   note="before: capture the current screen and write the flows" if capture else "before: write the flows")
@@ -559,22 +559,36 @@ def _partial_options() -> dict[str, str]:
     }
 
 
-def _claim_device(agent_dir: Path, current: dict[str, Any], record: bool) -> tuple[str | None, dict[str, Any] | None]:
-    """A ready device no other run is using, leased to this run (when `record`), or the `wait_device`
-    answer when every device is taken. Two runs never install their builds on one device at once."""
-    from android_workflow.locks import acquire, free_serials, lease_of
+def _device_for(target: Path, agent_dir: Path, record: bool) -> tuple[str | None, dict[str, Any] | None, str]:
+    """(serial, wait answer, reason): the device leased to this run for the rest of it, or the
+    `wait_device` answer (`BOOTING` in its `why` when a device is starting for this run, not busy), or
+    neither and the reason there is no device. A device nobody uses is reused; with every device taken, one more emulator
+    starts for this run (`device.max_emulators`). Two runs never install their builds on one device."""
+    from android_workflow.emulator import claim
 
-    serials = [str(current.get("serial"))] if current.get("serial") else []
-    serials += [str(serial) for serial in current.get("devices") or [] if str(serial) not in serials]
-    free = free_serials(serials, agent_dir)
-    if free:
-        if record:
-            acquire(free[0], agent_dir, mode="agent")
-        return free[0], None
-    holders = {serial: Path(str((lease_of(serial) or {}).get("run") or "?")).name for serial in serials}
-    return None, _answer("wait_device", "another run is using the device: " + ", ".join(
-        f"{serial} ({ticket})" for serial, ticket in holders.items()),
-        command="CLI emulator --target TARGET --wait-free", then="CLI next --target TARGET")
+    try:
+        current = claim(target, record=record)
+    except Exception as error:  # noqa: BLE001 - no SDK: no device
+        current = {"status": "unavailable", "reason": f"adb is not available ({error})"}
+    state = current.get("status")
+    if state in {"ready", "connected"}:
+        return str(current["serial"]), None, ""
+    if state in {"booting", "would_start"}:
+        what = (f"the emulator {current.get('serial')} ({current.get('avd')}) is booting for this run"
+                if current.get("started_by_workflow") else "a connected device is still starting") \
+            if state == "booting" else "no device is free: one more emulator starts for this run"
+        return None, _answer("wait_device", BOOTING + ": " + what, command="CLI emulator --target TARGET --wait",
+                             then="CLI next --target TARGET"), ""
+    if state == "busy":
+        holders = current.get("holders") or {}
+        return None, _answer("wait_device", "every device is in use: " + (", ".join(
+            f"{serial} ({label})" for serial, label in holders.items()) or str(current.get("reason"))),
+            reason=current.get("reason"), command="CLI emulator --target TARGET --wait-free",
+            then="CLI next --target TARGET"), ""
+    if state == "unauthorized":
+        return None, _answer("ask_user", "a phone waits for its USB-debugging prompt",
+                             question="accept USB debugging on the phone", then="CLI next --target TARGET"), ""
+    return None, None, str(current.get("reason") or state or "no device")
 
 
 def _late_before(target: Path, agent_dir: Path, spec: dict[str, Any], state: dict[str, Any],
@@ -604,20 +618,17 @@ def _late_before(target: Path, agent_dir: Path, spec: dict[str, Any], state: dic
             _mark_before(target, "late: building")
         return _answer("wait_prebuild", "no base APK yet: build the base for the late before capture",
                        command="CLI prebuild --target TARGET --force --wait", then="CLI next --target TARGET")
-    from android_workflow.emulator import status as device_status
-
-    try:
-        current = device_status(target)
-    except Exception:  # noqa: BLE001
-        current = {"status": "unavailable"}
-    if current.get("status") not in {"connected", "ready"}:
+    serial, waiting, reason = _device_for(target, agent_dir, record)
+    if waiting is not None and waiting["why"].startswith(BOOTING):
+        return waiting
+    if not serial:
         if record:
-            _mark_before(target, f"late: skipped, no device ({current.get('status')})")
+            _mark_before(target, f"late: skipped, no device ({reason or 'every device is in use'})")
         return None
     if record:
         _mark_before(target, "late: replaying")
     return _answer("replay_before", "the after flows exist: replay them on the base APK for the before captures",
-                   command=f"CLI device replay --target TARGET --serial {current.get('serial')} --phase before --install-base",
+                   command=f"CLI device replay --target TARGET --serial {serial} --phase before --install-base",
                    then="CLI next --target TARGET")
 
 

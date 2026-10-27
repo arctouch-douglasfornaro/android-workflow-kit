@@ -126,7 +126,7 @@ CLI pr ci --target T --check NAME --as ours|unrelated|rerun --reason "…"
 CLI finish … [--keep-device "why nothing visible changed"]     CLI deliver … [--keep-body]
 CLI evidence capture|ingest|compare|list --target T [--phase before|after] [--name N] [--file F]
 CLI device replay --target T [--serial S] [--phase before|after] [--install-base]   (runs the saved Maestro flows by code: `after` installs the current build, `before` the cached base APK)
-CLI device scaffold|install|release --target T [--serial S]   (flow templates from the plan's recipe; the current build on the device; give the device back)
+CLI device scaffold|build|install|release --target T [--serial S]   (flow templates from the plan's recipe; the current APK with no device held; it installed on the device; give the device back)
 CLI status|list --target T                          CLI clean --target T [--ticket ID | --stale [HOURS]]
 ```
 
@@ -168,25 +168,28 @@ CLI status|list --target T                          CLI clean --target T [--tick
      build, a second `next` that says whether to capture the device `before`). `slices` → one
      `aw-implementer` per slice in the same turn, each logged with `--stage Implementer --slice S<n>`.
      `first` → run it before spawning. `replay`, `scaffold`, `done` and `serial` → pass them to `aw-device`
-     (the serial is leased to this run: no other run's Device uses it meanwhile). `budget_seconds` → pass
+     (the serial is leased to this run until `finish`: no other run installs on it). `budget_seconds` → pass
      it to `aw-device` (`before` writes the flows while the Implementer works, `after` replays them and judges).
    - `checks`: run what `run` lists in the same turn: `CLI gate --target TARGET` (long command
      timeout, e.g. 30 min) and/or `agent` (`aw-reviewer`, `mode` `full` or `delta` with the `fixed`
-     IDs) in the background. The review only reads code, so it never waits for the gate.
+     IDs) in the background. The review only reads code, so it never waits for the gate. Start `also`
+     in the background too (`CLI device build`: the APK the Device installs, built before it holds a
+     device).
    - `fix` (a team): resume the Implementer of each slice in `routes` with its IDs (logged with its
      `--slice`), the Tech Lead for `Tech Lead`.
-   - `wait`, `wait_prebuild`, `wait_device`: an agent, a build or another run's Device stage is still
-     running; run `command` if given (long timeout or in the background), else wait for the agent's
-     return, then `next`. `wait_device` names the run that holds the device; `CLI emulator --wait-free`
-     returns when a device is free for this run (or starts one more emulator when
-     `device.max_emulators` > 1).
+   - `wait`, `wait_prebuild`, `wait_device`: an agent, a build or a device is still busy; run
+     `command` if given (long timeout or in the background), else wait for the agent's return, then
+     `next`. A `wait` with `if_returned`: when that agent already returned, run it (its `completed`
+     was never logged, so `next` would wait forever). `wait_device` starting with `booting`: an
+     emulator is starting for this run (`CLI emulator --wait`); otherwise it names the run holding each
+     device and `CLI emulator --wait-free` returns once this run has one.
    - `replay_before`: run `command` (the saved flows on the cached base APK, no agent: the `before`
      column the run could not capture earlier), then `next`.
    - `finish`: run `command` as is. With `draft`, the PR opens as a draft listing what is open.
    - `ask_user`: ask `question` once (batched), then run `then`. With `options` (a PARTIAL device
      check), offer them as the choices and run the one the developer picks.
-   - `watch` / `done`: step 5 / the Done summary; run `also` (it closes the emulator the workflow
-     started) first.
+   - `watch` / `done`: step 5 / the Done summary; run `also` (`CLI emulator --stop`: gives the device
+     back and closes the emulators the workflow started that no other run is waiting for) first.
 
    Agent returns that `next` cannot read from files are yours: `NEEDS_INPUT` (Planner) → batch the
    questions to the user and STOP until answered, then resume it; `NEEDS_OTHER_SLICE` → the Tech
@@ -203,11 +206,13 @@ CLI status|list --target T                          CLI clean --target T [--tick
    Reviewer together, one fix round for both; a draft after the third red gate in a row, a review
    still blocking after one fix, the second device FAIL in a row, a BLOCKED device or a fix round
    that changed nothing (in a PR round: `ask_user`, push nothing, never a draft); an approved review kept
-   when only formatting changed since; the device `before` only with a passed base build and a
-   free device, else a late `before` that replays the `after` flows on the base APK; a Device PASS
+   when only formatting changed since; a device route for `ui`, navigation, lifecycle… and for `audio`
+   and `analytics` (an AC about sound or events adds them back whatever the Planner's list says); the
+   base build only for a visual change; the device `before` only with a passed base build and a
+   device, else a late `before` that replays the `after` flows on the base APK; a Device PASS
    only on flows replayed for the current source (or `Maestro: unavailable — <why>`); a PASS with
-   Anomalies, or `PARTIAL`, asks the developer; `finish --skip-device "<reason>"` only when adb sees
-   no device.
+   Anomalies, or `PARTIAL`, asks the developer; no device → an emulator is started for the run, and
+   `finish --skip-device "<reason>"` only when there is no SDK or AVD to start one.
    The gate itself: formatter (fixing first when it can), then compile, unit tests, detekt and lint
    for the touched modules in one build, plus compile and unit tests for modules that use a changed
    declaration, and a secret scan. Lint or format findings only in files the change does not touch,
@@ -261,12 +266,20 @@ TARGET) and the emulator boot, the Implementer with the `before` capture, the ga
 Implementers of a team with each other (one owner per file).
 
 **Two runs at once** (two tickets, two worktrees) share the machine, and the CLI keeps them apart:
-- heavy builds (gate, base build, Device install) take one of `execution.max_parallel_builds` slots
+- heavy builds (gate, base build, Device build) take one of `execution.max_parallel_builds` slots
   (default 2; `ANDROID_WORKFLOW_BUILD_SLOTS`) and wait for a free one, logged in the stage log;
 - one base build per repository at a time; its APKs are cached by base commit, so the second run on
   the same base gets them at once;
-- a device is leased to one run's Device stage at a time (`next` answers `wait_device` when the other
-  run holds it); the lease ends when that stage logs `completed` or `flows_ready`.
+- each run has its own device: the first time it needs one it leases a ready device nobody uses (an
+  emulator already open, a phone), else one more emulator starts just for it, up to
+  `device.max_emulators` (default 2; a second copy of an AVD runs `-read-only`); past that, `next`
+  answers `wait_device` naming who holds each device. The lease lasts until `finish` (a command
+  still installing keeps it until it exits), so between its `before` and `after` rounds no other run
+  installs on that device. A leased emulator that dies is replaced;
+- the Device APK is built before the device is held (`CLI device build`, started with the gate):
+  holding the device costs an `adb install`, not a Gradle build;
+- with 3 or more runs, keep `max_parallel_builds` at 2 (or 1) and close Android Studio: a cold
+  build of a large app per run, plus emulators, swaps the machine.
 
 ## Run files
 

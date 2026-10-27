@@ -27,9 +27,11 @@ If `android` (Android CLI) is on PATH, use it for **stills and layout dumps** (`
 ```bash
 adb devices -l        # confirm exactly one device is connected & authorized
 ```
-**In an android-workflow run the serial is given:** `CLI next` leases one device to the run and
-passes its `serial`; use that one, never another (another run may be installing its own build on
-it), and never `gradlew install…` (use `CLI device install` / `CLI device replay`).
+**In an android-workflow run the serial is given:** `CLI next` leases one device to the run (until
+`finish`) and passes its `serial`; use that one, never another (another run has its own device and
+may be installing its build on it), and never `gradlew install…` (use `CLI device install` / `CLI
+device replay`). Save logcat filtered to the lines a check needs, never the full log: it carries
+user ids and tokens.
 **Otherwise, resolve a serial once and use it everywhere.** "Exactly one device" is an assumption that breaks the moment an emulator is running alongside a phone, and every subsequent `adb` call then fails with `more than one device/emulator` — which, piped through `2>/dev/null`, looks like an empty screen rather than an error. Capture `SERIAL=$(adb devices | awk '/device$/{print $1}' | head -1)` at the start of the session and pass `adb -s "$SERIAL"` from then on.
 If none is connected, do not fail the phase — degrade per your agent's rules (recipe `unverified` / manual-test `BLOCKED` / video `pending`). Multiple devices → target one with `adb -s <serial> ...`.
 

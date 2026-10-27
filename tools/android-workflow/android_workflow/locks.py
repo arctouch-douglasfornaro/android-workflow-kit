@@ -8,11 +8,13 @@ Two things on a developer's machine are shared by every run of every app:
   `execution.max_parallel_builds` slots (default 2, `ANDROID_WORKFLOW_BUILD_SLOTS` overrides) and
   wait for a free one.
 * **Device leases.** Two runs installing the same debug package on one emulator overwrite each
-  other's build mid-check. A Device agent (or a replay) works on a serial only while its run holds
-  that serial's lease; another run waits for it, or uses another device.
+  other's build mid-check. A run leases one device the first time it needs one (`before` or
+  `after`) and keeps it until `finish`: another run takes a free device, or one more emulator, or
+  waits. A command (an install, a replay) adds its pid to the lease while it runs, so a lease never
+  ends under a command that is still writing to the device.
 
-Everything lives under `state_home()`; a lease whose holder is gone (process dead, run no longer on
-the device, or older than `LEASE_MAX_SECONDS`) is dropped by the next reader.
+Everything lives under `state_home()`; a lease whose holder is gone (its run ended or went idle, and
+no command of it still runs) is dropped by the next reader.
 """
 
 from __future__ import annotations
@@ -29,7 +31,7 @@ from android_workflow.paths import state_home
 
 SLOTS_ENV = "ANDROID_WORKFLOW_BUILD_SLOTS"
 DEFAULT_SLOTS = 2
-LEASE_MAX_SECONDS = 45 * 60  # a Device round is budgeted at minutes; a lease this old is left behind
+LEASE_IDLE_SECONDS = 3 * 60 * 60  # a run untouched this long (a session closed mid-run) lets its device go
 
 
 def _locks_dir() -> Path:
@@ -172,22 +174,31 @@ def _leases() -> Iterator[dict[str, Any]]:
         os.replace(temporary, path)
 
 
-def _run_on_device(run: str) -> bool:
-    """The holder run still has its Device stage open (an agent is on the device)."""
+def _run_holds_device(run: str, since: float) -> bool:
+    """The holder run still needs its device: not finished, and touched in the last `LEASE_IDLE_SECONDS`."""
     try:
         state = json.loads((Path(run) / "run-state.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False
-    return ((state.get("stages") or {}).get("T7") or {}).get("status") == "started"
+    if not isinstance(state, dict) or state.get("status") == "completed":
+        return False
+    touched = max(float(state.get("updated_at") or 0), since)
+    return time.time() - touched < LEASE_IDLE_SECONDS
+
+
+def _pids(lease: dict[str, Any]) -> list[int]:
+    found = [int(pid) for pid in lease.get("pids") or [] if isinstance(pid, int)]
+    if isinstance(lease.get("pid"), int):  # a lease written before `pids`
+        found.append(int(lease["pid"]))
+    return list(dict.fromkeys(found))
 
 
 def _stale(lease: dict[str, Any]) -> bool:
-    if time.time() - float(lease.get("since") or 0) > LEASE_MAX_SECONDS:
+    if any(_pid_alive(pid) for pid in _pids(lease)):
+        return False  # a command of the run still writes to the device
+    if lease.get("mode") == "command":
         return True
-    pid = lease.get("pid")
-    if pid is not None:  # a command (a replay) holds it while it runs
-        return not _pid_alive(pid)
-    return not _run_on_device(str(lease.get("run") or ""))
+    return not _run_holds_device(str(lease.get("run") or ""), float(lease.get("since") or 0))
 
 
 def lease_of(serial: str) -> dict[str, Any] | None:
@@ -195,44 +206,73 @@ def lease_of(serial: str) -> dict[str, Any] | None:
         return leases.get(serial)
 
 
-def acquire(serial: str, run: Path | str, mode: str = "agent", pid: int | None = None) -> dict[str, Any] | None:
+def leases() -> dict[str, dict[str, Any]]:
+    """Every live lease, by serial (for the pool and the office)."""
+    with _leases() as live:
+        return dict(live)
+
+
+def held_by(run: Path | str) -> list[str]:
+    """The serials `run` holds."""
+    run = str(run)
+    with _leases() as live:
+        return [serial for serial, lease in live.items() if lease.get("run") == run]
+
+
+def acquire(serial: str, run: Path | str, mode: str = "run", pid: int | None = None) -> dict[str, Any] | None:
     """Take `serial` for `run`. Returns None when another run holds it, else the lease.
 
-    An agent's lease lives while its run's Device stage is open; a command passes its `pid`, and its
-    lease lives while that process does. A run that already holds the serial keeps it (renewed)."""
+    A run's lease lives until the run finishes (or goes idle); a command passes its `pid`, which joins
+    the lease and keeps it alive while the process runs, even past the run's own release."""
     run = str(run)
-    with _leases() as leases:
-        held = leases.get(serial)
+    with _leases() as live:
+        held = live.get(serial)
         if held and held.get("run") != run:
             return None
-        lease = {"run": run, "mode": mode, "since": time.time(), **({"pid": pid} if pid else {})}
-        if held and held.get("pid") is None and pid is not None:
-            lease = held  # a command inside an agent's round: the agent's lease already covers it
-        leases[serial] = lease
+        lease = dict(held) if held else {"run": run, "mode": "command" if pid else mode, "since": time.time()}
+        lease.pop("pid", None)
+        pids = [item for item in _pids(held or {}) if _pid_alive(item)]
+        if pid:
+            pids = list(dict.fromkeys([*pids, pid]))
+        else:
+            lease.update({"mode": "run", "since": time.time()})
+        if pids:
+            lease["pids"] = pids
+        else:
+            lease.pop("pids", None)
+        live[serial] = lease
         return lease
 
 
 def release(run: Path | str, serial: str | None = None, pid: int | None = None) -> list[str]:
-    """Drop the leases `run` holds (one serial, or all; with `pid`, only that command's)."""
+    """Give back what `run` holds (one serial, or all). With `pid`, only that command's part.
+
+    A serial a command of the run still writes to stays leased to that command until it exits;
+    it is not in the returned list."""
     run = str(run)
     dropped = []
-    with _leases() as leases:
-        for key in list(leases):
-            lease = leases[key]
+    with _leases() as live:
+        for key in list(live):
+            lease = live[key]
             if lease.get("run") != run or (serial and key != serial):
                 continue
-            if pid is not None and lease.get("pid") != pid:
+            pids = [item for item in _pids(lease) if _pid_alive(item) and item != pid]
+            if pid is not None and lease.get("mode") == "run":
+                live[key] = {**{k: v for k, v in lease.items() if k not in {"pid", "pids"}}, **({"pids": pids} if pids else {})}
+                continue
+            if pids:
+                live[key] = {**{k: v for k, v in lease.items() if k != "pid"}, "mode": "command", "pids": pids}
                 continue
             dropped.append(key)
-            del leases[key]
+            del live[key]
     return dropped
 
 
 def free_serials(serials: list[str], run: Path | str) -> list[str]:
     """`serials` that nobody else leases (the run's own lease counts as free), in their order."""
     run = str(run)
-    with _leases() as leases:
-        return [serial for serial in serials if (leases.get(serial) or {}).get("run") in (None, run)]
+    with _leases() as live:
+        return [serial for serial in serials if (live.get(serial) or {}).get("run") in (None, run)]
 
 
 @contextlib.contextmanager
@@ -256,3 +296,51 @@ def device_lease(serial: str, run: Path | str, on_wait: Callable[[dict[str, Any]
         yield True
     finally:
         release(run, serial=serial, pid=pid)
+
+
+# --- runs that will need a device ----------------------------------------------------------------
+
+def _wanted_path() -> Path:
+    return _locks_dir() / "device-wanted.json"
+
+
+@contextlib.contextmanager
+def _wanted() -> Iterator[dict[str, float]]:
+    with exclusive(_locks_dir() / "device-wanted.lock", poll=0.1):
+        path = _wanted_path()
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+        live = {run: float(since) for run, since in (data.items() if isinstance(data, dict) else [])
+                if isinstance(since, (int, float)) and _run_holds_device(run, float(since))}
+        yield live
+        if live != data:
+            temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+            temporary.write_text(json.dumps(live, indent=2) + "\n", encoding="utf-8")
+            os.replace(temporary, path)
+
+
+def want(run: Path | str) -> None:
+    """`run` has a Device stage ahead: an emulator nobody leases is kept open for it."""
+    with _wanted() as wanted:
+        wanted.setdefault(str(run), time.time())
+
+
+def unwant(run: Path | str) -> None:
+    with _wanted() as wanted:
+        wanted.pop(str(run), None)
+
+
+def wanting(exclude: Path | str | None = None) -> list[str]:
+    """Live runs that still have a Device stage ahead (other than `exclude`)."""
+    with _wanted() as wanted:
+        return [run for run in wanted if run != str(exclude or "")]
+
+
+def run_label(run: Path | str) -> str:
+    """`<worktree>/<ticket>` for a run folder (`<app>/.ai/workflow/<ticket>`): parallel worktrees of one
+    ticket are told apart."""
+    path = Path(str(run))
+    app = path.parents[2].name if len(path.parents) >= 3 and path.parent.name == "workflow" else ""
+    return f"{app}/{path.name}" if app else path.name

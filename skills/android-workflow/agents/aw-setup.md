@@ -35,7 +35,12 @@ every run, so prove each fact from a file; unknown stays empty.
    `test<Variant>UnitTest`, `lint<Variant>`, `install<Variant>`. At most one
    `./gradlew -q help --task <name>` per task you cannot prove from files. No builds.
 4. **Device.** Debug applicationId (with suffix), launcher activity, app module, deep-link
-   scheme, existing Maestro flows / test tags, login or feature-flag prerequisites.
+   scheme, existing Maestro flows / test tags, login or feature-flag prerequisites, and what a
+   run needs to reach behavior with nothing to see: the test account the developer approved (by
+   name, never a password), content that exercises audio or events, how to turn a setting on
+   (its test tag, or that it has none), and the log source that shows analytics events (the tag or
+   class that prints them, checked in code). Pin the AVD: `device.avd` (`emulator -list-avds`; the
+   developer's choice, else the newest API), `device.event_log_source` (the tag or class) when it is known.
 5. **Code patterns** (≤25 rows, one exemplar `path:line` each). Read 2–3 recent, representative
    features end to end rather than scanning everything. Cover: module layering, screen state
    (ViewModel/UiState/events), DI, repository/use case, errors and loading, navigation,
@@ -53,7 +58,9 @@ every run, so prove each fact from a file; unknown stays empty.
   "install": "./gradlew :app:installProdDebug"}, "module_commands": {"compile":
   "./gradlew {module}:compileProdDebugKotlin", "unit_tests": "./gradlew {module}:testProdDebugUnitTest",
   "android_lint": "./gradlew {module}:lintProdDebug"}, "device": {"app_module": ":app",
-  "application_id": "com.example.debug", "launch_activity": ".MainActivity"}}`.
+  "application_id": "com.example.debug", "launch_activity": ".MainActivity", "avd": "Pixel_8_API_35",
+  "max_emulators": 2}}`. `max_emulators`: emulators the workflow may start at once for parallel runs
+  (each run gets its own device); lower it to 1 on a machine with little memory.
   No formatter in the repo: `{"commands": {"format_check": "", "format_apply": ""}}` with a
   profile row saying so. Optional `quality_gates` keys, only when the project needs them:
   `"lint_scope": "all"` (fail on findings in untouched files too) or `"changed_files"` (fail on

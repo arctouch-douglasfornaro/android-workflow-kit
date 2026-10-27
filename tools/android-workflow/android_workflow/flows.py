@@ -5,6 +5,9 @@
 already capturing under that name. The agent fills in the selectors and runs `CLI device replay`;
 that is less work than driving by hand with coordinates, and the next round replays it for free.
 
+A ticket with nothing to see (audio, analytics events) gets a `<flow>.sh` that proves it from the
+filtered logcat: only the matching lines are kept, never the full log.
+
 `known` lists flows earlier tickets of this repository proved (their runs in this checkout and in
 the main checkout, and the per-repository library a passing replay feeds), so navigation to a
 screen another ticket already reached is copied, not rediscovered.
@@ -115,6 +118,38 @@ adb -s "$AW_SERIAL" shell dumpsys gfxinfo {app_id} > "$AW_OUT/{name}-gfxinfo.txt
 exit $code
 """
 
+EVENTS_SCRIPT = """#!/bin/sh
+# Proof with nothing to see (audio, analytics events, logs): clears the log, runs the flow, keeps ONLY
+# the lines that match PATTERN in {name}-events.txt and fails when the count is off. Never save the
+# full logcat: it carries user ids and tokens. The replay reads the count into replay.json (`events`).
+PATTERN='{pattern}'  # the log source and the event the AC expects (grep -E)
+MIN=1                # it must appear at least this many times
+MAX=                 # and at most this many (set it for "exactly once")
+case "$PATTERN" in *TODO*) echo "fill PATTERN in $0"; exit 5;; esac
+adb -s "$AW_SERIAL" logcat -c
+"$AW_MAESTRO" --device "$AW_SERIAL" test --test-output-dir "$AW_OUT" "$AW_FLOW"
+code=$?
+adb -s "$AW_SERIAL" logcat -d | grep -E "$PATTERN" > "$AW_OUT/{name}-events.txt"
+count=$(wc -l < "$AW_OUT/{name}-events.txt" | tr -d ' ')
+echo "events matching: $count"
+[ "$code" -ne 0 ] && exit "$code"
+[ "$count" -lt "$MIN" ] && exit 3
+[ -n "$MAX" ] && [ "$count" -gt "$MAX" ] && exit 4
+exit 0
+"""
+EVENT_NAME = re.compile(r"(event|audio|sound|autoplay|tts|speech|analytics|log)")
+EVENT_SURFACES = frozenset({"audio", "analytics"})
+
+
+def _event_ticket(agent_dir: Path) -> bool:
+    import json
+
+    try:
+        spec = json.loads((agent_dir / "ticket-spec.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return bool(EVENT_SURFACES & set(spec.get("surfaces") or []))
+
 
 def scaffold(target: Path, config: dict[str, Any] | None = None) -> dict[str, Any]:
     """Write flow templates from the plan's navigation recipe; never overwrite a flow that exists."""
@@ -145,12 +180,17 @@ def scaffold(target: Path, config: dict[str, Any] | None = None) -> dict[str, An
     put("_nav.yaml", NAV.format(app_id=app_id, steps="".join(f"# TODO {step}\n" for step in steps)
                                 or "# TODO: no navigation recipe in plan.md; derive it from the NavHost/intent code\n"))
     perf = _perf_ticket(agent_dir)
+    events = _event_ticket(agent_dir)
+    source = ((config or {}).get("device") or {}).get("event_log_source")
+    pattern = f"{source}.*TODO_event_name" if source else "TODO_log_source.*TODO_event_name"
     for name in names:
         put(f"{name}.yaml", FLOW.format(app_id=app_id, name=name))
         if re.search(r"(error|offline|retry|network)", name):
             put(f"{name}.sh", ERROR_SCRIPT.format(name=name), executable=True)
         elif perf and not (folder / f"{name}.sh").exists():
             put(f"{name}.sh", PERF_SCRIPT.format(app_id=app_id, name=name), executable=True)
+        elif (events or EVENT_NAME.search(name)) and not (folder / f"{name}.sh").exists():
+            put(f"{name}.sh", EVENTS_SCRIPT.format(name=name, pattern=pattern), executable=True)
     return {
         "status": "scaffolded" if written else "kept",
         "folder": str(folder),
@@ -170,13 +210,18 @@ def library(target: Path) -> Path | None:
     return home(repo["id"]) / "flows" if repo else None
 
 
+def _library_name(target: Path) -> str:
+    """`<ticket>@<worktree>`: worktrees running the same ticket side by side keep their own flows."""
+    return f"{run_dir(target).name}@{target.resolve().name}"
+
+
 def remember(target: Path) -> str | None:
     """After a replay that passed: keep this run's flows in the repository's library."""
     root = library(target)
     source = media_dir(target) / "flows"
     if root is None or not source.is_dir():
         return None
-    destination = root / run_dir(target).name
+    destination = root / _library_name(target)
     shutil.rmtree(destination, ignore_errors=True)
     destination.mkdir(parents=True, exist_ok=True)
     for path in source.iterdir():
@@ -201,7 +246,7 @@ def known(target: Path) -> list[dict[str, Any]]:
                            if path.is_dir() and path.resolve() != current)
     lib = library(target)
     if lib and lib.is_dir():
-        folders.extend(path for path in lib.iterdir() if path.is_dir() and path.name != current.name)
+        folders.extend(path for path in lib.iterdir() if path.is_dir() and path.name != _library_name(target))
     seen: set[tuple[str, str]] = set()
     found: list[dict[str, Any]] = []
     for folder in folders:

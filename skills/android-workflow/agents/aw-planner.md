@@ -33,8 +33,10 @@ The only planning role for `/android-workflow`. One pass, short output.
    Name the pattern to copy at `file:line` (from Code patterns when a row fits) and any
    existing component/helper to reuse, so the Implementer does not write a duplicate.
 4. Decide `device_required` (yes if any AC is visual, navigation, lifecycle, permission,
-   notification, deep link, WorkManager or DI wiring at runtime) and `visual` (yes if a
-   before/after still or clip helps the PR reviewer).
+   notification, deep link, WorkManager or DI wiring at runtime, **or audio played or an analytics
+   event / log line emitted**: those are proven on the device from the filtered logcat, never
+   "a device cannot verify this") and `visual` (yes if a before/after still or clip helps the PR
+   reviewer; an audio or event change is usually `visual: no`).
 5. Write the **navigation recipe** for the device agent: launch activity or deep link and the
    taps to reach the changed surface, grounded in code (NavHost routes, intents, test tags). The Device
    `before` agent turns it into Maestro flows that `after` replays by code, so write it as numbered
@@ -59,10 +61,11 @@ The only planning role for `/android-workflow`. One pass, short output.
 ## Writes
 
 `CLI update-spec --target TARGET` with whatever the ticket proves: `--surfaces` (ui, navigation,
-deeplink, permissions, lifecycle, notifications, workmanager, room_migration, domain),
+deeplink, permissions, lifecycle, notifications, workmanager, room_migration, audio, analytics, domain),
 `--acceptance "a|b"`, `--type`, `--risk`, `--complexity`, `--reproduction`, `--visual yes|no`, and
 the Parallel work as numbers: `--parallel-parts N --parallel-files M` (`1` and `0` for single). Any
-surface other than `domain` routes through Device. `CLI next` reads these to pick the team and the
+surface other than `domain` routes through Device; an AC about sound or events adds `audio` /
+`analytics` back by code. `CLI next` reads these to pick the team and the
 device `before`; it never reads your prose for them.
 
 `RUN/plan.md` with headings exactly: Objective, Steps, Out of scope, Verification.

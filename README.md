@@ -128,7 +128,7 @@ command only to change one of them:
 | Branch | On `main` (or the repo's base branch): creates `<user>/<TICKET>-<slug>` in the same checkout. On any other branch: keeps working on it | `--worktree` to work in a separate folder instead |
 | PR base | The repo's default branch (`origin/HEAD`, else `main`, `master` or `develop`) | `--base BRANCH` |
 | Depth | Chosen from the ticket: `express` for a small, clear change (no Planner); `full` for risky areas (lifecycle, migrations, payments, auth); `standard` otherwise. Bugs are never `express` | `--level express\|standard\|full` |
-| Device check | Runs when the change is visible or runtime. No device connected: it opens your emulator (the AVD in `device.avd` of `.ai/android-workflow.json`, else the first one) and closes it at the end; a device you connected or opened is never closed. No emulator at all: skipped, and the PR says it was not verified on a device | `--no-device` to always skip it |
+| Device check | Runs when the change is visible or runtime. No free device: it opens your emulator for the run (the AVD in `device.avd` of `.ai/android-workflow.json`, else one not running yet) and closes it at the end when no other run is waiting for one; a device you connected or opened is reused when free and never closed. A change you can only hear or see in the logs (audio, analytics events) is checked on the device too, from the filtered logcat. No emulator at all: skipped, and the PR says it was not verified on a device | `--no-device` to always skip it |
 | Delivery | Commits, pushes and opens the PR (a draft if some check is still failing) | `--no-pr`, `--no-push` or `--no-commit` to stop earlier |
 | After the PR | The PR Watcher follows it until it is merged (below) | `--no-watch` to stop at the PR |
 
@@ -154,11 +154,14 @@ You see one line per stage in the chat, e.g. `Reviewer: approved, 0 blocking →
 Run two workflows side by side (each with `--worktree`, in its own session). The CLI keeps them from
 stepping on each other:
 
-- **Builds**: the gate, the base build and the device install take one of a few machine-wide build
-  slots and wait for a free one (`execution.max_parallel_builds`, default 2).
-- **Device**: one run's Device stage at a time per device; the other run waits for it (`next` says
-  which run holds it). With `"device": {"max_emulators": 2}` in `.ai/android-workflow.json` it starts
-  a second emulator instead (another AVD, or the same one read-only).
+- **Builds**: the gate, the base build and the device build take one of a few machine-wide build
+  slots and wait for a free one (`execution.max_parallel_builds`, default 2). The Device APK is built
+  before the run takes a device, so a device is only held for `adb install` and the flows.
+- **Device**: each run gets its own, leased from the first time it needs one until `finish`. An
+  emulator already open that no run uses is reused; otherwise one more emulator starts just for that
+  run (another AVD, or the same one read-only), up to `"device": {"max_emulators": 2}` in
+  `.ai/android-workflow.json`. Past that, the run waits (`next` says which run holds each device).
+  With 3+ runs on one laptop, keep 2 build slots (or 1) and close Android Studio.
 - **Base build**: one per repository at a time, shared by commit.
 
 ### 4. What you get

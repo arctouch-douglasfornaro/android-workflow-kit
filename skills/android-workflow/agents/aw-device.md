@@ -25,10 +25,13 @@ free), and saved as flows. `after` runs those flows by code and only judges.
   state of the surface only (`capture: true`; when `capture` is false the flows only need to reach the
   screen and assert it). No verdict. Stop at `budget_seconds` (600): flows that work are kept, the rest
   are listed in your return as "not scripted". End with the `done` command the orchestrator passed
-  (`CLI log --target TARGET --stage Device --status flows_ready --note "<n> flow(s) saved"`): it frees
-  the device for other runs.
+  (`CLI log --target TARGET --stage Device --status flows_ready --note "<n> flow(s) saved"`). The
+  device stays leased to this run for its `after` round; nothing to give back.
 - `after`: reviewed build. Verify the device AC from `plan.md` and capture evidence. Budget
-  `budget_seconds` (300) from start to `device-report.md`: replay, judge, a few hand-driven checks.
+  `budget_seconds` (300) of your own device work: replay flows, judge, a few hand-driven checks. The
+  build and the install are the CLI's and do not count (`replay.json` → `flows_seconds`,
+  `over_budget`): while `CLI device replay`/`install` runs, wait for its answer; never stop or
+  report BLOCKED because a build or an install is slow.
   When no `before` ran (no base APK in time, or another run had the device), this round writes the
   flows: the CLI replays them on the base APK afterwards for the `before` column, with no agent.
 
@@ -62,9 +65,11 @@ Flows live in `RUN/media/flows/`, one per behavior in the plan's recipe (`<surfa
   ready → return `BLOCKED` (never PASS without a device). Never start, wipe or close an emulator
   yourself: the orchestrator does that.
 - Never run Gradle (`gradlew assemble…`/`install…`): `CLI device replay` installs the current build,
-  and `CLI device install --target TARGET --serial <serial>` does it alone (inside the machine's build
-  slots, with the APK's sha256 in its answer). That answer is your proof of the build; no sha256
-  checks around every capture.
+  and `CLI device install --target TARGET --serial <serial>` does it alone (the APK is built first with
+  no device held, usually already by the background `CLI device build`, then `adb install`ed, with its
+  sha256 in the answer). That answer is your proof of the build; no sha256 checks around every capture.
+- `BLOCKED` quotes the CLI: the `status` and `reason` of the command that stopped you (`install_failed:
+  …`, `device_busy`, `no_device`), never your own guess at the cause.
 
 ## Work
 
@@ -99,8 +104,12 @@ Flows live in `RUN/media/flows/`, one per behavior in the plan's recipe (`<surfa
    `RUN/media/flows/<name>.yaml` following the Flow contract. Assert the target screen was reached
    (text/testTag) before judging anything. Recipe wrong → fix the flow, not the app. In `before`, this is
    the whole job: write, run and fix each flow until it passes on the base build.
-4. `after`: for each device AC write expected vs observed. Capture logcat for the app pid in
-   the same session when the AC involves events, errors or lifecycle. A performance ticket (a perf
+4. `after`: for each device AC write expected vs observed. An AC with nothing to see (audio played,
+   an analytics event, a log line) is still a device AC: prove it with the scaffold's `<flow>.sh`
+   logcat script (`PATTERN` = the profile's event log source, already filled in, plus the event name; `MIN`/`MAX` for "exactly once"); the
+   replay passes or fails it on the count (`replay.json` → `events`). Never save or attach the full
+   logcat: it carries user ids and tokens. Keep only the filtered lines, and say in the report which
+   source and pattern proved the AC. A performance ticket (a perf
    skill in `RUN/skills.json`): the scaffold adds a `.sh` per flow that saves `dumpsys gfxinfo`; the
    replay files it as `<flow>-gfxinfo.txt` and puts frames, janky % and p50/p90/p99 in `replay.json`
    (`frames`). Report before vs after from those numbers; on an emulator say they compare the two

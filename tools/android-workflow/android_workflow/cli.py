@@ -708,7 +708,7 @@ def route_for(ticket_type: str, complexity: str, risk: str, surfaces: list[str])
     route.extend(["T4", "T5", "T6"])
     device_surfaces = {
         "ui", "navigation", "permissions", "lifecycle", "runtime_di", "room_migration",
-        "notifications", "deeplink", "workmanager",
+        "notifications", "deeplink", "workmanager", "audio", "analytics",
     }
     if device_surfaces.intersection(surfaces):
         route.append("T7")
@@ -720,10 +720,11 @@ def infer_surfaces(ticket: dict[str, Any]) -> list[str]:
     explicit = [str(item).strip() for item in ticket.get("surfaces") or [] if str(item).strip()]
     if explicit:
         return explicit
+    criteria = " ".join(str(item) for item in ticket.get("acceptance_criteria") or [])
     tokens = set(
         re.findall(
             r"[a-zà-ÿ]+",
-            f"{ticket.get('title') or ''} {ticket.get('description') or ''}".lower(),
+            f"{ticket.get('title') or ''} {ticket.get('description') or ''} {criteria}".lower(),
         )
     )
     return [surface for surface, words in SURFACE_KEYWORDS if words & tokens]
@@ -747,8 +748,17 @@ SURFACE_KEYWORDS: tuple[tuple[str, frozenset[str]], ...] = (
     ("permissions", frozenset({"permission", "permissions", "permissão", "permissao"})),
     ("lifecycle", frozenset({"lifecycle", "rotation", "foreground", "background", "resume"})),
     ("workmanager", frozenset({"workmanager", "worker", "periodic", "sync"})),
+    # Behavior with nothing to see is still proven on the device, from the filtered logcat.
+    ("audio", frozenset({
+        "audio", "sound", "tts", "speech", "autoplay", "speaker", "voice",
+        "áudio", "som", "voz", "fala",
+    })),
+    ("analytics", frozenset({"analytics", "event", "events", "tracking", "evento", "eventos", "amplitude"})),
     ("room_migration", frozenset({"room", "migration", "database", "migração", "migracao"})),
 )
+
+
+RUNTIME_SURFACES = frozenset({"audio", "analytics"})
 
 
 def find_pr_template(root: Path) -> str | None:
@@ -2263,6 +2273,13 @@ def update_spec(target: Path, args: argparse.Namespace) -> dict[str, Any]:
         value = getattr(args, field)
         if value is not None:
             spec[field] = value
+    # An AC about audio or events is a runtime behavior: it keeps its device surface whatever the list says
+    # (only the developer's --no-device skips the device).
+    runtime = [surface for surface in infer_surfaces({"acceptance_criteria": spec.get("acceptance_criteria") or []})
+               if surface in RUNTIME_SURFACES and surface not in spec["surfaces"]]
+    if runtime:
+        spec["surfaces"] = [*spec["surfaces"], *runtime]
+        spec["surfaces_from_ac"] = runtime
     spec["route"] = route_for(spec["type"], spec["complexity"], spec["risk"], spec["surfaces"])
     if getattr(args, "visual", None) is not None:
         spec["visual"] = args.visual == "yes"
@@ -2571,10 +2588,8 @@ def _log_stage(
         if unproven:
             raise ValueError(unproven)
     append_stage_log(agent_dir, stage, status, actor, note, role=shown)
-    if stage == "T7" and status not in OPENING_STATUSES:
-        from android_workflow.locks import release
-
-        release(agent_dir)  # the Device round is over: another run may use the device
+    # A Device round ending keeps the device: it stays this run's until `finish` (the next round
+    # finds this run's build and flows on it, and no other run installs in between).
     if stage == "T4" and files:
         kept = [
             item
@@ -3084,7 +3099,7 @@ def finish_run(
     state["stages"]["T9"] = {"status": "completed"}
     delivery_started = time.monotonic()
     write_delivery(agent_dir, spec, state)
-    append_stage_log(agent_dir, "T8", "completed", "cli", "pr-description.md")
+    append_stage_log(agent_dir, "T8", "drafted", "cli", "pr-description.md (the Delivery agent writes the final one)")
     metrics.setdefault("stages", {}).setdefault("T4", {}).update({"status": "completed", "files": changed})
     record_stage_metrics(metrics, "T8", "completed", seconds=time.monotonic() - delivery_started)
     state.update({
@@ -3097,6 +3112,10 @@ def finish_run(
     record_stage_metrics(metrics, "T9", "completed", seconds=time.monotonic() - finish_started)
     record_totals(metrics, state)
     save_state(target, state, metrics)
+    from android_workflow.locks import release, unwant
+
+    release(agent_dir)  # the device goes back to the machine (a command still on it keeps it until it exits)
+    unwant(agent_dir)
     return state
 
 
@@ -3442,7 +3461,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     device_parser = subparsers.add_parser(
         "device", help="Maestro flows by code: replay them, scaffold them from the plan, install the current build",
     )
-    device_parser.add_argument("action", choices=("replay", "scaffold", "install", "release"))
+    device_parser.add_argument("action", choices=("replay", "scaffold", "build", "install", "release"),
+                               help="build: the current APK with no device held (RUN/after-build.json), reused by install and replay")
     device_parser.add_argument("--target", required=True, type=Path)
     device_parser.add_argument("--serial")
     device_parser.add_argument("--phase", choices=("before", "after"), default="after",
@@ -3675,6 +3695,11 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
             from android_workflow.locks import release
 
             return {"released": release(run_dir(target), serial=args.serial)}, 0
+        if args.action == "build":
+            from android_workflow.replay import build_current
+
+            result = build_current(target)
+            return result, 0 if result["status"] in {"passed", "no_build_command", "no_apk"} else 1
         if args.action == "install":
             from android_workflow.replay import install_current
 

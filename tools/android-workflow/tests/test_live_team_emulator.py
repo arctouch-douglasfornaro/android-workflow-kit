@@ -628,13 +628,17 @@ if sys.argv[1:] == ["-list-avds"]:
     raise SystemExit(0)
 args = sys.argv[1:]
 port = args[args.index("-port") + 1]
-with open(os.path.join(state, "launch.json"), "w") as handle:
-    json.dump(args, handle)
+for name in ("launch.json", f"launch-{port}.json"):
+    with open(os.path.join(state, name), "w") as handle:
+        json.dump(args, handle)
 with open(os.path.join(state, "devices"), "a") as handle:
     handle.write(f"emulator-{port}\tdevice\n")
-while not os.path.exists(os.path.join(state, "kill")):
+while not any(os.path.exists(os.path.join(state, name)) for name in ("kill", f"kill-{port}")):
     time.sleep(0.05)
-open(os.path.join(state, "devices"), "w").close()
+path = os.path.join(state, "devices")
+lines = open(path).read().splitlines(True) if os.path.exists(path) else []
+with open(path, "w") as handle:
+    handle.writelines(line for line in lines if not line.startswith(f"emulator-{port}\t"))
 '''
 
 FAKE_ADB = r'''#!{python}
@@ -651,7 +655,7 @@ if args[:1] == ["-s"] and args[2:] == ["shell", "getprop", "sys.boot_completed"]
     print("1" if os.path.exists(os.path.join(state, "booted")) else "")
     raise SystemExit(0)
 if args[:1] == ["-s"] and args[2:] == ["emu", "kill"]:
-    open(os.path.join(state, "kill"), "w").close()
+    open(os.path.join(state, "kill-" + args[1].rsplit("-", 1)[-1]), "w").close()
     raise SystemExit(0)
 raise SystemExit(1)
 '''
@@ -676,6 +680,7 @@ class FakeSdk:
             "ANDROID_HOME": str(sdk), "ANDROID_SDK_ROOT": "", "HOME": str(home), "PATH": "/usr/bin:/bin",
             "FAKE_SDK_STATE": str(self.state), "FAKE_AVDS": self.avds,
             "ANDROID_WORKFLOW_STATE_HOME": str(home / ".cache" / "android-workflow"),
+            "ANDROID_WORKFLOW_NO_DEVICE_CHECK": "",  # this fake SDK is the device world
         })
         self.env.start()
         return target, self.state
@@ -767,31 +772,113 @@ class EmulatorTests(unittest.TestCase):
         self.assertFalse(launched)
         self.assertEqual(timed_out["status"], "timed_out")
 
-    def test_two_runs_share_the_emulator_and_the_last_one_closes_it(self) -> None:
-        with FakeSdk() as (first, state_dir):
-            second = first.parent / "other-app"
-            second.mkdir()
-            for app, ticket in ((first, "A-1"), (second, "B-1")):
-                (app / "settings.gradle.kts").write_text("", encoding="utf-8")
-                start(app, ticket)
-            booting = emulator.start(first)
-            deadline = time.time() + 10
-            while time.time() < deadline and not (state_dir / "launch.json").exists():
-                time.sleep(0.05)
+    def launched(self, state_dir: Path, port: int) -> list[str]:
+        path = state_dir / f"launch-{port}.json"
+        deadline = time.time() + 10
+        while time.time() < deadline and not path.exists():
+            time.sleep(0.05)
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def apps(self, base: Path, *tickets: str) -> list[Path]:
+        folders = []
+        for index, ticket in enumerate(tickets):
+            app = base / f"app-{index}"
+            app.mkdir(exist_ok=True)
+            (app / "settings.gradle.kts").write_text("", encoding="utf-8")
+            start(app, ticket)
+            folders.append(app)
+        return folders
+
+    def test_each_run_gets_its_own_emulator_up_to_the_limit_and_a_freed_one_is_reused(self) -> None:
+        with FakeSdk() as (target, state_dir):
+            first, second, third = self.apps(target.parent, "A-1", "B-1", "C-1")
+            mine = emulator.claim(first)
+            first_args = self.launched(state_dir, 5554)
             (state_dir / "booted").touch()
-            joined = emulator.start(second)
-            first_done = emulator.stop(first)
-            still = emulator._pid_alive(booting["pid"])
-            last = emulator.stop(second, grace=10)
-            gone = emulator._pid_alive(booting["pid"])
-            launches = 1
-        self.assertEqual(joined["status"], "ready")
-        self.assertEqual(set(joined["users"]), {str(first), str(second)})
-        self.assertEqual(first_done["status"], "left_running")
-        self.assertTrue(still)
-        self.assertEqual(last["status"], "stopped")
-        self.assertFalse(gone)
-        self.assertEqual(launches, 1)
+            mine_ready = emulator.claim(first)
+            other = emulator.claim(second)
+            second_args = self.launched(state_dir, 5556)
+            other_ready = emulator.claim(second)
+            waiting = emulator.claim(third)  # two emulators run: device.max_emulators (2) is reached
+            first_stop = emulator.stop(first, grace=10)  # the third run still needs one: it stays open
+            reused = emulator.claim(third)
+            second_stop = emulator.stop(second, grace=10)  # nobody is left waiting: closed
+            last = emulator.stop(third, grace=10)
+            pool_left = emulator._read_pool()
+        self.assertEqual((mine["status"], mine["serial"]), ("booting", "emulator-5554"))
+        self.assertEqual(first_args[:2], ["-avd", "Pixel_9"])
+        self.assertEqual((mine_ready["status"], mine_ready["serial"]), ("ready", "emulator-5554"))
+        self.assertEqual((other["status"], other["serial"]), ("booting", "emulator-5556"))
+        self.assertEqual(second_args[:2], ["-avd", "Small_Phone"])  # an AVD that is not running yet
+        self.assertEqual((other_ready["status"], other_ready["serial"]), ("ready", "emulator-5556"))
+        self.assertEqual(waiting["status"], "busy")
+        self.assertEqual(set(waiting["holders"]), {"emulator-5554", "emulator-5556"})
+        self.assertIn("A-1", waiting["holders"]["emulator-5554"])
+        self.assertEqual(first_stop["status"], "left_running")
+        self.assertIn("C-1", first_stop["reason"])
+        self.assertEqual((reused["status"], reused["serial"]), ("ready", "emulator-5554"))
+        self.assertEqual(second_stop["stopped"], ["emulator-5556"])
+        self.assertEqual(last["stopped"], ["emulator-5554"])
+        self.assertEqual(pool_left, [])
+
+    def test_the_same_avd_starts_again_read_only(self) -> None:
+        with FakeSdk(avds="Pixel_9") as (target, state_dir):
+            first, second = self.apps(target.parent, "A-1", "B-1")
+            emulator.claim(first)
+            self.launched(state_dir, 5554)
+            emulator.claim(second)
+            args = self.launched(state_dir, 5556)
+            emulator.stop(first, grace=10)
+            emulator.stop(second, grace=10)
+        self.assertEqual(args[:2], ["-avd", "Pixel_9"])
+        self.assertIn("-read-only", args)
+
+    def test_an_open_emulator_nobody_uses_is_reused_and_never_closed(self) -> None:
+        with FakeSdk() as (target, state_dir):
+            (state_dir / "devices").write_text("emulator-5560\tdevice\n", encoding="utf-8")
+            (state_dir / "booted").touch()
+            (app,) = self.apps(target.parent, "A-1")
+            claimed = emulator.claim(app)
+            stopped = emulator.stop(app, grace=10)
+            launched = (state_dir / "launch.json").exists()
+            killed = (state_dir / "kill-5560").exists()
+        self.assertEqual((claimed["status"], claimed["serial"], claimed["leased"]), ("connected", "emulator-5560", True))
+        self.assertFalse(launched)
+        self.assertEqual(stopped["status"], "left_running")
+        self.assertFalse(killed)
+
+    def test_a_leased_emulator_that_died_is_replaced(self) -> None:
+        with FakeSdk() as (target, state_dir):
+            (app,) = self.apps(target.parent, "A-1")
+            first = emulator.claim(app)
+            self.launched(state_dir, 5554)
+            (state_dir / "launch-5554.json").unlink()
+            (state_dir / "kill-5554").touch()
+            deadline = time.time() + 10
+            while time.time() < deadline and emulator._pid_alive(first["pid"]):
+                time.sleep(0.05)
+            (state_dir / "kill-5554").unlink()
+            again = emulator.claim(app)
+            relaunched = self.launched(state_dir, 5554)
+            emulator.stop(app, grace=10)
+        self.assertNotEqual(first["pid"], again["pid"])
+        self.assertEqual((again["status"], again["serial"]), ("booting", "emulator-5554"))
+        self.assertEqual(relaunched[:2], ["-avd", "Pixel_9"])
+
+    def test_next_starts_an_emulator_instead_of_skipping_the_device(self) -> None:
+        from android_workflow import decide
+
+        with FakeSdk() as (target, state_dir):
+            (app,) = self.apps(target.parent, "A-1")
+            serial, waiting, reason = decide._device_for(app, run_dir(app), record=True)
+            self.launched(state_dir, 5554)
+            (state_dir / "booted").touch()
+            ready, none, _ = decide._device_for(app, run_dir(app), record=True)
+            emulator.stop(app, grace=10)
+        self.assertIsNone(serial)
+        self.assertEqual((waiting["next"], waiting["command"]), ("wait_device", "CLI emulator --target TARGET --wait"))
+        self.assertTrue(waiting["why"].startswith(decide.BOOTING))
+        self.assertEqual((ready, none), ("emulator-5554", None))
 
     def test_an_unauthorized_phone_is_reported_at_once(self) -> None:
         with FakeSdk() as (target, state_dir):
