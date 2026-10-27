@@ -123,11 +123,14 @@ def _locked() -> Iterator[None]:
 
 
 def run_data(target: Path, ticket: str, full_scan: bool = False) -> dict[str, Any]:
-    """One run's page data with links relative to the office folder; only the app's current run is live."""
+    """One run's page data with links relative to the office folder; a run that is going is live (several
+    tickets in one checkout can be), the others are snapshots."""
     from android_workflow.office import collect
 
+    from android_workflow.office import run_is_live
+
     key = run_key(target, ticket)
-    current = ticket == current_ticket_id(target)
+    current = ticket == current_ticket_id(target) or run_is_live(workflow_root(target) / ticket, current=False)
     data = collect(target, ticket, hub_dir(), live_src=run_src(key), full_scan=full_scan, snapshot=not current)
     data.update({"hub": True, "run_key": key})
     return data
@@ -166,21 +169,19 @@ def _stale(script: Path, run: Path) -> bool:
 
 
 def _still_live(app: dict[str, Any], run: dict[str, Any]) -> bool:
-    """A run another app's watcher left `live` stops counting once that app moved on or it ended."""
+    """Whether a run is going now, judged from its own files (not from which ticket its app ran last)."""
     from android_workflow.office import run_is_live
 
     target = Path(app.get("path") or "")
-    if not workflow_root(target).is_dir() or current_ticket_id(target) != run["ticket"]:
-        return False
-    return run_is_live(workflow_root(target) / run["ticket"])
+    folder = workflow_root(target) / run["ticket"]
+    return folder.is_dir() and run_is_live(folder, current=current_ticket_id(target) == run["ticket"])
 
 
 def _write_index(index: dict[str, Any], skip_app: str | None = None) -> None:
+    del skip_app  # every run is judged again: a summary written earlier may be stale either way
     apps = index.get("apps") or {}
     for run in (index.get("runs") or {}).values():
-        app = apps.get(run["app"]) or {}
-        if run.get("live") and run["app"] != skip_app:
-            run["live"] = _still_live(app, run)
+        run["live"] = _still_live(apps.get(run["app"]) or {}, run)
     for app in apps.values():
         app["gone"] = not Path(app.get("path") or "").is_dir()
     write_if_changed(hub_dir() / INDEX_JSON, json.dumps(index, indent=1, ensure_ascii=False) + "\n")
@@ -251,8 +252,9 @@ def publish(target: Path, live: dict[str, Any] | None = None) -> None:
     for ticket in tickets:
         key = run_key(target, ticket)
         script = hub_dir() / run_src(key)
-        if ticket != current and key in known and not _stale(script, workflow_root(target) / ticket):
-            continue
+        if ticket != current and key in known and not _stale(script, workflow_root(target) / ticket) \
+                and not (runs.get(key) or {}).get("live"):
+            continue  # a past run whose files did not change: its page is still right
         data = run_data(target, ticket)
         write_run(data)
         summaries[key] = _summary(target, data)

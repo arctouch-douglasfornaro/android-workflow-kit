@@ -63,6 +63,43 @@ class HubTests(unittest.TestCase):
         self.assertIn('"index_src": "index.js"', page)
         self.assertIn('id="projectPicker"', page)
 
+    def test_two_tickets_going_in_one_checkout_are_both_live(self) -> None:
+        with GitProject() as app:
+            start(app, "A-1")
+            quiet("log", "--target", str(app), "--stage", "Planner", "--status", "started")
+            start(app, "A-2")  # the app's current ticket moves on; A-1's Planner still works
+            quiet("office", "--target", str(app), "--no-open")
+            found = {run["ticket"]: run for run in index()["runs"]}
+        self.assertTrue(found["A-1"]["live"])
+        self.assertTrue(found["A-2"]["live"])
+        self.assertIn("Planner", found["A-1"]["working"])
+
+    def test_a_run_left_behind_is_not_live_even_when_it_is_the_current_one(self) -> None:
+        from android_workflow.paths import run_dir
+
+        with GitProject() as app:
+            start(app, "A-1")
+            quiet("log", "--target", str(app), "--stage", "Device", "--status", "started")
+            folder = run_dir(app)
+            state = read_json(folder / "run-state.json")
+            state["updated_at"] = int(time.time()) - 3 * 86400  # a session closed mid-run, days ago
+            (folder / "run-state.json").write_text(json.dumps(state), encoding="utf-8")
+            metrics = read_json(folder / "stage-metrics.json")
+            for entry in (metrics.get("stages") or {}).values():
+                if entry.get("running_since"):
+                    entry["running_since"] = time.time() - 3 * 86400
+            (folder / "stage-metrics.json").write_text(json.dumps(metrics), encoding="utf-8")
+            quiet("office", "--target", str(app), "--no-open")
+            found = index()["runs"][0]
+        self.assertFalse(found["live"])
+
+    def test_the_workflow_picker_shows_a_short_title(self) -> None:
+        page = hub.page_path()
+        hub.publish_page()
+        text = page.read_text(encoding="utf-8")
+        self.assertIn("const shortTitle", text)
+        self.assertIn("shortTitle(r.title)", text)
+
     def test_a_worktree_is_listed_under_its_repository(self) -> None:
         with GitProject() as main_repo, tempfile.TemporaryDirectory() as folder:
             tree = Path(folder).resolve() / "wt-W-2"

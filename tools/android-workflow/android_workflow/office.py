@@ -85,25 +85,26 @@ def _alive(pid: Any) -> bool:
 
 
 LIVE_AGENT_SECONDS = 4 * 3600
+LIVE_IDLE_SECONDS = 2 * 3600  # an unfinished run nobody touched this long was left behind (a closed session)
 
 
-def run_is_live(run: Path) -> bool:
-    """A run is live until it ends, and again whenever an agent works on it after that: the Delivery
-    agent after `finish`, or a run reopened for more changes. An agent left `started` by a crashed
-    session stops counting after a few hours."""
+def run_is_live(run: Path, current: bool = True) -> bool:
+    """A run is live while it is going: an agent works on it (for up to a few hours: one left `started`
+    by a crashed session stops counting), so several tickets in one checkout can be live at once and
+    the Delivery agent after `finish` counts again. The app's `current` ticket is live between agents
+    too, while it is unfinished and was touched recently; a ticket the app moved on from is not."""
     state = _json(run / "run-state.json")
-    if (state.get("status") or "idle") not in {"completed", "idle"}:
-        return True
     metrics = (_json(run / "stage-metrics.json").get("stages")) or {}
     now = time.time()
+    updated = float(state.get("updated_at") or 0)
     for stage, entry in (state.get("stages") or {}).items():
         if not isinstance(entry, dict) or str(entry.get("status") or "") not in WORKING:
             continue
         since = (metrics.get(stage) or {}).get("running_since")
-        updated = state.get("updated_at") or 0
         if now - float(since if isinstance(since, (int, float)) else updated) < LIVE_AGENT_SECONDS:
             return True
-    return False
+    unfinished = (state.get("status") or "idle") not in {"completed", "idle"}
+    return current and unfinished and now - updated < LIVE_IDLE_SECONDS
 
 
 def _json(path: Path) -> dict[str, Any]:
@@ -354,7 +355,7 @@ def collect(target: Path, ticket: str | None = None, page_dir: Path | None = Non
             "tokens": measured.get("tokens"),
             "running_since": since if state_name == "working" and isinstance(since, (int, float)) else None,
         })
-    running = ticket == current and run_is_live(run)
+    running = run_is_live(run, current=ticket == current)
     live_tokens = _live_tokens(target, run, desks, measured_stages, state) if running and not snapshot else 0
     final_totals = dict(metrics.get("totals") or {})
     totals = final_totals
@@ -1814,7 +1815,9 @@ function renderHeader() {
 /* ---------- the selectors: every app (Project) and its runs (Workflow) ---------- */
 let INDEX = null, INDEX_KEY = "", indexTimer = null, PENDING_AGENT = null;
 const runOf = key => ((INDEX || {}).runs || []).find(r => r.key === key);
-const runLabel = r => `${r.ticket}${r.question ? " · needs your answer" : r.live ? (r.working.length ? ` · ${r.working.join(" + ")}` : " · running") : ` · ${["running", "awaiting_host"].includes(r.status) ? "unfinished" : r.status}`}${r.worktree ? ` · ${r.worktree}` : ""}${r.pr ? (r.draft ? " · draft PR" : " · PR") : ""}${r.updated_at ? ` · ${new Date(r.updated_at * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}` : ""}${r.gone ? " · folder removed" : ""}`;
+// The ticket title, short: its "Android |" style prefix dropped and cut to fit the selector.
+const shortTitle = t => { const s = String(t || "").replace(/^[^|:]{1,20}\|\s*/, "").trim(); return s.length > 48 ? `${s.slice(0, 47).trimEnd()}…` : s; };
+const runLabel = r => `${r.ticket}${shortTitle(r.title) ? ` · ${shortTitle(r.title)}` : ""}${r.question ? " · needs your answer" : r.live ? (r.working.length ? ` · ${r.working.join(" + ")}` : " · running") : ` · ${["running", "awaiting_host"].includes(r.status) ? "unfinished" : r.status}`}${r.worktree ? ` · ${r.worktree}` : ""}${r.pr ? (r.draft ? " · draft PR" : " · PR") : ""}${r.updated_at ? ` · ${new Date(r.updated_at * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}` : ""}${r.gone ? " · folder removed" : ""}`;
 function selectRun(key) {
   if (!key || key === RUN_KEY) return;
   if (drawerOpen()) closeDrawer();
