@@ -27,6 +27,7 @@ from android_workflow.paths import (
     run_dir,
     set_current,
     ticket_slug,
+    workflow_root,
 )
 
 SCHEMA_VERSION = 1
@@ -3211,7 +3212,48 @@ def kept_stage_states(kept: dict[str, dict[str, Any]]) -> dict[str, dict[str, An
     return {VERDICT_STAGES[artifact]: entry for artifact, entry in kept.items()}
 
 
-def run(target: Path, ticket: dict[str, Any]) -> dict[str, Any]:
+def claim_checkout(target: Path, ticket_id: str) -> None:
+    """One ticket per checkout: the CLI follows the checkout's current ticket, so starting a second one
+    while the first one's agents still work would hand the first session the second run's files."""
+    from android_workflow.office import run_is_live
+
+    current = current_ticket_id(target)
+    if current and current != ticket_id and run_is_live(workflow_root(target) / current, current=False):
+        raise ValueError(
+            f"{current} is still running in this checkout (an agent is logged as working on it): starting "
+            f"{ticket_id} here would take its run over. Start {ticket_id} in its own worktree "
+            "(`feature_workspace.py --worktree`, then `start --target <worktree_path>`); if no session works on "
+            f"{current} any more, pass `--take-over`"
+        )
+
+
+def mark_moved_copies(target: Path, ticket_id: str) -> list[str]:
+    """The same ticket started in another checkout of this repository (moved to a worktree, or back):
+    its unfinished run there is closed as `moved`, pointing here, so it never shows as running."""
+    root = target.resolve()
+    listed = git_lines(target, "worktree", "list", "--porcelain") or []
+    moved = []
+    for line in listed:
+        if not line.startswith("worktree "):
+            continue
+        other = Path(line.split(" ", 1)[1]).resolve()
+        folder = workflow_root(other) / ticket_id
+        if other == root or not (folder / "run-state.json").is_file():
+            continue
+        state = read_json(folder / "run-state.json")
+        if state.get("status") in {"completed", "moved"}:
+            continue
+        for entry in (state.get("stages") or {}).values():
+            if isinstance(entry, dict) and entry.get("status") in {"started", "running", "awaiting_host"}:
+                entry["status"] = "moved"
+        state.update({"status": "moved", "moved_to": str(root), "current_stage": None, "updated_at": int(time.time())})
+        write_json(folder / "run-state.json", state)
+        append_stage_log(folder, "T9", "moved", "cli", f"the run continues in {root}", role="Run")
+        moved.append(str(folder))
+    return moved
+
+
+def run(target: Path, ticket: dict[str, Any], take_over: bool = False) -> dict[str, Any]:
     started = time.monotonic()
     ensure_gitignore(target)
     bootstrap(target)
@@ -3220,8 +3262,11 @@ def run(target: Path, ticket: dict[str, Any]) -> dict[str, Any]:
     spec = ticket_spec(ticket, target)
     ticket_id = ticket_slug(spec["ticket"].get("id"))
     agent_dir = run_dir(target, ticket_id)
+    if not take_over:
+        claim_checkout(target, ticket_id)
     agent_dir.mkdir(parents=True, exist_ok=True)
     set_current(target, ticket_id)
+    mark_moved_copies(target, ticket_id)
     spec = keep_planner_decisions(agent_dir, spec, ticket)
     write_json(agent_dir / "ticket-spec.json", spec)
     write_json(agent_dir / TOOLKIT_FINGERPRINT_FILE, {"files": toolkit_fingerprint()})
@@ -3354,6 +3399,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     start_parser.add_argument("--reproduction")
     start_parser.add_argument("--overrides", type=Path)
     start_parser.add_argument("--level", choices=LEVELS, help="overrides the level the CLI picks")
+    start_parser.add_argument("--take-over", action="store_true", dest="take_over",
+                              help="start here although another ticket's agent is still logged as working in this "
+                                   "checkout (its session is gone)")
     resume_parser = subparsers.add_parser("resume")
     resume_parser.add_argument("--target", required=True, type=Path)
     resume_parser.add_argument("--question-id", required=True)
@@ -3569,7 +3617,7 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
             raise ValueError("start requires --ticket or --id and --title")
         if args.overrides:
             configure(target, args.overrides)
-        result = run(target, ticket_from_flags(args))
+        result = run(target, ticket_from_flags(args), take_over=args.take_over)
         from android_workflow.skills import refresh as refresh_skills
 
         refresh_skills(target)  # which Android skills this ticket needs, from the ticket and its likely files

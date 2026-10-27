@@ -25,7 +25,7 @@ from pathlib import Path
 from unittest import mock
 
 from android_workflow import hub
-from android_workflow.cli import main, read_json
+from android_workflow.cli import main, read_json, run
 from test_live_team_emulator import GitProject, git, office_run, start
 
 
@@ -67,7 +67,10 @@ class HubTests(unittest.TestCase):
         with GitProject() as app:
             start(app, "A-1")
             quiet("log", "--target", str(app), "--stage", "Planner", "--status", "started")
-            start(app, "A-2")  # the app's current ticket moves on; A-1's Planner still works
+            with self.assertRaisesRegex(ValueError, "A-1 is still running in this checkout"):
+                start(app, "A-2")  # a second ticket would take A-1's run over
+            # --take-over (its session was said to be gone): the app moves on while A-1's Planner still logs working
+            run(app, {"id": "A-2", "title": "Change ProfileScreen", "type": "chore"}, take_over=True)
             quiet("office", "--target", str(app), "--no-open")
             found = {run["ticket"]: run for run in index()["runs"]}
         self.assertTrue(found["A-1"]["live"])
@@ -92,6 +95,23 @@ class HubTests(unittest.TestCase):
             quiet("office", "--target", str(app), "--no-open")
             found = index()["runs"][0]
         self.assertFalse(found["live"])
+
+    def test_a_ticket_started_again_in_a_worktree_closes_its_copy_in_the_main_checkout(self) -> None:
+        from android_workflow.paths import run_dir
+
+        with GitProject() as app:
+            start(app, "A-1")
+            quiet("log", "--target", str(app), "--stage", "Planner", "--status", "started")
+            worktree = app.parent / f"{app.name}-wt"
+            git(app, "worktree", "add", "-q", str(worktree), "-b", "a-1")
+            (worktree / "settings.gradle.kts").write_text("", encoding="utf-8")
+            start(worktree, "A-1")
+            left = read_json(run_dir(app) / "run-state.json")
+            quiet("office", "--target", str(app), "--no-open")
+            found = [run for run in index()["runs"] if run["ticket"] == "A-1" and not run.get("live")]
+        self.assertEqual((left["status"], left["moved_to"]), ("moved", str(worktree.resolve())))
+        self.assertEqual(left["stages"]["T3"]["status"], "moved")
+        self.assertEqual(len(found), 1)  # the main checkout's copy is no longer shown running
 
     def test_the_workflow_picker_shows_a_short_title(self) -> None:
         page = hub.page_path()

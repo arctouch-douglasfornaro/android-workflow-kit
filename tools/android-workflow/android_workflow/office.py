@@ -103,7 +103,7 @@ def run_is_live(run: Path, current: bool = True) -> bool:
         since = (metrics.get(stage) or {}).get("running_since")
         if now - float(since if isinstance(since, (int, float)) else updated) < LIVE_AGENT_SECONDS:
             return True
-    unfinished = (state.get("status") or "idle") not in {"completed", "idle"}
+    unfinished = (state.get("status") or "idle") not in {"completed", "idle", "moved"}
     return current and unfinished and now - updated < LIVE_IDLE_SECONDS
 
 

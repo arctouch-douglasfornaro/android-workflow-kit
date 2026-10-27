@@ -281,10 +281,45 @@ def other_ticket_branches(ticket, branch, repo_root):
     ]
 
 
+LIVE_RUN_SECONDS = 2 * 3600  # an unfinished run touched this recently is still someone's
+
+
+def checkout_busy(repo_root, ticket, current, base, now=None):
+    """Why this checkout belongs to another ticket right now (None when it is free for `ticket`).
+
+    Working in place on another ticket's branch, or under another ticket's live run, mixes the two:
+    the second ticket lands on the first one's branch and its `start` takes the first one's run over
+    (both sessions then read and write one run). Such a ticket gets its own worktree instead."""
+    import json
+    import time
+
+    mine = (ticket or "").upper()
+    if is_valid_ticket(ticket) and current not in (base, "HEAD") and mine not in current.upper():
+        return f"this checkout is on {current}, another ticket's branch"
+    try:
+        with open(os.path.join(repo_root, ".ai", "workflow", "current.json"), encoding="utf-8") as handle:
+            other = str(json.load(handle).get("ticket_id") or "")
+        with open(os.path.join(repo_root, ".ai", "workflow", other, "run-state.json"), encoding="utf-8") as handle:
+            state = json.load(handle)
+    except (OSError, ValueError, AttributeError):
+        return None
+    if not other or other.upper() == mine:
+        return None
+    unfinished = state.get("status") not in ("completed", "idle", "moved")
+    recent = (now or time.time()) - float(state.get("updated_at") or 0) < LIVE_RUN_SECONDS
+    working = any(isinstance(entry, dict) and entry.get("status") in ("started", "running")
+                  for entry in (state.get("stages") or {}).values())
+    if unfinished and (recent or working):
+        return f"{other} is still running in this checkout"
+    return None
+
+
 def emit(result):
     for key in ("base_branch", "username", "username_source", "feature_id",
                 "branch", "current_branch", "action", "start_point", "sync", "worktree_path"):
         print(f"{key}: {result.get(key, '-')}")
+    if result.get("auto_worktree"):
+        print(f"auto_worktree: {result['auto_worktree']} (TARGET is worktree_path)")
     boot = result.get("bootstrap")
     if boot:
         for sub, outcome in boot["submodules"].items():
@@ -357,8 +392,16 @@ def main(argv=None):
         current = base
         result["current_branch"] = "HEAD (detached)"
 
+    busy = None if use_worktree else checkout_busy(repo_root, args.ticket, current, base)
+    if busy:
+        # In place is the default only while the checkout is free: never take another ticket's
+        # branch or run over (two sessions on one checkout corrupt both runs).
+        use_worktree = True
+        result["auto_worktree"] = busy
+        result["worktree_path"] = os.path.join(os.path.dirname(repo_root), f"wt-{feature_id}")
+
     if current != base and not use_worktree:
-        # Already on a feature branch and no worktree asked for — reuse it as-is; the active branch
+        # Already on a feature branch (this ticket's) and no worktree asked for — reuse it as-is; the active branch
         # is `current`, not the freshly-computed name, so report what's actually checked out.
         result["action"] = "noop-non-base"
         result["branch"] = current

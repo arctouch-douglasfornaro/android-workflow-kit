@@ -133,9 +133,13 @@ CLI status|list --target T                          CLI clean --target T [--tick
 ## Execute
 
 1. **Workspace first, in-place by default:** run `feature_workspace.py` without `--worktree`
-   unless the user asked for one. On a non-base branch it continues there; on the base branch it
-   creates or reuses `<user>/<ID>-<slug>` in the same checkout. With `--worktree`, `TARGET`
-   becomes the printed `worktree_path`. The script initialises what the main checkout already
+   unless the user asked for one. On this ticket's branch it continues there; on the base branch it
+   creates or reuses `<user>/<ID>-<slug>` in the same checkout. With `--worktree`, or when it prints
+   `auto_worktree:` (the checkout is on another ticket's branch, or another ticket's run is going
+   there: never share one checkout between two sessions), `TARGET` becomes the printed
+   `worktree_path`. `start` refuses a checkout where another ticket's agent is still working; only
+   when the user confirms that session is gone, `start --take-over`. Starting a ticket in a new
+   worktree closes its unfinished copy in the other checkout as `moved`. The script initialises what the main checkout already
    uses (initialised submodules, `local.properties`) and prints `bootstrap_*` lines; relay any
    `bootstrap_submodule … failed` or `bootstrap_not_copied` line to the user and STOP until they
    answer; no agent works around it (nor runs the repository's own worktree setup scripts).

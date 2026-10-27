@@ -329,6 +329,45 @@ class TestBootstrapWorktree(RepoCase):
         self.assertEqual(["keystore.properties"], report["ignored_root_files_not_copied"])
         self.assertFalse(os.path.exists(os.path.join(os.path.dirname(self.dir), "wt", "keystore.properties")))
 
+    def test_another_tickets_branch_gets_a_worktree_never_reused(self) -> None:
+        run(self.dir, "checkout", "-b", "me/MF-1-first")
+        target = os.path.join(os.path.dirname(self.dir), "wt-MF-2-second")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = fw.main(["--ticket", "MF-2", "--title", "second", "--username", "me",
+                          "--repo-root", self.dir, "--no-bootstrap"])
+        self.assertEqual(0, rc)
+        self.assertEqual("me/MF-1-first", run(self.dir, "rev-parse", "--abbrev-ref", "HEAD"))  # untouched
+        self.assertEqual("me/MF-2-second", run(target, "rev-parse", "--abbrev-ref", "HEAD"))
+        self.assertIn("auto_worktree: this checkout is on me/MF-1-first", out.getvalue())
+
+    def test_the_same_tickets_branch_is_reused_in_place(self) -> None:
+        run(self.dir, "checkout", "-b", "me/MF-1-first")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            fw.main(["--ticket", "MF-1", "--title", "first", "--username", "me", "--repo-root", self.dir])
+        self.assertIn("action: noop-non-base", out.getvalue())
+        self.assertNotIn("auto_worktree", out.getvalue())
+
+    def test_another_tickets_live_run_on_the_base_branch_gets_a_worktree(self) -> None:
+        import json
+        import time
+
+        folder = os.path.join(self.dir, ".ai", "workflow", "MF-1")
+        os.makedirs(folder)
+        with open(os.path.join(self.dir, ".ai", "workflow", "current.json"), "w") as f:
+            json.dump({"ticket_id": "MF-1"}, f)
+        state = {"status": "awaiting_host", "updated_at": time.time(), "stages": {"T3": {"status": "started"}}}
+        with open(os.path.join(folder, "run-state.json"), "w") as f:
+            json.dump(state, f)
+        self.assertEqual("MF-1 is still running in this checkout",
+                         fw.checkout_busy(self.dir, "MF-2", "master", "master"))
+        self.assertIsNone(fw.checkout_busy(self.dir, "MF-1", "master", "master"))
+        state.update({"status": "completed"})
+        with open(os.path.join(folder, "run-state.json"), "w") as f:
+            json.dump(state, f)
+        self.assertIsNone(fw.checkout_busy(self.dir, "MF-2", "master", "master"))
+
     def test_main_creates_the_worktree_and_reports_the_bootstrap(self) -> None:
         with open(os.path.join(self.dir, "local.properties"), "w") as f:
             f.write("sdk.dir=/sdk\n")
