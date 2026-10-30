@@ -195,8 +195,9 @@ CLI status|list --target T                          CLI clean --target T [--tick
    - `watch` / `done`: step 5 / the Done summary; run `also` (`CLI emulator --stop`: gives the device
      back and closes the emulators the workflow started that no other run is waiting for) first.
 
-   Agent returns that `next` cannot read from files are yours: `NEEDS_INPUT` (Planner) → batch the
-   questions to the user and STOP until answered, then resume it; `NEEDS_OTHER_SLICE` → the Tech
+   Agent returns that `next` cannot read from files are yours: `NEEDS_INPUT` (Planner) → if `next` does
+   not already say `ask_user`, run `CLI update-spec --target TARGET --question "q1|q2"`; ask, `CLI resume` each
+   answer, then `next` (it re-runs the Planner with the answers); `NEEDS_OTHER_SLICE` → the Tech
    Lead; `BLOCKED` from the Implementer (an environment error) → tell the user; `NEEDS_APPROVAL`
    (Delivery) → see *Invocation*. A red gate is never waived by hand; a gate that itself looks wrong
    (a misclassified waiver, a parser miss) is a toolkit defect: `finish --draft`. No agent edits the

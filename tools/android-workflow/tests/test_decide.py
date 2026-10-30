@@ -305,6 +305,56 @@ class RunTests(unittest.TestCase):
         self.review("changes_requested", [{"id": "R1"}])
         self.assertIn("--draft", self.next()["command"])
 
+    def test_a_new_blocker_found_by_the_delta_review_gets_one_more_round(self) -> None:
+        self.checked()
+        self.gate("passed")
+        self.review("changes_requested", [{"id": "R1"}])
+        self.assertEqual(self.next()["ids"], ["R1"])
+        self.implement("val a = 2")
+        self.next()
+        self.gate("passed")
+        self.review("changes_requested", [{"id": "R2"}])  # R1 is fixed; the delta found something else
+        self.assertEqual(self.next()["ids"], ["R2"])
+        self.implement("val a = 3")
+        self.next()
+        self.gate("passed")
+        self.review("changes_requested", [{"id": "R3"}])  # never more than two fix rounds
+        self.assertIn("--draft", self.next()["command"])
+
+    def test_the_planner_questions_pause_the_run_and_the_answers_rerun_the_planner(self) -> None:
+        self.start("--risk", "medium", title="Make the profile title bigger")
+        self.assertEqual(self.next()["agent"], "aw-planner")
+        cli("update-spec", "--target", self.target, "--acceptance", "a", "--surfaces", "domain",
+            "--question", "Which label?|Which set?")
+        cli("log", "--target", self.target, "--stage", "Planner", "--status", "completed", "--note", "questions", "--tokens", "1")
+        answer = self.next()
+        self.assertEqual((answer["next"], answer["question"]["question"]), ("ask_user", "Which label?"))
+        cli("resume", "--target", self.target, "--question-id", answer["question"]["id"], "--answer", "Star")
+        second = self.next()["question"]
+        self.assertEqual(second["question"], "Which set?")
+        state = cli("resume", "--target", self.target, "--question-id", second["id"], "--answer", "415")
+        self.assertEqual(state["status"], "awaiting_host")
+        answer = self.next()
+        self.assertEqual((answer["agent"], [item["answer"] for item in answer["answers"]]), ("aw-planner", ["Star", "415"]))
+        cli("log", "--target", self.target, "--stage", "Planner", "--status", "completed", "--note", "ready", "--tokens", "1")
+        self.assertEqual(self.next()["agent"], "aw-implementer")
+
+    def test_a_device_report_older_than_the_last_replay_is_refused(self) -> None:
+        self.visual_run()
+        with mock.patch("android_workflow.emulator.status", return_value={"status": "connected", "serial": "emu-1"}):
+            self.next()
+            report = self.rundir / "device-report.md"
+            report.write_text("# Status\n\nPARTIAL\n\n# Device\n\nemulator\n" + "x" * 420, encoding="utf-8")
+            (self.rundir / "replay.json").write_text(json.dumps({
+                "status": "replayed", "fingerprint": source_fingerprint(self.root),
+                "flows": [{"flow": "screen.yaml", "status": "passed"}]}), encoding="utf-8")
+            os.utime(report, (report.stat().st_mtime - 120,) * 2)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                code = main(["log", "--target", self.target, "--stage", "Device", "--status", "completed", "--note", "PARTIAL"])
+            self.assertNotEqual(code, 0)
+            self.assertIn("newer than device-report.md", out.getvalue())
+
     def test_a_formatting_only_change_keeps_the_approved_review(self) -> None:
         self.checked()
         self.review("approved")
@@ -497,6 +547,19 @@ class ReplayTests(unittest.TestCase):
         result, _ = self.replay()
         self.assertEqual(result["flows"][0]["status"], "failed")
         self.assertFalse((run_dir(self.root) / "media/after/profile.png").exists())
+
+    def test_an_unchanged_flow_that_failed_twice_is_skipped_until_it_is_edited(self) -> None:
+        (self.flows / "_open.yaml").write_text("- openLink: https://x/1\n- launchApp\n", encoding="utf-8")
+        (self.flows / "b.yaml").write_text("- runFlow: _open.yaml\n- FAILME\n", encoding="utf-8")
+        first, _ = self.replay()
+        self.assertIn("launchApp after openLink", first["flows"][0]["hints"][0])
+        second, _ = self.replay()
+        third, _ = self.replay()
+        self.assertEqual([r["flows"][0].get("failed_streak") for r in (first, second, third)], [1, 2, 2])
+        self.assertTrue(third["flows"][0]["skipped"])
+        (self.flows / "_open.yaml").write_text("- openLink: https://x/1\n", encoding="utf-8")  # a helper edit reruns it
+        fourth, _ = self.replay()
+        self.assertNotIn("skipped", fourth["flows"][0])
 
     def test_a_failing_flow_is_reported_with_its_log(self) -> None:
         (self.flows / "a.yaml").write_text("- launchApp\n", encoding="utf-8")

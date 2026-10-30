@@ -24,8 +24,9 @@ The only planning role for `/android-workflow`. One pass, short output.
    the ticket text; anything missing that changes behavior is a **business question**, never
    a guess. Classify type (bug/feature/chore), risk and complexity from evidence.
    **Questions first:** when a business question would change the plan (base branch, scope,
-   parity with a sibling screen), return `NEEDS_INPUT` with every question batched right after
-   triage, before steps 3–8. Planning on a guess and redoing it after the answer cost a past run
+   parity with a sibling screen), record them with `CLI update-spec --target TARGET --question "q1|q2"`
+   (it pauses the run, so `next` asks the developer instead of starting the Implementer) and return
+   `NEEDS_INPUT` with every question batched right after triage, before steps 3–8. Planning on a guess and redoing it after the answer cost a past run
    40 minutes; the orchestrator resumes you with the answers.
 2. Bug: a reproduction is required. Missing → return `NEEDS_INPUT` with the question.
 3. Localizer: open at most the top 8 `change-set-map.json` candidates. Drop generic matches,

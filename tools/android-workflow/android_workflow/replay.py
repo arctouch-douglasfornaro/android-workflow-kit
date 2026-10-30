@@ -70,6 +70,38 @@ def _digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def flow_digest(flow: Path) -> str:
+    """What a flow runs: its own files and every `_helper` beside it (a fix often lands in a helper)."""
+    sha = hashlib.sha256()
+    parts = [flow, *(flow.with_suffix(ext) for ext in (".yaml", ".yml"))] if flow.suffix == ".sh" else [flow]
+    for path in [*parts, *sorted(flow.parent.glob("_*"))]:
+        if path.is_file():
+            sha.update(path.name.encode() + b"\0" + path.read_bytes())
+    return sha.hexdigest()[:16]
+
+
+STALE_FAILS = 2  # an unchanged flow that failed this many replays on an unchanged source is not run again
+OPEN_LINK_RE = re.compile(r"^\s*-\s*openLink\b", re.M)
+LAUNCH_APP_RE = re.compile(r"^\s*-\s*launchApp\b", re.M)
+
+
+def flow_hints(flow: Path, log_text: str) -> list[str]:
+    """Known causes of a failed flow that the flow text or its log already show."""
+    hints = []
+    for path in [flow.with_suffix(".yaml"), flow.with_suffix(".yml"), *sorted(flow.parent.glob("_*.y*ml"))]:
+        try:
+            text = path.read_text(encoding="utf-8") if path.is_file() else ""
+        except OSError:
+            continue
+        link = OPEN_LINK_RE.search(text)
+        launch = LAUNCH_APP_RE.search(text, link.end()) if link else None
+        if launch:
+            hints.append(f"{path.name}: launchApp after openLink restarts the app and drops the deep link")
+    if "err=-38" in log_text or "Encoder failed" in log_text:
+        hints.append("this device cannot record video (encoder -38): capture with takeScreenshot only")
+    return hints
+
+
 def _tail(path: Path, lines: int = 15) -> str:
     try:
         return "\n".join(path.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:])
@@ -396,6 +428,10 @@ def _replay(target: Path, serial: str, phase: str, install_base_apk: bool | None
     started = time.monotonic()
     install_seconds = 0.0
     result_file = agent_dir / (REPLAY_FILE if phase == "after" else f"replay-{phase}.json")
+    fingerprint = source_fingerprint(target)
+    previous = read_json(result_file) if result_file.is_file() else {}
+    earlier = {item.get("flow"): item for item in previous.get("flows") or []
+               if isinstance(item, dict) and previous.get("fingerprint") == fingerprint}
     explicit = install_base_apk is True
     if phase == "before" and install_base_apk is None:
         install_base_apk = True  # the cached base when there is one, else the build already installed
@@ -433,6 +469,16 @@ def _replay(target: Path, serial: str, phase: str, install_base_apk: bool | None
     for flow in saved:
         folder = out / flow.stem
         folder.mkdir(parents=True, exist_ok=True)
+        digest = flow_digest(flow)
+        last = earlier.get(flow.name) or {}
+        streak = int(last.get("failed_streak") or 0) if last.get("digest") == digest else 0
+        if streak >= STALE_FAILS:
+            # Same flow, same source: a third run fails the same way. Only an edit to the flow (or the code) reruns it.
+            results.append({"flow": flow.name, "status": "failed", "skipped": True, "digest": digest,
+                            "failed_streak": streak, "captured": [], "attempts": 0, "seconds": 0.0,
+                            "reason": f"failed {streak} replays unchanged on this source: repair the flow or delete it",
+                            **({"hints": last["hints"]} if last.get("hints") else {})})
+            continue
         flow_started = time.monotonic()
         code, log = _run_flow(flow, maestro, serial, folder, target, phase, flow_timeout)
         attempts = 1
@@ -453,7 +499,10 @@ def _replay(target: Path, serial: str, phase: str, install_base_apk: bool | None
         events = _event_count(folder, flow.stem)
         status = "passed" if code == 0 and (captured or metrics or events or phase == "before" and not allowed) else \
             "partial" if phase == "before" and captured else "failed"
+        hints = flow_hints(flow, _tail(Path(log), 200)) if status == "failed" else []
         results.append({"flow": flow.name, "status": status, "exit_code": code, "captured": captured,
+                        "digest": digest, **({"failed_streak": streak + 1} if status == "failed" else {}),
+                        **({"hints": hints} if hints else {}),
                         "attempts": attempts, "seconds": round(time.monotonic() - flow_started, 1),
                         **({"frames": metrics} if metrics else {}),
                         **({"events": events} if events else {}),
@@ -474,7 +523,7 @@ def _replay(target: Path, serial: str, phase: str, install_base_apk: bool | None
     build_seconds = 0.0 if (built or {}).get("cached") else float((built or {}).get("build_seconds") or 0)
     flows_seconds = round(total - install_seconds, 1)
     result = {
-        "status": status, "phase": phase, "serial": serial, "fingerprint": source_fingerprint(target),
+        "status": status, "phase": phase, "serial": serial, "fingerprint": fingerprint,
         "flows": results, "identical_to_before": identical, "missing_from_after" if phase == "after" else "missing": missing,
         "build_seconds": build_seconds, "install_seconds": install_seconds, "flows_seconds": flows_seconds,
         "duration_seconds": total, "budget_seconds": budget,

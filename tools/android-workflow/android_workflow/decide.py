@@ -291,10 +291,15 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
         return _answer("update_spec", "express skips the Planner: record the AC and surfaces from the ticket text",
                        command='CLI update-spec --target TARGET --acceptance "a|b" --surfaces ui', then="CLI next --target TARGET")
     planner_done = (bool(spec.get("planner_updated")) or planner.get("note") is not None and planner.get("status") == "completed") \
-        and planner.get("status") != "started"
+        and planner.get("status") != "started" and not spec.get("replan")
     if level != "express" and not planner_done:
         if planner.get("status") == "started":
             return _answer("wait", "the Planner is working", agent="aw-planner")
+        if spec.get("replan"):
+            answered = [q for q in spec.get("business_questions") or [] if q.get("answer") is not None]
+            return _spawn("aw-planner", "the developer answered the Planner's questions: finish the plan with them",
+                          stage="Planner", level=level, answers=answered, resume=True,
+                          note="finish the plan with the developer's answers")
         return _spawn("aw-planner", f"level {level}: plan before code", stage="Planner", level=level,
                       note="turn the ticket into verifiable AC and confirm the change set",
                       also=_background(spec, no_device))
@@ -382,7 +387,10 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
     review_failed = review_verdict == "changes_requested"
     if gate_failed and gate_reds(gate) > GATE_MAX_FIXES:
         return _draft(f"the quality gate is still red after {GATE_MAX_FIXES} fix rounds", state)
-    if review_failed and failed_rounds(review_state, {"changes_requested"}, review_verdict, review_state.get("fingerprint")) > REVIEW_MAX_FIXES:
+    review_rounds = failed_rounds(review_state, {"changes_requested"}, review_verdict, review_state.get("fingerprint"))
+    if review_failed and review_rounds > REVIEW_MAX_FIXES and not (
+            review_rounds <= REVIEW_MAX_FIXES + 1
+            and _only_new_findings(agent_dir, review, float(state.get("created_at") or 0))):
         return _draft(f"the review still blocks after {REVIEW_MAX_FIXES} fix round", state)
     if gate_failed:
         findings.extend(gate_failures(gate))
@@ -472,6 +480,27 @@ def _fixed_before(agent_dir: Path, fingerprint: str, since: float = 0) -> bool:
         if item.get("fix_of") == fingerprint and float(item.get("at") or 0) >= since:
             return True
     return False
+
+
+def _only_new_findings(agent_dir: Path, review: dict[str, Any], since: float = 0) -> bool:
+    """Every blocking finding is one no fix round of this run was handed (a delta review keeps the IDs
+    of what is still open): the fixes worked and the delta found something else, so one more round."""
+    current = {str(item.get("id")) for item in review_blocking(review) if item.get("id")}
+    if not current:
+        return False
+    handed: set[str] = set()
+    try:
+        lines = (agent_dir / DECISIONS_FILE).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    for line in lines:
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue
+        if item.get("fix_of") and float(item.get("at") or 0) >= since:
+            handed.update(str(value) for value in item.get("ids") or [])
+    return bool(handed) and not current & handed
 
 
 def _fix_round(agent_dir: Path, team: dict[str, Any], findings: list[str], review: dict[str, Any], why: str,
@@ -697,7 +726,7 @@ def _keep_review_if_formatting_only(target: Path, agent_dir: Path, state: dict[s
 
 def _record(target: Path, agent_dir: Path, answer: dict[str, Any]) -> None:
     line = {"at": round(time.time(), 3),
-            **{key: answer[key] for key in ("next", "agent", "mode", "why", "fix_of") if key in answer}}
+            **{key: answer[key] for key in ("next", "agent", "mode", "why", "fix_of", "ids") if key in answer}}
     try:
         with (agent_dir / DECISIONS_FILE).open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(line, ensure_ascii=False) + "\n")

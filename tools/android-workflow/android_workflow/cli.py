@@ -2293,12 +2293,34 @@ def update_spec(target: Path, args: argparse.Namespace) -> dict[str, Any]:
     # the rules forbid (a bug, an open question, risk above low) is refused.
     apply_level(spec, explicit=getattr(args, "level", None), planner=bool(getattr(args, "level", None)))
     spec["planner_updated"] = True  # a later `start` of this ticket keeps these decisions
+    asked = [item.strip() for item in (getattr(args, "question", None) or "").split("|") if item.strip()]
+    if asked:
+        known = spec.setdefault("business_questions", [])
+        known.extend(normalize_question(text, len(known) + index) for index, text in enumerate(asked, 1))
+        spec["replan"] = True  # the plan waits on the answers: the Planner runs again once they are in
     errors = validate_artifact("ticket-spec.json", spec)
     if errors:
         raise ValueError("; ".join(errors))
     write_json(agent_dir / "ticket-spec.json", spec)
     append_stage_log(agent_dir, "T1", "completed", "host", "ticket-spec.json updated by Planner")
+    if asked:
+        pause_for_planner(target, spec)
     return spec
+
+
+def pause_for_planner(target: Path, spec: dict[str, Any]) -> None:
+    """The Planner's NEEDS_INPUT, in the run's files: `next` asks the developer and, once answered,
+    runs the Planner again with the answers instead of handing its unsettled plan to the Implementer."""
+    with run_lock(target):
+        state = load_state(target)
+        question = pending_question(spec, state.get("answers") or {})
+        if not question:
+            return
+        if state.get("status") != "paused":
+            state["paused_from"] = state.get("status")
+        state.update({"status": "paused", "pending_question": question})
+        save_state(target, state)
+    append_stage_log(run_dir(target), "T3", "paused", "host", f"waiting on {question['id']}: {question['question']}")
 
 
 def ticket_from_flags(args: argparse.Namespace) -> dict[str, Any]:
@@ -2588,6 +2610,11 @@ def _log_stage(
         unproven = device_pass_unproven(target, agent_dir)
         if unproven:
             raise ValueError(unproven)
+    if stage == "T3" and status == "completed" and read_json(agent_dir / "run-state.json").get("status") != "paused":
+        spec_path = agent_dir / "ticket-spec.json"
+        spec = read_json(spec_path) if spec_path.is_file() else {}
+        if spec.pop("replan", None):  # the Planner finished with the developer's answers
+            write_json(spec_path, spec)
     append_stage_log(agent_dir, stage, status, actor, note, role=shown)
     # A Device round ending keeps the device: it stays this run's until `finish` (the next round
     # finds this run's build and flows on it, and no other run installs in between).
@@ -2935,6 +2962,9 @@ def recorded_verdict(agent_dir: Path, stage: str) -> str:
 MAESTRO_UNAVAILABLE = re.compile(r"(?im)^\W*maestro:\s*unavailable\b\W*(\S.{3,})$")
 
 
+STALE_REPORT_SECONDS = 30  # a replay this much newer than device-report.md ran after the report was written
+
+
 def device_pass_unproven(target: Path, agent_dir: Path) -> str | None:
     """Why a Device PASS cannot be recorded yet, or None.
 
@@ -2946,6 +2976,12 @@ def device_pass_unproven(target: Path, agent_dir: Path) -> str | None:
     if not path.is_file():
         return None
     text = path.read_text(encoding="utf-8")
+    replay_file = agent_dir / "replay.json"
+    if replay_file.is_file() and replay_file.stat().st_mtime > path.stat().st_mtime + STALE_REPORT_SECONDS:
+        # A report written before the last replay describes a round that is gone (a past run said
+        # "the last replay failed" over a replay that had passed).
+        return ("replay.json is newer than device-report.md: update the report (Status, Not verified, "
+                "Anomalies) with the last replay, then log again")
     if recorded_verdict(agent_dir, "T7") not in {"pass", "partial"} or MAESTRO_UNAVAILABLE.search(text):
         return None
     replayed = read_json(agent_dir / "replay.json") if (agent_dir / "replay.json").is_file() else {}
@@ -3362,6 +3398,10 @@ def resume(target: Path, question_id: str, answer: str) -> dict[str, Any]:
         state.update({"pending_question": next_question, "updated_at": int(time.time())})
         write_json(state_path, state)
         return state
+    if "paused_from" in state:  # paused by the Planner mid-run: the run goes on, `next` re-runs the Planner
+        state.update({"status": state.pop("paused_from") or "awaiting_host", "pending_question": None})
+        save_state(target, state)
+        return state
     return execute_pipeline(target, state, spec)
 
 
@@ -3497,6 +3537,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     spec_parser.add_argument("--visual", choices=("yes", "no"), help="a before/after capture helps the PR reviewer")
     spec_parser.add_argument("--parallel-parts", type=int, help="independent parts of the Parallel work (1 = single)")
     spec_parser.add_argument("--parallel-files", type=int, help="files across those parts")
+    spec_parser.add_argument("--question", help="the Planner's NEEDS_INPUT, questions separated by |: pauses the run")
     list_parser = subparsers.add_parser("list")
     list_parser.add_argument("--target", required=True, type=Path)
     clean_parser = subparsers.add_parser("clean")
