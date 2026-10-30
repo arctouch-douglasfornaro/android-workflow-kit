@@ -1375,6 +1375,7 @@ BASELINE_ABORT = "Aborting build since new baseline file was created"
 BASELINE_NAME_PATTERN = re.compile(r"(?i)baseline[^/]*\.xml$")
 LINT_REPORT_PATTERN = re.compile(r"The full lint text report is located at:\s*(\S+)")
 LINT_LINE_PATTERN = re.compile(r"^.+?:(\d+): (?:Error|Fatal|Warning): ")
+LINT_HEADER_PATTERN = re.compile(r"^.+?:(?:\d+:)? (?:Error|Fatal|Warning): ")
 LINT_ISSUE_PATTERN = re.compile(r"^(.+?):(?:\d+:)? (Error|Fatal|Warning): (.+) \[([\w-]+)(?: from [^\]]+)?\]$")
 KOTLINTER_ISSUE_PATTERN = re.compile(r"^(\S+?\.kts?):\d+:\d+:? Lint error > (.+)$")
 LINT_SUMMARY_PATTERN = re.compile(r"^\s*(\d+) errors?, (\d+) warnings?", re.M)
@@ -1470,6 +1471,25 @@ def finding_line(text: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def lint_issue_lines(lines: list[str]) -> list[str]:
+    """One string per lint finding: a long message wraps onto later lines, its `[IssueId]` on the last one."""
+    joined: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index].strip()
+        index += 1
+        if not LINT_HEADER_PATTERN.match(line):
+            continue
+        while not LINT_ISSUE_PATTERN.match(line) and index < len(lines):
+            following = lines[index].strip()
+            if not following or LINT_HEADER_PATTERN.match(following):
+                break
+            line = f"{line} {following}"
+            index += 1
+        joined.append(line)
+    return joined
+
+
 def step_findings(command: str, block: list[str], lines: list[str], root: Path) -> list[tuple[str, str, int | None]]:
     """`(file, finding, line)`, keyed without line numbers so an edit above an old finding is not new."""
     category = failure_category(command)
@@ -1477,8 +1497,8 @@ def step_findings(command: str, block: list[str], lines: list[str], root: Path) 
     if category == "android_lint":
         reports = dict.fromkeys(LINT_REPORT_PATTERN.findall("\n".join(block)))
         for report in reports:
-            for line in text_if_exists(Path(report)).splitlines():
-                match = LINT_ISSUE_PATTERN.match(line.strip())
+            for line in lint_issue_lines(text_if_exists(Path(report)).splitlines()):
+                match = LINT_ISSUE_PATTERN.match(line)
                 if match:
                     path = relative_to_root(match.group(1), root)
                     found.append((path, f"{path} [{match.group(4)}] {match.group(3)}", finding_line(line)))
@@ -1486,8 +1506,8 @@ def step_findings(command: str, block: list[str], lines: list[str], root: Path) 
         # task's failure block when multiple lint tasks run together. Preserve changed-file
         # classification in that case by reading the same diagnostic format directly.
         if not reports:
-            for line in block:
-                match = LINT_ISSUE_PATTERN.match(line.strip())
+            for line in lint_issue_lines(block):
+                match = LINT_ISSUE_PATTERN.match(line)
                 if match:
                     path = relative_to_root(match.group(1), root)
                     found.append((path, f"{path} [{match.group(4)}] {match.group(3)}", finding_line(line)))

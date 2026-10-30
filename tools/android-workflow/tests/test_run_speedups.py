@@ -62,6 +62,29 @@ class ChangedLinesLintTests(unittest.TestCase):
         self.assertEqual(lint["outcome"], "waived")
         self.assertEqual(lint["waiver"]["reason"], "findings_on_unchanged_lines")
 
+    def test_an_old_finding_whose_message_wraps_onto_the_next_line_is_still_waived(self) -> None:
+        issues = [
+            f"{SCREEN}:2: Error: Old problem whose message is long\n"
+            "enough to wrap onto a second line [DiscouragedApi]\n"
+            "        super.onCleared()\n"
+            "        ~~~~~~~~~",
+            "other/src/Old.kt:4: Error: Short one [EmptySuperCall]",
+        ]
+        with AndroidProject() as root:
+            fake_gradle_project(root, {
+                "tasks": {":app:lintDebug": "lint"},
+                "lint_issues": issues,
+                "lint_summary": "2 errors, 0 warnings\n",
+            })
+            run(root, {"id": "L-1", "title": "Change ProfileScreen", "type": "chore"})
+            implement(root)
+            code = main(["gate", "--target", str(root)])
+            report = read_json(run_dir(root) / "gate-report.json")
+            lint = next(step for step in report["steps"] if step["command"].endswith(":app:lintDebug"))
+        self.assertEqual(code, 0)
+        self.assertEqual(lint["outcome"], "waived")
+        self.assertEqual(lint["waiver"]["count"], 2)
+
     def test_a_finding_on_a_line_the_change_wrote_still_fails(self) -> None:
         with AndroidProject() as root:
             code, lint = lint_gate(root, [
