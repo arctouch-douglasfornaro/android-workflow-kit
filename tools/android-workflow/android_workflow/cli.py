@@ -3629,6 +3629,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     pr_parser.add_argument("--as", dest="verdict", help="ci: ours | unrelated | rerun")
     pr_parser.add_argument("--reason", help="ci: one line on why")
     pr_parser.add_argument("--continue", dest="resume", action="store_true", help="sync: conflicts resolved, commit and push")
+    review_parser = subparsers.add_parser("review", help="Android Review: review an open PR, post one review after the OK")
+    review_parser.add_argument("review_action", choices=("start", "next", "ci", "draft", "edit", "post", "answer", "device", "wait"))
+    review_parser.add_argument("--target", required=True, type=Path,
+                               help="start: the app's main checkout; every other action: the review worktree")
+    review_parser.add_argument("--pr", help="start: PR number or URL")
+    review_parser.add_argument("--worktree", type=Path, help="start: where the review worktree goes")
+    review_parser.add_argument("--no-media", action="store_true", dest="no_media", help="start: do not download PR media")
+    review_parser.add_argument("--no-device", action="store_true", dest="no_device")
+    review_parser.add_argument("--dry-run", action="store_true", dest="dry_run")
+    review_parser.add_argument("--wait", action="store_true", help="ci: poll until the checks finish")
+    review_parser.add_argument("--timeout", type=float, default=540)
+    review_parser.add_argument("--drop", action="append", default=[], help="edit: a comment id to drop (repeatable)")
+    review_parser.add_argument("--set", action="append", nargs=2, metavar=("ID", "TEXT"), default=[],
+                               help="edit: new text for a comment (repeatable)")
+    review_parser.add_argument("--event", help="edit: APPROVE | COMMENT | REQUEST_CHANGES")
+    review_parser.add_argument("--body", help="edit: the review body")
+    review_parser.add_argument("--draft-id", dest="draft_id", help="post: the draft id the developer approved")
+    review_parser.add_argument("--question", help="answer: the Planner's question")
+    review_parser.add_argument("--answer", help="answer: the developer's answer")
+    review_parser.add_argument("--require", help="device: why the device must run although no UI file changed")
     evidence_parser = subparsers.add_parser("evidence")
     evidence_parser.add_argument("action", choices=("capture", "ingest", "compare", "list"))
     evidence_parser.add_argument("--target", required=True, type=Path)
@@ -3845,6 +3865,15 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
         from android_workflow.watch import dispatch as dispatch_pr
 
         return dispatch_pr(target, args)
+    if args.command == "review":
+        from android_workflow.review import dispatch as dispatch_review
+
+        missing = {"start": "pr", "post": "draft_id", "answer": "answer", "device": "require"}.get(args.review_action)
+        if missing and not getattr(args, missing):
+            raise ValueError(f"review {args.review_action} needs --{missing.replace('_', '-')}")
+        if args.review_action == "answer" and not args.question:
+            raise ValueError("review answer needs --question")
+        return dispatch_review(target, args)
     if args.command == "evidence":
         from android_workflow.evidence import dispatch_evidence
 

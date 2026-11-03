@@ -283,6 +283,20 @@ uses it at once; nothing else to do.
 More: the full workflow rules are in [`skills/android-workflow/SKILL.md`](skills/android-workflow/SKILL.md)
 and the CLI reference in [`tools/android-workflow/README.md`](tools/android-workflow/README.md).
 
+## Reviewing someone else's PR
+
+```text
+/android-review 22307            # or the PR URL, from the app's folder
+```
+
+Checks the PR out in its own worktree, derives what it claims (PR body, Jira, the PR template's
+checked items), reviews the code (architecture, side effects), reads the attached screenshots and
+videos, trusts CI when it passed on the PR head (else the local gate) and, when the PR changes UI,
+runs the device on the base APK and on the PR head. Then it shows the review it would post
+(verdict, at most 10 inline comments, `nit:` for non-blocking ones) and posts it **only after your
+OK**. Details: [`skills/android-review/SKILL.md`](skills/android-review/SKILL.md) and the design in
+[`docs/android-review-design.md`](docs/android-review-design.md).
+
 ## Tests
 
 ```bash

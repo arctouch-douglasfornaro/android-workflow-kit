@@ -274,7 +274,7 @@ class HostDrivenTests(unittest.TestCase):
                 value = value.strip()
                 meta[key] = json.loads(value) if value.startswith('"') else value
             roles[meta["name"]] = meta
-        self.assertEqual(set(roles), {"aw-setup", "aw-planner", "aw-tech-lead", "aw-implementer", "aw-reviewer", "aw-device", "aw-delivery", "aw-pr-watcher"})
+        self.assertEqual(set(roles), {"aw-setup", "aw-planner", "aw-tech-lead", "aw-implementer", "aw-reviewer", "aw-device", "aw-delivery", "aw-pr-watcher", "aw-media"})
         models = {"strong": "opus", "standard": "sonnet", "fast": "haiku"}
         efforts = {"strong": "high", "standard": "medium", "fast": "low"}
         for host in (".claude", ".cursor", ".gemini"):
@@ -296,7 +296,7 @@ class HostDrivenTests(unittest.TestCase):
             self.assertEqual(codex["model_reasoning_effort"], efforts[meta["tier"]])
             self.assertIn(source, codex["developer_instructions"])
         for host in (".claude", ".codex", ".cursor", ".gemini", ".agents"):
-            for skill in ("android-workflow", "device-driving"):
+            for skill in ("android-workflow", "android-review", "device-driving"):
                 link = KIT_ROOT / host / "skills" / skill
                 self.assertTrue(link.is_symlink(), (host, skill))
                 self.assertEqual(link.resolve(), (KIT_ROOT / "skills" / skill).resolve())
