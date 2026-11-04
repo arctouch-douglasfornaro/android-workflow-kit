@@ -1169,22 +1169,30 @@ def draft(target: Path) -> dict[str, Any]:
             text = text[4:].lstrip() if item["severity"] == "nit" and text.lower().startswith("nit:") else text
             lines.append(f"- {where}{prefix}{text}" + (f" Suggestion: {item['fix']}" if item["fix"] else ""))
     body = "\n".join(lines).strip()
+    # Our own threads the delta Reviewer saw addressed on the new head: resolved after the post, with
+    # the same OK (the developer keeps any open with `edit --keep-open T1`).
+    still_open = {t.get("id"): t for t in context.get("our_threads") or [] if not t.get("resolved")}
+    resolve = [{"id": f"T{index}", "thread": t["id"], "path": still_open[t["id"]].get("path"),
+                "line": still_open[t["id"]].get("line"), "note": str(t.get("note") or "")[:300]}
+               for index, t in enumerate((t for t in threads if t.get("addressed") is True and t.get("id") in still_open),
+                                         start=1)]
     comments = [{"id": f"C{index}", "path": item["path"], "line": item["line"], "side": "RIGHT",
                  "severity": item["severity"], "finding": item["id"], "body": _comment_body(item)}
                 for index, item in enumerate(inline, start=1)]
     result = _save_draft(agent_dir, {"schema_version": 1, "pr": context["number"], "url": context.get("url"),
                                      "head": context["head"], "event": event, "reasons": reasons, "body": body,
-                                     "comments": comments, "overflow": len(overflow),
+                                     "comments": comments, "resolve": resolve, "overflow": len(overflow),
                                      "max_inline_comments": config["max_inline_comments"]})
     security = [item["id"] for item in findings if item.get("security")]
     return {"status": "drafted", "draft_id": result["id"], "event": event, "inline": len(comments),
-            "in_body": len(overflow), "show": str(agent_dir / DRAFT_MD),
+            "in_body": len(overflow), "resolve": len(resolve), "show": str(agent_dir / DRAFT_MD),
             "security": ({"findings": security, "note": "possible security issue: also raise it in #security"}
                          if security else None)}
 
 
 def _draft_id(value: dict[str, Any]) -> str:
-    payload = json.dumps({key: value.get(key) for key in ("head", "event", "body", "comments")}, sort_keys=True)
+    keys = ("head", "event", "body", "comments") + (("resolve",) if value.get("resolve") else ())
+    payload = json.dumps({key: value.get(key) for key in keys}, sort_keys=True)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
 
 
@@ -1198,12 +1206,19 @@ def _save_draft(agent_dir: Path, value: dict[str, Any]) -> dict[str, Any]:
           f"## Inline comments ({len(value['comments'])})", ""]
     for comment in value["comments"]:
         md += [f"### {comment['id']} · `{comment['path']}:{comment['line']}` · {comment['severity']}", "", comment["body"], ""]
+    if value.get("resolve"):
+        md += [f"## Threads to resolve after posting ({len(value['resolve'])})", "",
+               "Our earlier comments the new commits addressed (keep one open: `edit --keep-open T1`).", ""]
+        md += [f"- {t['id']} · `{t['path']}:{t['line']}`" + (f" — {t['note']}" if t.get("note") else "")
+               for t in value["resolve"]]
+        md.append("")
     (agent_dir / DRAFT_MD).write_text("\n".join(md).rstrip() + "\n", encoding="utf-8")
     return value
 
 
 def edit(target: Path, drop: list[str] | None = None, event: str | None = None,
-         set_text: list[list[str]] | None = None, body: str | None = None) -> dict[str, Any]:
+         set_text: list[list[str]] | None = None, body: str | None = None,
+         keep_open: list[str] | None = None) -> dict[str, Any]:
     agent_dir = agent_dir_for(target)
     value = _read(agent_dir / DRAFT_FILE)
     if not value:
@@ -1213,6 +1228,11 @@ def edit(target: Path, drop: list[str] | None = None, event: str | None = None,
     if unknown:
         raise ValueError(f"no such comment: {', '.join(sorted(unknown))}")
     value["comments"] = [c for c in value["comments"] if c["id"] not in wanted]
+    keep = {item.upper() for item in keep_open or []}
+    unknown = keep - {t["id"] for t in value.get("resolve") or []}
+    if unknown:
+        raise ValueError(f"no such thread to resolve: {', '.join(sorted(unknown))}")
+    value["resolve"] = [t for t in value.get("resolve") or [] if t["id"] not in keep]
     for key, text in set_text or []:
         match = [c for c in value["comments"] if c["id"] == key.upper()]
         if not match:
@@ -1238,12 +1258,13 @@ def edit(target: Path, drop: list[str] | None = None, event: str | None = None,
             handle.write(json.dumps({"at": round(time.time(), 3), "edit": {
                 "dropped": [{"id": key, "severity": severity.get(key)} for key in sorted(wanted)],
                 "rewritten": [{"id": key.upper(), "severity": severity.get(key.upper())} for key, _ in set_text or []],
-                "event": event, "body": body is not None}}, ensure_ascii=False) + "\n")
+                "event": event, "body": body is not None, "kept_open": sorted(keep)}}, ensure_ascii=False) + "\n")
     except OSError:
         pass
     saved = _save_draft(agent_dir, value)
     return {"status": "edited", "draft_id": saved["id"], "event": saved["event"],
-            "inline": len(saved["comments"]), "show": str(agent_dir / DRAFT_MD)}
+            "inline": len(saved["comments"]), "resolve": len(saved.get("resolve") or []),
+            "show": str(agent_dir / DRAFT_MD)}
 
 
 # --- post ----------------------------------------------------------------------------------------
@@ -1261,10 +1282,13 @@ def post(target: Path, draft_id: str) -> dict[str, Any]:
     if value.get("id") != draft_id or _draft_id(value) != draft_id:
         return {"status": "refused", "reason": "draft_changed",
                 "next": "the draft is not the one the developer approved: show RUN/review-draft.md again"}
-    if any(item.get("draft_id") == draft_id for item in state.get("posted") or []):
-        return {"status": "already_posted", "posted": state["posted"][-1]}
     _, repo = _remote(target)
     env = github_env(target)
+    if any(item.get("draft_id") == draft_id for item in state.get("posted") or []):
+        # A retry finishes the resolutions the first run could not do; nothing is posted twice.
+        resolved, failed = _resolve_threads(env, state, [t["thread"] for t in value.get("resolve") or []])
+        _write(agent_dir / STATE_FILE, state)
+        return {"status": "already_posted", "posted": state["posted"][-1], "resolved": resolved, "resolve_failed": failed or None}
     pr = fetch_pr(env, repo, int(value["pr"]))
     if pr.get("state") != "OPEN":
         return {"status": "refused", "reason": f"the PR is {str(pr.get('state')).lower()}"}
@@ -1283,6 +1307,9 @@ def post(target: Path, draft_id: str) -> dict[str, Any]:
              "url": posted.get("html_url"), "comments": len(value["comments"]), "at": int(time.time())}
     state.setdefault("posted", []).append(entry)
     _write(agent_dir / STATE_FILE, state)
+    resolved, failed = _resolve_threads(env, state, [t["thread"] for t in value.get("resolve") or []])
+    _write(agent_dir / STATE_FILE, state)
+    entry = {**entry, "resolved": resolved, "resolve_failed": failed or None}
     try:
         from android_workflow.cli import append_stage_log
 
@@ -1290,6 +1317,29 @@ def post(target: Path, draft_id: str) -> dict[str, Any]:
     except Exception:  # noqa: BLE001 - the log is a convenience
         pass
     return {"status": "posted", **entry}
+
+
+RESOLVE_MUTATION = "mutation($thread: ID!) { resolveReviewThread(input: {threadId: $thread}) { thread { id isResolved } } }"
+
+
+def _resolve_threads(env: dict[str, str], state: dict[str, Any], threads: list[str]) -> tuple[list[str], list[dict[str, str]]]:
+    """Resolve review threads we opened, each recorded as it lands (a retry never resolves twice).
+    A failure (no permission, thread gone) is reported, never fatal: the review or reply already landed."""
+    from android_workflow.watch import _graphql
+
+    done = state.setdefault("resolved_threads", [])
+    resolved, failed = [], []
+    for thread_id in threads:
+        if not thread_id or thread_id in done:
+            continue
+        try:
+            _graphql(env, RESOLVE_MUTATION, thread=thread_id)
+        except Exception as error:  # noqa: BLE001 - reported per thread
+            failed.append({"thread": thread_id, "error": str(error)[-300:]})
+            continue
+        done.append(thread_id)
+        resolved.append(thread_id)
+    return resolved, failed
 
 
 # --- follow-up -----------------------------------------------------------------------------------
@@ -1362,6 +1412,7 @@ def reply_inbox(pr: dict[str, Any], viewer: str | None, handled: set[str], since
         if _login(last) == viewer or _is_bot(last) or not last.get("id") or last["id"] in handled:
             continue
         items.append({"comment": last["id"], "kind": "thread", "thread": thread.get("id"), "author": _login(last),
+                      "opened_by_us": _login(comments[0]) == viewer,
                       "path": thread.get("path"), "line": thread.get("line"),
                       "outdated": bool(thread.get("isOutdated")), "url": last.get("url"),
                       "body": (last.get("body") or "")[:2000],
@@ -1406,41 +1457,53 @@ def _write_inbox(agent_dir: Path, pr: dict[str, Any], state: dict[str, Any]) -> 
 
 def wait(target: Path, timeout: float = 540, interval: float = 60) -> dict[str, Any]:
     """After the post: return when the PR gets new commits, someone answers our review, or it closes.
-    New commits come first: a reply such as "fixed in abc123" is judged on the new head."""
-    from android_workflow.watch import _remote, github_env
+    New commits come first: a reply such as "fixed in abc123" is judged on the new head. Same polling
+    and the same `watch.max_hours` limit as the watch of our own PRs (`watch.poll`)."""
+    from android_workflow.watch import _remote, github_env, over_max_hours, poll, watch_config
 
     agent_dir = agent_dir_for(target)
     context = _read(agent_dir / CONTEXT_FILE)
     _, repo = _remote(target)
     env = github_env(target)
-    deadline = time.monotonic() + timeout
-    while True:
+    config = watch_config(target)
+
+    def step() -> tuple[bool, dict[str, Any], str]:
         state = _read(agent_dir / STATE_FILE)
+        watching = state.setdefault("watch", {})
+        if not watching.get("started_at"):  # the first wait after the post starts the clock
+            watching["started_at"] = time.time()
+            _write(agent_dir / STATE_FILE, state)
         pr = fetch_pr(env, repo, int(context["number"]))
         if pr.get("state") != "OPEN":
-            return {"status": str(pr.get("state")).lower(), "next": "stop: the PR is over"}
+            return True, {"status": str(pr.get("state")).lower(), "next": "stop: the PR is over"}, ""
         items = _write_inbox(agent_dir, pr, state)
         if pr.get("headRefOid") != context.get("head"):
-            return {"status": "new_commits", "head": pr.get("headRefOid"), "replies_pending": len(items),
-                    "next": f"CLI review start --target {state.get('main')} --pr {context['number']}"}
+            return True, {"status": "new_commits", "head": pr.get("headRefOid"), "replies_pending": len(items),
+                          "next": f"CLI review start --target {state.get('main')} --pr {context['number']}"}, ""
         if items:
-            return {"status": "replies", "count": len(items), "authors": sorted({i["author"] for i in items}),
-                    "inbox": f"RUN/{INBOX_FILE}",
-                    "next": "spawn aw-pr-watcher mode review (reads RUN/review-inbox.json, writes "
-                            "RUN/review-replies.json), then CLI review replies --target TARGET"}
-        if time.monotonic() >= deadline:
-            return {"status": "timed_out", "next": "CLI review wait --target TARGET"}
-        time.sleep(interval)
+            return True, {"status": "replies", "count": len(items), "authors": sorted({i["author"] for i in items}),
+                          "inbox": f"RUN/{INBOX_FILE}",
+                          "next": "spawn aw-pr-watcher mode review (reads RUN/review-inbox.json, writes "
+                                  "RUN/review-replies.json), then CLI review replies --target TARGET"}, ""
+        if over_max_hours(watching["started_at"], config, time.time()):
+            return True, {"status": "needs_user", "reason": f"watched for {config['max_hours']} hours",
+                          "next": "tell the developer and stop; /android-review again to follow it further"}, ""
+        return False, {"status": "timed_out", "next": "CLI review wait --target TARGET"}, "idle"
+
+    result, _ = poll(step, timeout, interval)
+    return result
 
 
 def _replies_id(value: dict[str, Any]) -> str:
-    keep = {key: value.get(key) for key in ("replies", "skipped")}
+    keep = {key: value.get(key) for key in ("replies", "skipped") + (("resolve",) if value.get("resolve") else ())}
     return hashlib.sha256(json.dumps(keep, sort_keys=True).encode()).hexdigest()[:12]
 
 
-def replies(target: Path, drop: list[str] | None = None, set_text: list[list[str]] | None = None) -> dict[str, Any]:
+def replies(target: Path, drop: list[str] | None = None, set_text: list[list[str]] | None = None,
+            keep_open: list[str] | None = None) -> dict[str, Any]:
     """The answers the agent proposed, as one batch the developer approves (`RUN/review-replies.md`).
-    `--drop R2` posts nothing for it; `--set R3 "text"` writes (or rewrites) that answer."""
+    `--drop R2` posts nothing for it; `--set R3 "text"` writes (or rewrites) that answer;
+    `--keep-open R1` leaves a thread the agent would resolve open."""
     from android_workflow.watch import _strip
 
     agent_dir = agent_dir_for(target)
@@ -1453,7 +1516,7 @@ def replies(target: Path, drop: list[str] | None = None, set_text: list[list[str
         proposed = _read(agent_dir / REPLIES_FILE)
         if not proposed or (agent_dir / REPLIES_FILE).stat().st_mtime < float(inbox.get("at") or 0):
             raise ValueError(f"no {REPLIES_FILE} for this inbox: spawn aw-pr-watcher mode review first")
-        value = {"inbox_at": inbox.get("at"), "replies": {}, "skipped": {}, "ask_user": {}}
+        value = {"inbox_at": inbox.get("at"), "replies": {}, "skipped": {}, "ask_user": {}, "resolve": []}
         for entry in proposed.get("replies") or []:
             if entry.get("id") in items and (entry.get("body") or "").strip():
                 value["replies"][entry["id"]] = _strip(entry["body"])
@@ -1466,12 +1529,22 @@ def replies(target: Path, drop: list[str] | None = None, set_text: list[list[str
         for item_id in items:  # nothing proposed for it: the developer decides
             if item_id not in value["replies"] and item_id not in value["skipped"]:
                 value["ask_user"].setdefault(item_id, "no answer proposed")
+        # Only a thread we opened, and only once it is settled (answered or needing no word).
+        value["resolve"] = sorted(
+            str(i) for i in proposed.get("resolve") or []
+            if i in items and items[i].get("kind") == "thread" and items[i].get("opened_by_us")
+            and i not in value["ask_user"])
     for item_id in drop or []:
         if item_id not in items:
             raise ValueError(f"{item_id} is not in {INBOX_FILE}")
         value["replies"].pop(item_id, None)
         value["ask_user"].pop(item_id, None)
         value["skipped"][item_id] = "dropped by the developer"
+        value["resolve"] = [i for i in value.get("resolve") or [] if i != item_id]
+    for item_id in keep_open or []:
+        if item_id not in (value.get("resolve") or []):
+            raise ValueError(f"{item_id} is not a thread to resolve")
+        value["resolve"].remove(item_id)
     for item_id, text in set_text or []:
         if item_id not in items:
             raise ValueError(f"{item_id} is not in {INBOX_FILE}")
@@ -1492,9 +1565,11 @@ def replies(target: Path, drop: list[str] | None = None, set_text: list[list[str
             lines += [f"**Your call:** {value['ask_user'][item_id]} (nothing is posted until you answer)", ""]
         else:
             lines += [f"_No reply: {value['skipped'][item_id]}_", ""]
+        if item_id in (value.get("resolve") or []):
+            lines += ["**Then resolve the thread** (keep it open: `--keep-open " + item_id + "`)", ""]
     (agent_dir / REPLIES_MD).write_text("\n".join(lines), encoding="utf-8")
     return {"status": "draft", "draft_id": value["id"], "show": f"RUN/{REPLIES_MD}",
-            "replies": len(value["replies"]), "skipped": len(value["skipped"]),
+            "replies": len(value["replies"]), "skipped": len(value["skipped"]), "resolve": len(value.get("resolve") or []),
             "ask_user": [{"id": key, "question": text} for key, text in value["ask_user"].items()],
             "next": "show RUN/review-replies.md as is; on the developer's OK: "
                     f"CLI review reply --target TARGET --draft-id {value['id']}"}
@@ -1541,9 +1616,15 @@ def reply(target: Path, draft_id: str) -> dict[str, Any]:
         _write(agent_dir / STATE_FILE, state)  # each reply recorded as it lands: a retry never posts it twice
     for item_id, reason in value["skipped"].items():
         handled[items[item_id]["comment"]] = {"how": "skipped", "reason": reason, "at": int(time.time())}
-    _reply_state(state)["posted"].append({"draft_id": draft_id, "replies": len(posted), "at": int(time.time())})
+    # Resolve only after its reply landed (or when no reply was meant): a failed reply keeps the thread open.
+    failed_ids = {f["id"] for f in failed}
+    resolved, resolve_failed = _resolve_threads(
+        env, state, [items[i]["thread"] for i in value.get("resolve") or [] if i in items and i not in failed_ids])
+    _reply_state(state)["posted"].append({"draft_id": draft_id, "replies": len(posted), "resolved": len(resolved),
+                                          "at": int(time.time())})
     _write(agent_dir / STATE_FILE, state)
     return {"status": "failed" if failed else "posted", "posted": posted, "failed": failed or None,
+            "resolved": resolved, "resolve_failed": resolve_failed or None,
             "open": list(value["ask_user"]) or None, "next": "CLI review wait --target TARGET"}
 
 
@@ -1559,7 +1640,8 @@ def dispatch(target: Path, args: Any) -> tuple[dict[str, Any], int]:
     if action == "draft":
         return draft(target), 0
     if action == "edit":
-        return edit(target, drop=args.drop, event=args.event, set_text=args.set, body=args.body), 0
+        return edit(target, drop=args.drop, event=args.event, set_text=args.set, body=args.body,
+                    keep_open=getattr(args, "keep_open", None)), 0
     if action == "post":
         result = post(target, args.draft_id)
         return result, 0 if result["status"] in {"posted", "already_posted"} else 1
@@ -1572,7 +1654,7 @@ def dispatch(target: Path, args: Any) -> tuple[dict[str, Any], int]:
     if action == "wait":
         return wait(target, timeout=args.timeout), 0
     if action == "replies":
-        return replies(target, drop=args.drop, set_text=args.set), 0
+        return replies(target, drop=args.drop, set_text=args.set, keep_open=getattr(args, "keep_open", None)), 0
     if action == "reply":
         result = reply(target, args.draft_id)
         return result, 0 if result["status"] == "posted" else 1

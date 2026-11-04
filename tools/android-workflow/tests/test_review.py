@@ -338,6 +338,63 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(checks["run"][0]["mode"], "pr-delta")
 
 
+    def test_addressed_threads_of_ours_are_resolved_after_the_post_with_the_same_ok(self) -> None:
+        review_json = {"status": "approved", "blocking": [], "acceptance": [],
+                       "threads": [{"id": "T_a", "addressed": True, "note": "cleared on logout now"},
+                                   {"id": "T_b", "addressed": False, "note": "still cached"},
+                                   {"id": "T_c", "addressed": True},                # already resolved
+                                   {"id": "T_x", "addressed": True}]}               # not one of ours
+        with Project(self.CHANGE) as project:
+            worktree = self.run_to_draft(project, review_json)
+            agent_dir = review.agent_dir_for(worktree)
+            context = read_json(agent_dir / review.CONTEXT_FILE)
+            context["our_threads"] = [{"id": "T_a", "path": REPO, "line": 5, "resolved": False},
+                                      {"id": "T_b", "path": REPO, "line": 4, "resolved": False},
+                                      {"id": "T_c", "path": REPO, "line": 4, "resolved": True}]
+            (agent_dir / review.CONTEXT_FILE).write_text(json.dumps(context))
+            drafted = review.draft(worktree)
+            value = read_json(agent_dir / review.DRAFT_FILE)
+            self.assertEqual([(t["id"], t["thread"]) for t in value["resolve"]], [("T1", "T_a")])
+            self.assertIn("Threads to resolve after posting (1)", (agent_dir / review.DRAFT_MD).read_text())
+            kept = review.edit(worktree, keep_open=["T1"])
+            self.assertNotEqual(kept["draft_id"], drafted["draft_id"])  # the OK covers what gets resolved
+            self.assertEqual(kept["resolve"], 0)
+            with self.assertRaises(ValueError):
+                review.edit(worktree, keep_open=["T9"])
+            redrafted = review.draft(worktree)
+            self.assertEqual(redrafted["draft_id"], drafted["draft_id"])
+            with mock.patch.object(review, "fetch_pr", return_value=fake_pr(project.head)), \
+                    mock.patch("android_workflow.watch._gh") as gh, \
+                    mock.patch("android_workflow.watch._graphql") as graphql:
+                gh.return_value = subprocess.CompletedProcess([], 0, json.dumps({"id": 99, "html_url": "u"}), "")
+                posted = review.post(worktree, drafted["draft_id"])
+                self.assertEqual((posted["status"], posted["resolved"]), ("posted", ["T_a"]))
+                self.assertIn("resolveReviewThread", graphql.call_args.args[1])
+                self.assertEqual(graphql.call_args.kwargs, {"thread": "T_a"})
+                again = review.post(worktree, drafted["draft_id"])
+            self.assertEqual((again["status"], again["resolved"]), ("already_posted", []))
+            self.assertEqual((gh.call_count, graphql.call_count), (1, 1))  # nothing posted or resolved twice
+
+    def test_a_failed_resolution_does_not_fail_the_post_and_a_retry_finishes_it(self) -> None:
+        with Project(self.CHANGE) as project:
+            worktree = self.run_to_draft(project, {"status": "approved", "blocking": [], "acceptance": [],
+                                                   "threads": [{"id": "T_a", "addressed": True}]})
+            agent_dir = review.agent_dir_for(worktree)
+            context = read_json(agent_dir / review.CONTEXT_FILE)
+            context["our_threads"] = [{"id": "T_a", "path": REPO, "line": 5, "resolved": False}]
+            (agent_dir / review.CONTEXT_FILE).write_text(json.dumps(context))
+            drafted = review.draft(worktree)
+            with mock.patch.object(review, "fetch_pr", return_value=fake_pr(project.head)), \
+                    mock.patch("android_workflow.watch._gh") as gh, \
+                    mock.patch("android_workflow.watch._graphql", side_effect=[RuntimeError("forbidden"), {}]):
+                gh.return_value = subprocess.CompletedProcess([], 0, json.dumps({"id": 99, "html_url": "u"}), "")
+                posted = review.post(worktree, drafted["draft_id"])
+                self.assertEqual(posted["status"], "posted")
+                self.assertEqual(posted["resolve_failed"][0]["thread"], "T_a")
+                again = review.post(worktree, drafted["draft_id"])
+            self.assertEqual(again["resolved"], ["T_a"])
+
+
 class DeviceTests(unittest.TestCase):
     def test_a_ui_change_routes_through_the_device(self) -> None:
         with Project({SCREEN: "package com.example\n\n@Composable\nfun ProfileScreen() {}\n"}) as project:
@@ -544,6 +601,51 @@ class ReplyWatchTests(unittest.TestCase):
             with mock.patch.object(review, "fetch_pr", return_value=pr):
                 self.assertEqual(review.wait(worktree, timeout=0)["status"], "timed_out")  # both handled
             self.assertFalse((agent_dir / review.INBOX_FILE).exists())
+
+    def test_a_settled_thread_we_opened_is_resolved_after_its_reply(self) -> None:
+        with Project(self.CHANGE) as project:
+            worktree = FlowTests().run_to_draft(project, {"status": "approved", "blocking": []})
+            agent_dir = review.agent_dir_for(worktree)
+            state = read_json(agent_dir / review.STATE_FILE)
+            state["posted"] = [{"head": project.head, "draft_id": "x", "at": 1_700_000_000}]
+            (agent_dir / review.STATE_FILE).write_text(json.dumps(state))
+            pr = fake_pr(project.head, id="PR_node", reviewThreads={"nodes": [
+                thread("T1", ("c1", "bob", "cache() is never invalidated"), ("c2", "alice", "Cleared on logout, X.kt:42")),
+                thread("T2", ("c3", "carol", "naming?"), ("c4", "bob", "agree"), ("c5", "alice", "renamed")),
+                thread("T3", ("c6", "bob", "nit: name"), ("c7", "alice", "done"))]})
+            with mock.patch.object(review, "fetch_pr", return_value=pr):
+                self.assertEqual(review.wait(worktree, timeout=0)["count"], 3)
+            inbox = read_json(agent_dir / review.INBOX_FILE)
+            self.assertEqual([i["opened_by_us"] for i in inbox["items"]], [True, False, True])
+            (agent_dir / review.REPLIES_FILE).write_text(json.dumps({
+                "replies": [{"id": "R1", "body": "Right, X.kt:42 clears it."}],
+                "skipped": [{"id": "R2", "reason": "not our thread"}, {"id": "R3", "reason": "done, the head shows it"}],
+                "resolve": ["R1", "R2", "R3"]}))  # R2: carol's thread, never ours to resolve
+            drafted = review.replies(worktree)
+            self.assertEqual(drafted["resolve"], 2)
+            self.assertIn("Then resolve the thread", (agent_dir / review.REPLIES_MD).read_text())
+            kept = review.replies(worktree, keep_open=["R3"])
+            self.assertNotEqual(kept["draft_id"], drafted["draft_id"])
+            with self.assertRaises(ValueError):
+                review.replies(worktree, keep_open=["R2"])
+            with mock.patch("android_workflow.watch._graphql") as graphql:
+                graphql.return_value = {"addPullRequestReviewThreadReply": {"comment": {"id": "c8", "url": "u/c8"}}}
+                posted = review.reply(worktree, kept["draft_id"])
+            self.assertEqual(posted["resolved"], ["T1"])
+            self.assertEqual([c.kwargs for c in graphql.call_args_list],
+                             [{"thread": "T1", "body": "Right, X.kt:42 clears it."}, {"thread": "T1"}])
+
+    def test_the_watch_hands_over_after_watch_max_hours_like_our_own_prs(self) -> None:
+        with Project(self.CHANGE) as project:
+            worktree = FlowTests().run_to_draft(project, {"status": "approved", "blocking": []})
+            agent_dir = review.agent_dir_for(worktree)
+            with mock.patch.object(review, "fetch_pr", return_value=fake_pr(project.head)):
+                self.assertEqual(review.wait(worktree, timeout=0)["status"], "timed_out")
+                state = read_json(agent_dir / review.STATE_FILE)
+                state["watch"]["started_at"] -= 73 * 3600  # default watch.max_hours: 72
+                (agent_dir / review.STATE_FILE).write_text(json.dumps(state))
+                waited = review.wait(worktree, timeout=0)
+        self.assertEqual((waited["status"], waited["reason"]), ("needs_user", "watched for 72 hours"))
 
     def test_new_commits_come_before_replies(self) -> None:
         with Project(self.CHANGE) as project:

@@ -3643,6 +3643,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     review_parser.add_argument("--drop", action="append", default=[], help="edit: a comment id to drop (repeatable)")
     review_parser.add_argument("--set", action="append", nargs=2, metavar=("ID", "TEXT"), default=[],
                                help="edit: new text for a comment (repeatable)")
+    review_parser.add_argument("--keep-open", action="append", default=[], dest="keep_open",
+                               help="edit / replies: a thread id (T1 / R1) to leave open instead of resolving (repeatable)")
     review_parser.add_argument("--event", help="edit: APPROVE | COMMENT | REQUEST_CHANGES")
     review_parser.add_argument("--body", help="edit: the review body")
     review_parser.add_argument("--draft-id", dest="draft_id", help="post / reply: the draft id the developer approved")

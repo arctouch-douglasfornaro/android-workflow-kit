@@ -67,12 +67,17 @@ flowchart TD
    developer can drop/edit comments or change the event. `CLI review post` sends it via
    `gh api repos/{o}/{r}/pulls/{n}/reviews` in one call, pinned to the reviewed `commit_id`.
    If the head moved since the review, `post` refuses and offers a delta re-review.
-7. **Follow-up** — optional `--watch` (`CLI review wait`): on new commits, `CLI delta` re-reviews only
+7. **Follow-up** — on by default (`--no-watch` to stop at the post; `CLI review wait`): on new commits, `CLI delta` re-reviews only
    the new hunks and checks whether each thread we opened was addressed; when someone answers a thread
    we took part in (or @mentions us after the review), `aw-pr-watcher` mode `review` drafts the answers
    (`RUN/review-replies.json`), `CLI review replies` shows them as one batch with an id, and
    `CLI review reply --draft-id` posts them after the OK. New commits are handled before replies, so a
-   "fixed in abc" is checked on the new head. Never resolves threads.
+   "fixed in abc" is checked on the new head. Threads **we opened** are resolved with the same OK: in a
+   delta round the ones the Reviewer marked `addressed` (listed in the draft, resolved after the post),
+   and in the watch the ones `aw-pr-watcher` marks settled (resolved after their reply);
+   `--keep-open` leaves one open. Never a thread of another reviewer. The polling loop and the time
+   limit are shared with the PR Watcher of our own PRs (`watch.poll`, `watch.over_max_hours`,
+   config `watch.max_hours`); only the decision of what to do differs.
 
 ## UI-change rule (code, not prose)
 

@@ -27,7 +27,7 @@ import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from android_workflow.paths import cache_dir, run_dir
 
@@ -488,7 +488,7 @@ def status(target: Path, number: int | None = None, record: bool = True) -> dict
         ("rebase", data["repository"].get("rebaseMergeAllowed"))) if allowed]
     config = watch_config(target)
     decision = assess(pr, str((data.get("viewer") or {}).get("login") or ""), watch, config, now)
-    if decision["action"] in {"wait", "respond", "sync", "merge"} and now - watch["started_at"] > float(config["max_hours"]) * 3600:
+    if decision["action"] in {"wait", "respond", "sync", "merge"} and over_max_hours(watch["started_at"], config, now):
         decision = {**decision, "action": "needs_user", "reason": f"watched for {config['max_hours']} hours"}
     decision["local"] = _local(target, decision.get("head"), pr.get("headRefName"))
     auto: list[str] = []
@@ -626,21 +626,38 @@ def _compact(decision: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def wait(target: Path, number: int | None = None, timeout: float = 540, interval: float = 60) -> dict[str, Any]:
-    """Poll until there is something to do (or `timeout`): every `interval`, slower while nothing changes."""
+def poll(step: Callable[[], tuple[bool, dict[str, Any], str]], timeout: float = 540,
+         interval: float = 60) -> tuple[dict[str, Any], bool]:
+    """The one polling loop of both watches (our PR, and a PR we reviewed). `step()` reads the PR once
+    and returns `(done, result, key)`: done ends the poll; while the key stays the same nothing changed,
+    so the next read comes later (x1.5, at most every 5 min). Returns `(result, timed_out)`."""
     deadline = time.monotonic() + max(timeout, 0)
     delay = max(interval, 15)
     last = None
     while True:
-        result = status(target, number)
-        if result["action"] != "wait":
-            return result
+        done, result, key = step()
+        if done:
+            return result, False
         if time.monotonic() + delay > deadline:
-            return {**result, "timed_out": True}
-        summary = json.dumps(_waiting_kinds(result))
-        delay = min(delay * 1.5, 300) if summary == last else max(interval, 15)
-        last = summary
+            return result, True
+        delay = min(delay * 1.5, 300) if key == last else max(interval, 15)
+        last = key
         time.sleep(delay)
+
+
+def over_max_hours(started_at: float | None, config: dict[str, Any], now: float) -> bool:
+    """Both watches stop and hand over to the developer after `watch.max_hours` of following one PR."""
+    return bool(started_at) and now - float(started_at) > float(config["max_hours"]) * 3600
+
+
+def wait(target: Path, number: int | None = None, timeout: float = 540, interval: float = 60) -> dict[str, Any]:
+    """Poll until there is something to do (or `timeout`): every `interval`, slower while nothing changes."""
+    def step() -> tuple[bool, dict[str, Any], str]:
+        result = status(target, number)
+        return result["action"] != "wait", result, json.dumps(_waiting_kinds(result))
+
+    result, timed_out = poll(step, timeout, interval)
+    return {**result, "timed_out": True} if timed_out else result
 
 
 # --- Acting on the PR ----------------------------------------------------------------------------

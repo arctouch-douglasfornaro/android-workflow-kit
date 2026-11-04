@@ -286,7 +286,7 @@ and the CLI reference in [`tools/android-workflow/README.md`](tools/android-work
 ## Reviewing someone else's PR
 
 ```text
-/android-review 22307 [--watch]  # or the PR URL, from the app's folder
+/android-review 22307 [--no-watch]  # or the PR URL, from the app's folder
 ```
 
 Checks the PR out in its own worktree, derives what it claims (PR body, Jira, the PR template's
@@ -294,8 +294,24 @@ checked items), reviews the code (architecture, side effects), reads the attache
 videos, trusts CI when it passed on the PR head (else the local gate) and, when the PR changes UI,
 runs the device on the base APK and on the PR head. Then it shows the review it would post
 (verdict, at most 10 inline comments, `nit:` for non-blocking ones) and posts it **only after your
-OK**. With `--watch` it keeps following the PR: new commits get a delta review, and when the author
-answers one of our comments it drafts the replies and posts them after your OK. Details: [`skills/android-review/SKILL.md`](skills/android-review/SKILL.md) and the design in
+OK**.
+
+After the post it **keeps following the PR by default** until it is merged or closed (`--no-watch`
+stops right after the post; you can also say stop at any time). It uses the same watch as
+`/android-workflow`: the PR is read every minute, slower while nothing changes (up to every 5 min),
+and the watch hands over to you after `watch.max_hours` (72 by default) in `.ai/android-workflow.json`.
+It only wakes up for:
+
+| What happens on the PR | What it does |
+| --- | --- |
+| New commits | A delta review of only the new commits, checking whether each of our earlier comments was addressed. |
+| Someone answers a thread we took part in, or @mentions us | Drafts the replies and shows them; posts only after your OK. |
+| One of **our** threads is settled (fix confirmed on the head, or the author was right) | Proposes resolving it, listed in the draft you approve; resolved right after the review or reply posts. `--keep-open T1` (or `R1`) leaves it open. |
+| Merged or closed | Stops. |
+| `watch.max_hours` passed | Tells you and stops; run `/android-review` again to keep following it. |
+
+It never resolves another reviewer's thread, never posts or resolves without your OK, and never
+merges. The watch lives in the Claude Code session: closing the session stops it. Details: [`skills/android-review/SKILL.md`](skills/android-review/SKILL.md) and the design in
 [`docs/android-review-design.md`](docs/android-review-design.md).
 
 ## Tests

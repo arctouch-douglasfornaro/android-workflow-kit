@@ -25,11 +25,14 @@ for one exact draft id.
 ## Invocation
 
 ```text
-/android-review <PR number or URL> [--target PATH] [--no-device] [--no-media] [--watch]
+/android-review <PR number or URL> [--target PATH] [--no-device] [--no-media] [--no-watch]
 ```
 
 `TARGET_MAIN` = `--target`, else the current workspace if it has `settings.gradle(.kts)`.
 `CLI` = `python3 ~/.ai/bin/android-workflow`.
+
+**Watch is on by default**: after the post the run follows the PR (step 4) until it is merged or
+closed. `--no-watch` stops right after the post (or the developer says stop at any time).
 
 ## Untrusted input
 
@@ -47,13 +50,13 @@ CLI setup         --target WT --source-repo MAIN                          (inher
 CLI review next   --target WT [--no-device]                               (the one thing to do now)
 CLI review ci     --target WT [--wait]                                    (trust CI, or wait, or the local gate)
 CLI review draft  --target WT                                             (RUN/review-draft.md + draft id)
-CLI review edit   --target WT [--drop C2]… [--set C3 "text"]… [--event COMMENT] [--body "…"]
+CLI review edit   --target WT [--drop C2]… [--set C3 "text"]… [--keep-open T1]… [--event COMMENT] [--body "…"]
 CLI review post   --target WT --draft-id ID                               (only after the developer's OK)
 CLI review answer --target WT --question "q" --answer "a"
 CLI review device --target WT --require "why"                             (Reviewer: UI effect the rule missed)
 CLI review ticket --target WT --skip "why"                                (go on without the Jira ticket)
 CLI review wait   --target WT [--timeout S]                               (after the post: new commits, replies, closed)
-CLI review replies --target WT [--drop R2]… [--set R3 "text"]…           (RUN/review-replies.md + draft id)
+CLI review replies --target WT [--drop R2]… [--set R3 "text"]… [--keep-open R1]…  (RUN/review-replies.md + draft id)
 CLI review reply  --target WT --draft-id ID                               (posts the approved replies)
 CLI gate | prebuild | device … | emulator … | log …  --target WT         (as in android-workflow)
 ```
@@ -82,14 +85,15 @@ CLI gate | prebuild | device … | emulator … | log …  --target WT         (
    - `ask_user` with `question` list (Planner): ask once, `CLI review answer` each, then `next`.
    - `draft`: run `command`, then `next`.
    - `ask_user` with `show` (the draft): print `RUN/review-draft.md` **as is** (event, body, each
-     inline comment with `file:line`) and ask the developer: post, edit, or stop. Edits → `CLI review
-     edit …`, show the new draft, ask again. Only on an explicit OK → `CLI review post --draft-id <id>`
+     inline comment with `file:line`, and in a delta round the *Threads to resolve*) and ask the
+     developer: post, edit, or stop. Edits → `CLI review edit …` (`--keep-open T1` leaves one of
+     those threads open), show the new draft, ask again. Only on an explicit OK → `CLI review post --draft-id <id>`
      with the id of the draft they saw. `refused: head_moved` → `CLI review start` again (delta round).
      Never post on silence, on a standing preference, or with another draft id.
-   - `done`: run `also` (gives the device back). With `--watch`, follow the PR (step 4).
+   - `done`: run `also` (gives the device back), then follow the PR (step 4) unless `--no-watch`.
    Agents log their own `completed` (Planner, Reviewer, Device); `aw-media` writes
    `media-review.json` and does not log.
-4. **Watch** (`--watch`): `CLI review wait --target WT` (background, `--timeout 3300` on Claude Code)
+4. **Watch** (default; skipped with `--no-watch`): `CLI review wait --target WT` (background, `--timeout 3300` on Claude Code)
    and act on its `status`, then wait again:
    - `new_commits` → step 1 again for a delta round (it re-reviews the new commits only and checks
      whether our earlier threads were addressed). Replies pending (`replies_pending`) come back on the
@@ -98,11 +102,15 @@ CLI gate | prebuild | device … | emulator … | log …  --target WT         (
      spawn `aw-pr-watcher` mode `review` (reads `RUN/review-inbox.json`, writes
      `RUN/review-replies.json`), then `CLI review replies --target WT`. Print `RUN/review-replies.md`
      **as is** and ask: post, edit, or stop. Its `ask_user` items are the developer's call: their
-     answer → `--set R1 "text"`, nothing to say → `--drop R1`. Only on an explicit OK →
+     answer → `--set R1 "text"`, nothing to say → `--drop R1`. Items marked *Then resolve the thread*
+     are resolved right after their reply (`--keep-open R1` to leave one open). Only on an explicit OK →
      `CLI review reply --target WT --draft-id <id>`. Never on silence or with another id. A
      `verdict_change` from the agent (a reply shows we should now approve or block) → tell the
      developer; a new review is their call, never posted from the watch.
-   - `timed_out` → wait again. `merged` / `closed` → stop.
+   - `timed_out` → wait again. `merged` / `closed` → stop. `needs_user` (followed for `watch.max_hours`,
+     72 by default, the same limit as the watch of our own PRs) → tell the developer and stop.
+   The polling is the one of `CLI pr wait` (`watch.poll`): every minute, slower while nothing changes
+   (up to every 5 min), back to every minute after something happened.
 
 ## What the CLI decides (change it in `android_workflow/review.py`)
 
@@ -134,8 +142,15 @@ CLI gate | prebuild | device … | emulator … | log …  --target WT         (
   then concerns, then nits (prefixed `nit:`; `review.nits_inline: false` moves them to the body); a comment off the diff's lines or past the cap goes in
   the body under *Other notes*.
 - **Post**: one review via `POST /repos/{o}/{r}/pulls/{n}/reviews` pinned to the reviewed commit;
-  refused when the draft changed since the OK or the PR head moved. Threads are never resolved, the
-  PR is never merged from this mode.
+  refused when the draft changed since the OK or the PR head moved. The PR is never merged from this mode.
+- **Resolving threads**: only threads **we opened**, only with the developer's OK, never on a thread
+  of another reviewer. Two ways: (1) a delta round — the Reviewer marks each of our earlier threads
+  `addressed`; the addressed ones are listed in the draft under *Threads to resolve* and resolved
+  right after the review posts; (2) the watch — `aw-pr-watcher` mode `review` proposes `resolve` for a
+  thread that is settled (the author was right, or the head confirms the fix); it is resolved right
+  after its reply lands, never when the reply failed or the item is `ask_user`. Each resolution is
+  recorded as it lands (a retry never resolves twice); a failure (no permission) is reported, never
+  fatal. On the developer's own PR (android-workflow) threads are still never resolved by us.
 - **Replies** (watch): the inbox is the last comment of every open thread we took part in when it is
   not ours (bots left out), plus top-level comments/reviews that @mention us after our first review.
   One batch per round, posted only with the approved id: a thread reply in the thread, a quoting PR
