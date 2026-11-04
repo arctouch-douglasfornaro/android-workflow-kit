@@ -94,9 +94,15 @@ class Project:
             patch.stop()
         self.temp.cleanup()
 
-    def start(self, pr: dict | None = None) -> dict:
-        with mock.patch.object(review, "fetch_pr", return_value=pr or fake_pr(self.head)):
-            return review.start(self.main, "7")
+    def start(self, pr: dict | None = None, ticket: bool = True) -> dict:
+        with mock.patch.object(review, "fetch_pr", return_value=pr or fake_pr(self.head)), \
+                mock.patch.object(review, "signed_media", return_value={}):
+            result = review.start(self.main, "7")
+        if ticket and result.get("status") == "ready":  # the orchestrator read the Jira ticket
+            folder = Path(result["run"]) / review.TICKET_DIR
+            folder.mkdir(exist_ok=True)
+            (folder / "APP-12.md").write_text("# APP-12 Load profile once\n", encoding="utf-8")
+        return result
 
 
 class PureRuleTests(unittest.TestCase):
@@ -388,12 +394,97 @@ class DeviceTests(unittest.TestCase):
         self.assertIn("ui", spec["surfaces"])
 
 
+class SignalTests(unittest.TestCase):
+    CHANGE = FlowTests.CHANGE
+
+    def test_the_linked_ticket_is_read_before_the_planner(self) -> None:
+        with Project(self.CHANGE) as project:
+            result = project.start(ticket=False)
+            worktree = Path(result["worktree_path"])
+            write_profile(worktree)
+            fetch = review.next_action(worktree)
+            self.assertEqual((fetch["next"], fetch["keys"]), ("fetch_ticket", ["APP-12"]))
+            ticket_file = Path(result["run"]) / review.TICKET_DIR / "APP-12.md"
+            ticket_file.parent.mkdir(exist_ok=True)
+            ticket_file.write_text("# APP-12\n", encoding="utf-8")
+            planner = review.next_action(worktree)
+        self.assertEqual(planner["agent"], "aw-planner")
+        self.assertIn("RUN/ticket/APP-12.md", planner["read"])
+
+    def test_no_jira_tool_skips_the_ticket(self) -> None:
+        with Project(self.CHANGE) as project:
+            result = project.start(ticket=False)
+            worktree = Path(result["worktree_path"])
+            write_profile(worktree)
+            review.ticket(worktree, "no Jira tool on this host")
+            self.assertEqual(review.next_action(worktree)["agent"], "aw-planner")
+
+    def test_a_copied_file_gets_a_divergence_diff(self) -> None:
+        body = "".join(f"  fun step{i}() = {i}\n" for i in range(30))
+        original = f"package com.example\n\nclass ProfileRepository {{\n{body}}}\n"
+        legacy = "app/src/main/java/com/example/LegacyProfileRepository.kt"
+        _TMP.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=_TMP) as folder:
+            repo = Path(folder) / "repo"
+            (repo / Path(REPO).parent).mkdir(parents=True)
+            git(repo, "init", "-q")
+            (repo / REPO).write_text(original, encoding="utf-8")
+            git(repo, "add", "-A")
+            git(repo, "-c", "user.email=t@x", "-c", "user.name=T", "commit", "-qm", "base")
+            base = git(repo, "rev-parse", "HEAD")
+            (repo / REPO).write_text("package com.example\n\nclass ProfileRepository\n", encoding="utf-8")
+            (repo / legacy).write_text(original.replace("class ProfileRepository", "class LegacyProfileRepository")
+                                       .replace("step3() = 3", "step3() = 4"), encoding="utf-8")
+            git(repo, "add", "-A")
+            git(repo, "-c", "user.email=t@x", "-c", "user.name=T", "commit", "-qm", "split")
+            head = git(repo, "rev-parse", "HEAD")
+            out = Path(folder) / "run"
+            out.mkdir()
+            copies = review.copied_code(repo, out, base, head)
+            diff = (out / "copy-diff/LegacyProfileRepository.diff").read_text()
+        self.assertEqual(len(copies), 1)
+        self.assertEqual((copies[0]["from"], copies[0]["diff"]), (REPO, "RUN/copy-diff/LegacyProfileRepository.diff"))
+        self.assertIn("+  fun step3() = 4", diff)
+
+    def test_device_results_reconcile_the_acceptance(self) -> None:
+        report = "# Status\n\nPARTIAL\n\n# Scenarios\n\n- AC1 legacy: PASS. ok\n- AC2 sdui (flag): FAIL. broken\n" \
+                 "\n# Not verified\n\n- Audio output.\n- Swipe.\n"
+        self.assertEqual(review.device_scenarios(report), {"AC1": "pass", "AC2": "fail"})
+        self.assertEqual(review.device_not_verified(report), ["Audio output.", "Swipe."])
+        with tempfile.TemporaryDirectory() as folder:
+            run = Path(folder)
+            (run / "review.json").write_text(json.dumps({"acceptance": [
+                {"id": "AC1", "status": "unverified"}, {"id": "AC2", "status": "unverified"},
+                {"id": "AC3", "status": "unverified"}, {"id": "AC4", "status": "unverified"}]}))
+            (run / review.SPEC_FILE).write_text(json.dumps({"acceptance": [
+                {"id": "AC1", "text": "a", "evidence": "device"}, {"id": "AC2", "text": "b", "evidence": "device"},
+                {"id": "AC3", "text": "c", "evidence": "media"}, {"id": "AC4", "text": "d", "evidence": "code"}]}))
+            context = {"media": [{"id": "M1", "status": "not_downloaded"}]}
+            rows = {r["id"]: r["status"] for r in review._acceptance(run, context, report)}
+        self.assertEqual(rows, {"AC1": "met", "AC2": "unmet", "AC3": "unchecked", "AC4": "unverified"})
+
+    def test_nits_alone_approve(self) -> None:
+        nit = [{"id": "S1", "severity": "nit", "problem": "rename", "path": REPO, "line": 4}]
+        event, reasons = review.verdict(nit, {"status": "passed"}, {}, "pass",
+                                        [{"id": "AC1", "status": "met"}, {"id": "AC2", "status": "unchecked"}],
+                                        {"own_pr": False}, True)
+        self.assertEqual((event, reasons), ("APPROVE", []))
+
+    def test_signed_attachment_urls_come_from_the_rendered_body(self) -> None:
+        uuid = "82b230b0-8514-4826-bb90-c561cf364d99"
+        rendered = json.dumps({"body_html": f'<video src="https://private-user-images.githubusercontent.com/1/2-{uuid}.mov?jwt=a&amp;b=c"></video>'})
+        replies = [subprocess.CompletedProcess([], 0, rendered, ""), subprocess.CompletedProcess([], 0, "[]", "")]
+        with mock.patch("android_workflow.watch._gh", side_effect=replies):
+            signed = review.signed_media({}, "org/app", 7)
+        self.assertEqual(signed, {uuid: f"https://private-user-images.githubusercontent.com/1/2-{uuid}.mov?jwt=a&b=c"})
+
+
 class SkillContractTests(unittest.TestCase):
     def test_the_skill_names_every_review_command_the_cli_has(self) -> None:
         from android_workflow.paths import KIT_ROOT
 
         text = (KIT_ROOT / "skills/android-review/SKILL.md").read_text(encoding="utf-8")
-        for action in ("start", "next", "ci", "draft", "edit", "post", "answer", "device", "wait"):
+        for action in ("start", "next", "ci", "draft", "edit", "post", "answer", "device", "ticket", "wait"):
             self.assertIn(f"CLI review {action}", text)
         self.assertIn("Nothing reaches GitHub before the developer's OK", text)
 

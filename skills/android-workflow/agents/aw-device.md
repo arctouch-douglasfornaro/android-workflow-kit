@@ -129,14 +129,22 @@ Flows live in `RUN/media/flows/`, one per behavior in the plan's recipe (`<surfa
    other phase: when they show the same screen, ingest the `after` file again under the `before`
    name (`--name <before name>`) and delete the old `after` file, so the PR table pairs them.
 7. Real failure: rerun once. Second failure = FAIL (first failure only = flaky, note it).
-8. Leave the test account as you found it: undo what the checks changed (a starred term, a setting,
+8. A navigation step you had to discover by hand (a feature-flag override, a debug menu, a deep link,
+   a login hop) that took more than a minute: save it as a reusable Maestro subflow in
+   `RUN/media/flows/_<name>.yaml` and add one line under `## Device recipes` in the **main checkout's**
+   `.ai/project-profile.md` (`main` in `RUN/review-state.json` for a PR review, else `TARGET`):
+   what it does and the steps, so the next run copies it instead of rediscovering it. Never write
+   credentials or user data there.
+9. Leave the test account as you found it: undo what the checks changed (a starred term, a setting,
    a downloaded set). What you could not undo goes in the report under Not verified as "State left
    on the account: …".
 
 ## Writes (`after` mode)
 
 `RUN/device-report.md` with headings exactly: Status (first line `PASS` | `PARTIAL` | `FAIL` |
-`BLOCKED`), Device (model, API, serial), Scenarios (AC → expected / observed), Evidence (media paths),
+`BLOCKED`), Device (model, API, serial), Scenarios (one line per AC, starting with its id and ending with `: PASS` / `: FAIL` / `: BLOCKED`
+before the detail, e.g. `- AC5 legacy flashcards: PASS. Expected … Observed …`; the review draft
+reads the verdict per AC from these lines), Evidence (media paths),
 Not verified, Anomalies. `PARTIAL`: every AC you checked passed, but a device AC stayed unverified,
 or you saw something you could not explain (it goes under Anomalies, never only in prose). The CLI
 then asks the developer whether to ship ready, ship as a draft or run the Device again; a `PASS`

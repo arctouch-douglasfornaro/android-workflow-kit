@@ -3630,7 +3630,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     pr_parser.add_argument("--reason", help="ci: one line on why")
     pr_parser.add_argument("--continue", dest="resume", action="store_true", help="sync: conflicts resolved, commit and push")
     review_parser = subparsers.add_parser("review", help="Android Review: review an open PR, post one review after the OK")
-    review_parser.add_argument("review_action", choices=("start", "next", "ci", "draft", "edit", "post", "answer", "device", "wait"))
+    review_parser.add_argument("review_action", choices=("start", "next", "ci", "draft", "edit", "post", "answer", "device", "ticket", "wait"))
     review_parser.add_argument("--target", required=True, type=Path,
                                help="start: the app's main checkout; every other action: the review worktree")
     review_parser.add_argument("--pr", help="start: PR number or URL")
@@ -3649,6 +3649,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     review_parser.add_argument("--question", help="answer: the Planner's question")
     review_parser.add_argument("--answer", help="answer: the developer's answer")
     review_parser.add_argument("--require", help="device: why the device must run although no UI file changed")
+    review_parser.add_argument("--skip", help="ticket: go on without the Jira ticket, and why")
     evidence_parser = subparsers.add_parser("evidence")
     evidence_parser.add_argument("action", choices=("capture", "ingest", "compare", "list"))
     evidence_parser.add_argument("--target", required=True, type=Path)
