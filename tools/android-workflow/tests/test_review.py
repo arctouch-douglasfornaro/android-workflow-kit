@@ -479,12 +479,87 @@ class SignalTests(unittest.TestCase):
         self.assertEqual(signed, {uuid: f"https://private-user-images.githubusercontent.com/1/2-{uuid}.mov?jwt=a&b=c"})
 
 
+def thread(thread_id: str, *comments: tuple[str, str, str], resolved: bool = False) -> dict:
+    return {"id": thread_id, "isResolved": resolved, "isOutdated": False, "path": REPO, "line": 4,
+            "comments": {"nodes": [{"id": cid, "author": {"__typename": "User", "login": who}, "body": body,
+                                    "url": f"u/{cid}", "createdAt": "2026-11-04T12:00:00Z"} for cid, who, body in comments]}}
+
+
+class ReplyWatchTests(unittest.TestCase):
+    CHANGE = FlowTests.CHANGE
+
+    def test_the_inbox_holds_answers_to_our_threads_and_mentions_only(self) -> None:
+        pr = fake_pr("a" * 40, reviewThreads={"nodes": [
+            thread("T1", ("c1", "bob", "cache() is never invalidated"), ("c2", "alice", "It is, on logout. See X.")),
+            thread("T2", ("c3", "bob", "nit: name"), ("c4", "alice", "ok"), ("c5", "bob", "thanks")),  # we spoke last
+            thread("T3", ("c6", "carol", "other reviewer"), ("c7", "alice", "done")),                  # not ours
+            thread("T4", ("c8", "bob", "x"), ("c9", "alice", "y"), resolved=True),
+            thread("T5", ("c10", "bob", "x"), ("c11", "cursor[bot]", "bot")),
+        ]}, comments={"nodes": [
+            {"id": "p1", "author": {"login": "alice"}, "body": "@bob could you look again?", "createdAt": "2026-11-04T12:00:00Z"},
+            {"id": "p2", "author": {"login": "alice"}, "body": "@bob old", "createdAt": "2020-01-01T00:00:00Z"},
+            {"id": "p3", "author": {"login": "alice"}, "body": "no mention", "createdAt": "2026-11-04T12:00:00Z"},
+        ]})
+        items = review.reply_inbox(pr, "bob", handled={"c99"}, since=1_700_000_000)
+        self.assertEqual([(i["id"], i["comment"], i["kind"]) for i in items],
+                         [("R1", "c2", "thread"), ("R2", "p1", "comment")])
+        self.assertEqual(items[0]["conversation"][0], {"author": "bob", "ours": True, "body": "cache() is never invalidated"})
+        self.assertEqual(review.reply_inbox(pr, "bob", handled={"c2", "p1", "p2"}, since=None), [])
+
+    def test_replies_are_posted_only_with_the_approved_batch_and_never_twice(self) -> None:
+        with Project(self.CHANGE) as project:
+            worktree = FlowTests().run_to_draft(project, {"status": "approved", "blocking": []})
+            agent_dir = review.agent_dir_for(worktree)
+            state = read_json(agent_dir / review.STATE_FILE)
+            state["posted"] = [{"head": project.head, "draft_id": "x", "at": 1_700_000_000}]
+            (agent_dir / review.STATE_FILE).write_text(json.dumps(state))
+            pr = fake_pr(project.head, id="PR_node", reviewThreads={"nodes": [
+                thread("T1", ("c1", "bob", "cache() is never invalidated"), ("c2", "alice", "Why? It is cleared on logout.")),
+                thread("T2", ("c3", "bob", "nit: name"), ("c4", "alice", "👍"))]})
+            self.assertEqual(review.next_action(worktree)["next"], "done")
+            with mock.patch.object(review, "fetch_pr", return_value=pr):
+                waited = review.wait(worktree, timeout=0)
+            self.assertEqual((waited["status"], waited["count"]), ("replies", 2))
+            with self.assertRaises(ValueError):  # the agent has not proposed anything yet
+                review.replies(worktree)
+            (agent_dir / review.REPLIES_FILE).write_text(json.dumps({
+                "replies": [{"id": "R1", "body": "Right, logout clears it; but a token refresh does not (Repo.kt:40)."}],
+                "skipped": [{"id": "R2", "reason": "an emoji"}]}))
+            drafted = review.replies(worktree)
+            self.assertEqual((drafted["replies"], drafted["skipped"], drafted["ask_user"]), (1, 1, []))
+            self.assertIn("token refresh", (agent_dir / review.REPLIES_MD).read_text())
+            edited = review.replies(worktree, set_text=[["R1", "Makes sense, thanks."]])
+            self.assertNotEqual(edited["draft_id"], drafted["draft_id"])
+            with mock.patch("android_workflow.watch._graphql") as graphql:
+                refused = review.reply(worktree, drafted["draft_id"])
+                self.assertEqual(refused["reason"], "draft_changed")
+                graphql.assert_not_called()
+                graphql.return_value = {"addPullRequestReviewThreadReply": {"comment": {"id": "c5", "url": "u/c5"}}}
+                posted = review.reply(worktree, edited["draft_id"])
+                self.assertEqual(posted["status"], "posted")
+                self.assertEqual(graphql.call_args.kwargs, {"thread": "T1", "body": "Makes sense, thanks."})
+                again = review.reply(worktree, edited["draft_id"])
+                self.assertEqual(graphql.call_count, 1)  # already handled: nothing posted twice
+            self.assertEqual(again["posted"], [])
+            with mock.patch.object(review, "fetch_pr", return_value=pr):
+                self.assertEqual(review.wait(worktree, timeout=0)["status"], "timed_out")  # both handled
+            self.assertFalse((agent_dir / review.INBOX_FILE).exists())
+
+    def test_new_commits_come_before_replies(self) -> None:
+        with Project(self.CHANGE) as project:
+            worktree = FlowTests().run_to_draft(project, {"status": "approved", "blocking": []})
+            pr = fake_pr("f" * 40, reviewThreads={"nodes": [thread("T1", ("c1", "bob", "x"), ("c2", "alice", "fixed"))]})
+            with mock.patch.object(review, "fetch_pr", return_value=pr):
+                waited = review.wait(worktree, timeout=0)
+        self.assertEqual((waited["status"], waited["replies_pending"]), ("new_commits", 1))
+
+
 class SkillContractTests(unittest.TestCase):
     def test_the_skill_names_every_review_command_the_cli_has(self) -> None:
         from android_workflow.paths import KIT_ROOT
 
         text = (KIT_ROOT / "skills/android-review/SKILL.md").read_text(encoding="utf-8")
-        for action in ("start", "next", "ci", "draft", "edit", "post", "answer", "device", "ticket", "wait"):
+        for action in ("start", "next", "ci", "draft", "edit", "post", "answer", "device", "ticket", "wait", "replies", "reply"):
             self.assertIn(f"CLI review {action}", text)
         self.assertIn("Nothing reaches GitHub before the developer's OK", text)
 

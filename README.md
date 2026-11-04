@@ -286,7 +286,7 @@ and the CLI reference in [`tools/android-workflow/README.md`](tools/android-work
 ## Reviewing someone else's PR
 
 ```text
-/android-review 22307            # or the PR URL, from the app's folder
+/android-review 22307 [--watch]  # or the PR URL, from the app's folder
 ```
 
 Checks the PR out in its own worktree, derives what it claims (PR body, Jira, the PR template's
@@ -294,7 +294,8 @@ checked items), reviews the code (architecture, side effects), reads the attache
 videos, trusts CI when it passed on the PR head (else the local gate) and, when the PR changes UI,
 runs the device on the base APK and on the PR head. Then it shows the review it would post
 (verdict, at most 10 inline comments, `nit:` for non-blocking ones) and posts it **only after your
-OK**. Details: [`skills/android-review/SKILL.md`](skills/android-review/SKILL.md) and the design in
+OK**. With `--watch` it keeps following the PR: new commits get a delta review, and when the author
+answers one of our comments it drafts the replies and posts them after your OK. Details: [`skills/android-review/SKILL.md`](skills/android-review/SKILL.md) and the design in
 [`docs/android-review-design.md`](docs/android-review-design.md).
 
 ## Tests

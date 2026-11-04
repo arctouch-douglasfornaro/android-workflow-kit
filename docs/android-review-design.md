@@ -67,9 +67,12 @@ flowchart TD
    developer can drop/edit comments or change the event. `CLI review post` sends it via
    `gh api repos/{o}/{r}/pulls/{n}/reviews` in one call, pinned to the reviewed `commit_id`.
    If the head moved since the review, `post` refuses and offers a delta re-review.
-7. **Follow-up** — optional `--watch`: on new commits, `CLI delta` re-reviews only the new hunks and
-   checks whether each thread we opened was addressed; again posts only after the OK. Never resolves
-   threads.
+7. **Follow-up** — optional `--watch` (`CLI review wait`): on new commits, `CLI delta` re-reviews only
+   the new hunks and checks whether each thread we opened was addressed; when someone answers a thread
+   we took part in (or @mentions us after the review), `aw-pr-watcher` mode `review` drafts the answers
+   (`RUN/review-replies.json`), `CLI review replies` shows them as one batch with an id, and
+   `CLI review reply --draft-id` posts them after the OK. New commits are handled before replies, so a
+   "fixed in abc" is checked on the new head. Never resolves threads.
 
 ## UI-change rule (code, not prose)
 

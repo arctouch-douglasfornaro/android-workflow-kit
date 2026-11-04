@@ -52,7 +52,9 @@ CLI review post   --target WT --draft-id ID                               (only 
 CLI review answer --target WT --question "q" --answer "a"
 CLI review device --target WT --require "why"                             (Reviewer: UI effect the rule missed)
 CLI review ticket --target WT --skip "why"                                (go on without the Jira ticket)
-CLI review wait   --target WT [--timeout S]                               (after the post: new commits?)
+CLI review wait   --target WT [--timeout S]                               (after the post: new commits, replies, closed)
+CLI review replies --target WT [--drop R2]… [--set R3 "text"]…           (RUN/review-replies.md + draft id)
+CLI review reply  --target WT --draft-id ID                               (posts the approved replies)
 CLI gate | prebuild | device … | emulator … | log …  --target WT         (as in android-workflow)
 ```
 
@@ -84,12 +86,23 @@ CLI gate | prebuild | device … | emulator … | log …  --target WT         (
      edit …`, show the new draft, ask again. Only on an explicit OK → `CLI review post --draft-id <id>`
      with the id of the draft they saw. `refused: head_moved` → `CLI review start` again (delta round).
      Never post on silence, on a standing preference, or with another draft id.
-   - `done`: run `also` (gives the device back). With `--watch`, `CLI review wait --target WT`
-     (background, `--timeout 3300` on Claude Code); `new_commits` → step 1 again for a delta round
-     (it re-reviews the new commits only and checks whether our earlier threads were addressed);
-     `merged`/`closed` → stop.
+   - `done`: run `also` (gives the device back). With `--watch`, follow the PR (step 4).
    Agents log their own `completed` (Planner, Reviewer, Device); `aw-media` writes
    `media-review.json` and does not log.
+4. **Watch** (`--watch`): `CLI review wait --target WT` (background, `--timeout 3300` on Claude Code)
+   and act on its `status`, then wait again:
+   - `new_commits` → step 1 again for a delta round (it re-reviews the new commits only and checks
+     whether our earlier threads were addressed). Replies pending (`replies_pending`) come back on the
+     next `wait`, judged on the new head.
+   - `replies` (someone answered a thread we opened or replied in, or @mentioned us after the review):
+     spawn `aw-pr-watcher` mode `review` (reads `RUN/review-inbox.json`, writes
+     `RUN/review-replies.json`), then `CLI review replies --target WT`. Print `RUN/review-replies.md`
+     **as is** and ask: post, edit, or stop. Its `ask_user` items are the developer's call: their
+     answer → `--set R1 "text"`, nothing to say → `--drop R1`. Only on an explicit OK →
+     `CLI review reply --target WT --draft-id <id>`. Never on silence or with another id. A
+     `verdict_change` from the agent (a reply shows we should now approve or block) → tell the
+     developer; a new review is their call, never posted from the watch.
+   - `timed_out` → wait again. `merged` / `closed` → stop.
 
 ## What the CLI decides (change it in `android_workflow/review.py`)
 
@@ -123,6 +136,11 @@ CLI gate | prebuild | device … | emulator … | log …  --target WT         (
 - **Post**: one review via `POST /repos/{o}/{r}/pulls/{n}/reviews` pinned to the reviewed commit;
   refused when the draft changed since the OK or the PR head moved. Threads are never resolved, the
   PR is never merged from this mode.
+- **Replies** (watch): the inbox is the last comment of every open thread we took part in when it is
+  not ours (bots left out), plus top-level comments/reviews that @mention us after our first review.
+  One batch per round, posted only with the approved id: a thread reply in the thread, a quoting PR
+  comment otherwise. Each posted reply is recorded at once (a retry never posts it twice); dropped and
+  skipped items are handled; `ask_user` items stay open until the developer answers.
 
 Config, per project in `.ai/android-workflow.json`:
 `{"review": {"max_inline_comments": 10, "allow_approve": true, "media_max_mb": 100, "ci_wait_minutes": 30,
@@ -138,7 +156,8 @@ severity): the measure of which findings developers find useless.
 In `RUN`: `pr-context.json` (with `copies`), `ticket/<KEY>.md`, `copy-diff/*.diff`, `review-state.json` (rounds, heads, posted reviews), `review-spec.json`,
 `plan.md` (UI only), `review.json`, `media-review.json`, `media/pr/`, `ci-report.json`,
 `gate-report.json` (local gate only), `device-report.md` and `media/{before,after}/` (UI only),
-`review-draft.json` / `review-draft.md`, `review-delta.diff` (delta rounds), `stage-log.md`.
+`review-draft.json` / `review-draft.md`, `review-delta.diff` (delta rounds), `review-inbox.json`,
+`review-replies.json` (agent) / `review-replies-draft.json` / `review-replies.md` (watch), `stage-log.md`.
 
 ## Done
 
