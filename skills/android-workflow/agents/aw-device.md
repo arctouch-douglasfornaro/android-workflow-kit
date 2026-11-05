@@ -55,6 +55,15 @@ Flows live in `RUN/media/flows/`, one per behavior in the plan's recipe (`<surfa
   `AW_MAESTRO`, `AW_OUT`, `AW_FLOW` (the yaml) and `AW_PHASE`; it runs Maestro itself with
   `"$AW_MAESTRO" --device "$AW_SERIAL" test --test-output-dir "$AW_OUT" "$AW_FLOW"`. The replay turns
   wifi and data back on after any script, but the script restores what it changed too.
+- **Setup once per replay, not once per flow.** A flag, a debug toggle or `adb root` that several flows
+  need is set by the first one and marked in `$AW_REPLAY_STATE` (emptied at each replay); the next flow
+  sees the mark and skips it: `[ -f "$AW_REPLAY_STATE/flag-treatment" ] || { set it; touch "$AW_REPLAY_STATE/flag-treatment"; }`.
+  Flows run in name order, so name them by variant (`<surface>-control-…`, `<surface>-treatment-…`)
+  and a variant switch happens once. No `sleep` in scripts either: poll for the state
+  (`until adb -s "$AW_SERIAL" shell … ; do …; done` with a cap) or let Maestro wait.
+- **On the base build, stop at the before capture.** A flow that goes on to the new UI fails there by
+  design and waits out Maestro's timeout: when `$AW_PHASE` is `before`, run only the steps up to the
+  before capture (a separate `_before` yaml, or `-e PHASE=before` with a `runFlow: when:`).
 - Recordings ≤15 s; at most one still per surface.
 
 ## Inputs
@@ -85,11 +94,12 @@ Flows live in `RUN/media/flows/`, one per behavior in the plan's recipe (`<surfa
    each already capturing under that name, and lists `known_flows`: flows earlier tickets proved on
    this app. Copy the steps of a known flow that reaches the same screen; fill the remaining TODOs with
    selectors from a filtered UI dump (device-driving §2), then `CLI device replay --target TARGET --serial
-   <serial>`, fix what fails and replay again. That is the normal path, not a fallback: a PASS needs a
+   <serial>`, fix what fails and replay only that flow (`--flow <name>`; a flow that already passed on
+   this very build is reused anyway, `--fresh` runs them all). That is the normal path, not a fallback: a PASS needs a
    replay of this very source with a flow passed (`log` refuses it otherwise).
    `after` with saved flows (the orchestrator passes `replay`): run `CLI device replay --target TARGET
    --serial <serial>` first, before anything else. It installs the current build and re-runs every flow in
-   `RUN/media/flows/` by code (a failing flow is rerun once), files the captures under `media/after/`
+   `RUN/media/flows/` by code (a failing flow is rerun once; on the base build it is not), files the captures under `media/after/`
    with the names the flows declare and writes `media/compare.md` and `RUN/replay.json` (time per flow,
    `install_seconds`, `over_budget`). `replayed` → skip steps 3, 5 and 6 (navigation, capture
    and compare are done) and judge the AC in step 4 from those files (open only the `after` captures

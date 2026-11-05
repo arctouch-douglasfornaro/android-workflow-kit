@@ -160,7 +160,7 @@ The device session is the most expensive part of a workflow run in both time and
   Cheapest first, for the same question: `assertVisible` in the flow → filtered text dump → `dumpsys` (cross-activity only) → screenshot (evidence only).
 - **Scope `logcat` reads.** Always `adb logcat -c` before the action, then read with a targeted filter (`grep -iE "exception|fatal|<feature-keyword>"`) and a `tail -N` cap — never read an unscoped, unfiltered log back into context.
 - **Batch related adb calls into one Bash invocation** (e.g. a tap, a short sleep, then the next tap, chained with `&&`/`;` in one command) rather than one tool call per micro-step — fewer round trips means less repeated context overhead across a long device session.
-- **Script it once, replay it after.** A flow written in `before` and replayed by `CLI device replay` costs no tokens and about the flow's own run time; hand-driving the same path in `after` costs a model round trip per tap. Fixed sleeps are the other waste: wait on a visible string, never a timer.
+- **Script it once, replay it after.** A flow written in `before` and replayed by `CLI device replay` costs no tokens and about the flow's own run time; hand-driving the same path in `after` costs a model round trip per tap. Fixed sleeps are the other waste: wait on a visible string, never a timer. After fixing one flow, replay only it (`CLI device replay --flow <name>`): a full replay reruns every flow, while a flow that already passed on this build is reused.
 - **One continuous recording beats many discrete screenshots** when a flow needs to be shown or verified across several steps — record it inside the Maestro flow (`startRecording` / `stopRecording`).
 
 ---

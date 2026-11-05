@@ -268,6 +268,7 @@ class FlowTests(unittest.TestCase):
         write_profile(worktree)
         planner = review.next_action(worktree)
         self.assertEqual((planner["next"], planner["agent"], planner["mode"]), ("spawn", "aw-planner", "review"))
+        self.assertNotIn("also", planner)  # no UI change: no build starts with the Planner
         agent_dir = Path(result["run"])
         spec = read_json(agent_dir / "ticket-spec.json")
         self.assertNotIn("T7", spec["route"])
@@ -619,7 +620,9 @@ class DeviceTests(unittest.TestCase):
             worktree = Path(result["worktree_path"])
             agent_dir = Path(result["run"])
             write_profile(worktree)
-            review.next_action(worktree)
+            planner = review.next_action(worktree)
+            # both APKs build while the Planner and the Reviewer read, not after them
+            self.assertEqual(planner["also"], ["CLI prebuild --target TARGET", "CLI device build --target TARGET"])
             self.assertIn("T7", read_json(agent_dir / "ticket-spec.json")["route"])
             (agent_dir / review.SPEC_FILE).write_text(json.dumps({"status": "ready", "acceptance": []}))
             log_stage(worktree, "Planner", "completed", "0 AC", "host")

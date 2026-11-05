@@ -8,7 +8,9 @@ then only replays and judges; a flow that fails sends it back to driving by hand
 
 Flow files: `*.yaml` run with Maestro; `_*.yaml` are helpers a flow pulls in with `runFlow` and never
 run alone; a `<flow>.sh` next to `<flow>.yaml` runs instead of it, for what Maestro cannot do (turn
-the network off at a marker) and gets `AW_SERIAL`, `AW_MAESTRO`, `AW_OUT`, `AW_FLOW`, `AW_PHASE`.
+the network off at a marker) and gets `AW_SERIAL`, `AW_MAESTRO`, `AW_OUT`, `AW_FLOW`, `AW_PHASE` and
+`AW_REPLAY_STATE`: a folder emptied at the start of each replay, where a script marks setup that later
+flows of the same replay can skip (a feature flag already set, `adb root` already done).
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from android_workflow import gradle_cache
 from android_workflow.paths import cache_dir, media_dir, run_dir
 
 REPLAY_FILE = "replay.json"
@@ -31,6 +34,7 @@ AFTER_BUILD_FILE = "after-build.json"
 INSTALLABLE = frozenset({"passed", "no_build_command", "no_apk"})  # no APK to `adb install`: the install task builds
 FLOW_TIMEOUT_SECONDS = 180
 AFTER_BUDGET_SECONDS = 300
+STATE_DIR = "_state"  # `AW_REPLAY_STATE`: emptied at each replay; scripts mark one-time setup done there
 CAPTURE_RE = re.compile(r"^\s*-?\s*(?:takeScreenshot|startRecording)\s*:\s*['\"]?([^'\"\n#]+?)['\"]?\s*(?:#.*)?$", re.M)
 
 
@@ -121,7 +125,8 @@ def install(target: Path, config: dict[str, Any], serial: str, log: Path) -> tup
     env = {**os.environ, "ANDROID_SERIAL": serial}
     try:
         with log.open("w", encoding="utf-8") as handle, build_slot(f"device install ({target.name})", config):
-            result = subprocess.run(shlex.split(command) + ["--console=plain"], cwd=target, env=env, stdout=handle,
+            parts, env = gradle_cache.wrap(shlex.split(command) + ["--console=plain"], target, env)
+            result = subprocess.run(parts, cwd=target, env=env, stdout=handle,
                                     stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, timeout=timeout, check=False)
     except subprocess.TimeoutExpired:
         return False, f"the install timed out after {timeout}s"
@@ -350,7 +355,8 @@ def _run_flow(flow: Path, maestro: str, serial: str, folder: Path, target: Path,
     if flow.suffix == ".sh":
         sibling = next((flow.with_suffix(ext) for ext in (".yaml", ".yml") if flow.with_suffix(ext).is_file()), None)
         env = {**os.environ, "ANDROID_SERIAL": serial, "AW_SERIAL": serial, "AW_MAESTRO": maestro, "AW_OUT": str(folder),
-               "AW_FLOW": str(sibling or ""), "AW_PHASE": phase, "AW_TARGET": str(target)}
+               "AW_FLOW": str(sibling or ""), "AW_PHASE": phase, "AW_TARGET": str(target),
+               "AW_REPLAY_STATE": str(folder.parent / STATE_DIR)}
         command = [str(flow)] if os.access(flow, os.X_OK) else ["sh", str(flow)]
     else:
         env = None
@@ -371,19 +377,28 @@ def _run_flow(flow: Path, maestro: str, serial: str, folder: Path, target: Path,
 
 
 def replay(target: Path, serial: str | None = None, phase: str = "after", install_base_apk: bool | None = None,
-           lease_timeout: float = 1200.0) -> dict[str, Any]:
+           lease_timeout: float = 1200.0, only: list[str] | None = None, fresh: bool = False) -> dict[str, Any]:
     """Run every saved flow and file what it captured under `media/<phase>/`, holding the device's
     lease the whole time (another run's Device stage waits, and so does this replay for theirs).
 
     `after` installs the current build first. `before` installs the cached base APK when the base
     build has one (`install_base_apk`, default: when no `before` agent installed it already, i.e. the
     late `before` after the `after` round), else runs on the build already installed. Returns what was
-    captured per flow, with the time each step took."""
+    captured per flow, with the time each step took.
+
+    A flow that passed on this very build (same source, same APK, same flow files) and whose captures are
+    still filed is not run again (`reused`); `fresh` runs every flow. `only` runs just those flows (names
+    with or without the extension) and keeps every other flow's last result."""
     from android_workflow.emulator import status as device_status
     from android_workflow.locks import device_lease
 
     if phase not in {"before", "after"}:
         return {"status": "failed", "reason": "phase must be before or after"}
+    if only:
+        unknown = sorted({Path(name).stem for name in only} - {flow.stem for flow in flows(target)})
+        if unknown:
+            return {"status": "failed", "reason": "no saved flow named " + ", ".join(unknown),
+                    "flows": [flow.name for flow in flows(target)]}
     if not flows(target):
         return {"status": "no_flows", "next": "drive the app by hand (device-driving skill) and save the flow in media/flows/"}
     if not serial:
@@ -403,11 +418,37 @@ def replay(target: Path, serial: str | None = None, phase: str = "after", instal
         if not held:
             return {"status": "device_busy", "serial": serial,
                     "reason": f"another run kept {serial} for over {int(lease_timeout)}s"}
-        return _replay(target, serial, phase, install_base_apk, built)
+        return _replay(target, serial, phase, install_base_apk, built, only=only, fresh=fresh)
+
+
+def _kept_results(saved: list[Path], earlier: dict[str, Any], phase: str, filed: Path, only: list[str] | None,
+                  fresh: bool, same_build: bool) -> dict[str, dict[str, Any]]:
+    """The flows this replay does not run, with the result each keeps from the last replay of this phase.
+
+    `earlier` holds only results on the same source. With `only`, every other flow keeps its last result
+    as it is. Otherwise a flow is kept when it passed (on the base build: captured its before) on the
+    same APK, its files are unchanged, and everything it captured is still filed."""
+    wanted = {Path(name).stem for name in only or []}
+    kept: dict[str, dict[str, Any]] = {}
+    for flow in saved:
+        last = earlier.get(flow.name)
+        if not isinstance(last, dict) or last.get("digest") != flow_digest(flow):
+            continue
+        if wanted:
+            if flow.stem not in wanted:
+                kept[flow.name] = last
+            continue
+        good = {"passed", "partial"} if phase == "before" else {"passed"}
+        captured = last.get("captured") or []
+        if fresh or not same_build or last.get("status") not in good or not captured:
+            continue
+        if all(filed.is_dir() and any(filed.glob(name + ".*")) for name in captured):
+            kept[flow.name] = last
+    return kept
 
 
 def _replay(target: Path, serial: str, phase: str, install_base_apk: bool | None,
-            built: dict[str, Any] | None = None) -> dict[str, Any]:
+            built: dict[str, Any] | None = None, only: list[str] | None = None, fresh: bool = False) -> dict[str, Any]:
     from android_workflow.cli import append_stage_log, read_json, source_fingerprint
     from android_workflow.evidence import compare, ingest
 
@@ -422,9 +463,7 @@ def _replay(target: Path, serial: str, phase: str, install_base_apk: bool | None
     flow_timeout = int(device_config.get("flow_timeout_seconds") or FLOW_TIMEOUT_SECONDS)
     budget = int(device_config.get("after_budget_seconds") or AFTER_BUDGET_SECONDS)
     out = agent_dir / "media" / f"replay-{phase}"
-    if out.exists():
-        shutil.rmtree(out)
-    out.mkdir(parents=True)
+    out.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
     install_seconds = 0.0
     result_file = agent_dir / (REPLAY_FILE if phase == "after" else f"replay-{phase}.json")
@@ -461,12 +500,25 @@ def _replay(target: Path, serial: str, phase: str, install_base_apk: bool | None
             return result
     before, after = media_dir(target) / "before", media_dir(target) / "after"
     declared = {flow.name: declared_names(flow) for flow in saved}
+    build_id = str(base) if base is not None else str((built or {}).get("sha256") or "")
+    previous_id = str(previous.get("base_apk") or "") if phase == "before" else str(previous.get("sha256") or "")
+    kept = _kept_results(saved, earlier, phase, media_dir(target) / phase, only=only, fresh=fresh,
+                         # after: `earlier` already means the same source; before: the same base APK
+                         same_build=build_id == previous_id and (phase == "after" or bool(build_id)))
+    for folder in out.iterdir():  # a flow that runs again starts from an empty folder
+        if folder.is_dir() and folder.name not in {Path(name).stem for name in kept}:
+            shutil.rmtree(folder, ignore_errors=True)
+    (out / STATE_DIR).mkdir(exist_ok=True)
     # What a flow may file: the names it declares, plus (older flows) the names the before capture used.
     known = sorted({path.stem for path in before.glob("*") if path.is_file()}) if before.is_dir() else []
     owned = sorted({name for names in declared.values() for name in names} | (set(known) if phase == "after" else set()))
-    _drop_phase(target, phase, owned)  # what this replay must capture again never stays from an earlier round
+    keep_names = {name for item in kept.values() for name in item.get("captured") or []}
+    _drop_phase(target, phase, [name for name in owned if name not in keep_names])  # what runs again is captured again
     results = []
     for flow in saved:
+        if flow.name in kept:
+            results.append({**kept[flow.name], "reused": True, "seconds": 0.0})
+            continue
         folder = out / flow.stem
         folder.mkdir(parents=True, exist_ok=True)
         digest = flow_digest(flow)
@@ -482,7 +534,9 @@ def _replay(target: Path, serial: str, phase: str, install_base_apk: bool | None
         flow_started = time.monotonic()
         code, log = _run_flow(flow, maestro, serial, folder, target, phase, flow_timeout)
         attempts = 1
-        if code != 0:  # a real failure is rerun once; a second one is a failure, the first alone was flaky
+        # A real failure on the new build is rerun once (the first alone was flaky). On the base build a flow
+        # that looks for the new UI fails by design, so a second attempt only doubles the wait.
+        if code != 0 and phase == "after":
             code, log = _run_flow(flow, maestro, serial, folder, target, phase, flow_timeout)
             attempts = 2
         allowed = set(declared[flow.name]) | (set(known) if phase == "after" else set())

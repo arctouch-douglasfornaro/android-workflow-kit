@@ -879,10 +879,14 @@ def _decide(target: Path, record: bool, no_device: bool) -> dict[str, Any]:
             return _answer("wait", "the Planner is writing the review spec", agent="aw-planner",
                            if_returned="CLI log --target TARGET --stage Planner --status completed --note \"spec\"")
         _log_started(target, "Planner", "review spec from the PR text", record)
+        # A UI change will need both APKs: the builds take minutes, so they start with the Planner, not after
+        # the Reviewer. A spec that later waives the device only leaves a build nobody installs.
+        early = bool((context.get("ui_change") or {}).get("ui") or state.get("device_forced")) and not no_device
         return _answer("spawn", "derive what the PR claims to do (AC) before judging it", agent="aw-planner",
                        mode="review", stage="Planner", jira=context.get("jira"),
                        answers=state.get("planner_answers"),
-                       read=[f"RUN/{CONTEXT_FILE}", *ticket_read], writes=[f"RUN/{SPEC_FILE}", "RUN/plan.md"])
+                       read=[f"RUN/{CONTEXT_FILE}", *ticket_read], writes=[f"RUN/{SPEC_FILE}", "RUN/plan.md"],
+                       also=["CLI prebuild --target TARGET", "CLI device build --target TARGET"] if early else None)
     open_questions = [q for q in spec.get("questions") or [] if q not in (state.get("planner_answers") or {})]
     if spec.get("status") == "needs_input" and open_questions:
         return _answer("ask_user", "the PR does not say what it should do", question=open_questions,

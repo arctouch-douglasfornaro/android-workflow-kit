@@ -76,7 +76,8 @@ CLI gate | prebuild | device … | emulator … | log …  --target WT         (
      `CLI review ticket --target WT --skip "<why>"`.
    - `spawn`: spawn `agent` with `mode` and `read` (`aw-planner` mode `review`, `aw-device` mode
      `after` with `serial`, `scaffold`/`replay`, `budget_seconds`). The stage is already logged as
-     started.
+     started. Start its `also` in the background in the same turn: on a UI change the Planner's spawn
+     carries the base build and the PR-head APK, so they build while the Planner and the Reviewer read.
    - `checks`: in the same turn, spawn every `run` agent (`aw-reviewer` mode `pr`/`pr-delta`,
      `aw-media`), run every `commands` entry, and start `also` in the background (base build and the
      PR-head APK when the PR changes UI).

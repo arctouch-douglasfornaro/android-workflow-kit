@@ -1043,9 +1043,13 @@ def execute_command(
     """Run `command` in `target` and keep the tail of its output."""
     started = time.monotonic()
     try:
+        from android_workflow.gradle_cache import wrap
+
+        parts, env = wrap(shlex.split(command), target)
         result = subprocess.run(
-            shlex.split(command),
+            parts,
             cwd=target,
+            env=env,
             text=True,
             capture_output=True,
             timeout=timeout,
@@ -3614,6 +3618,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                                     "before: run them on the base build (the cached base APK when there is one), file media/before")
     device_parser.add_argument("--install-base", action="store_true", dest="install_base",
                                help="with --phase before: install the cached base APK first (the late before)")
+    device_parser.add_argument("--flow", action="append", default=[], dest="flow",
+                               help="replay: run only this flow (repeat or comma-separate); every other flow keeps "
+                                    "its last result on this source")
+    device_parser.add_argument("--fresh", action="store_true",
+                               help="replay: run every flow, even one that already passed on this very build")
     next_parser = subparsers.add_parser("next", help="the one thing to do now, decided from the run's files")
     next_parser.add_argument("--target", required=True, type=Path)
     next_parser.add_argument("--no-device", action="store_true")
@@ -3875,8 +3884,9 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
                 return {"status": "no_device"}, 1
             result = install_current(target, serial)
             return result, 0 if result["status"] == "installed" else 1
+        only = [name.strip() for item in args.flow for name in item.split(",") if name.strip()]
         result = replay(target, serial=args.serial, phase=args.phase,
-                        install_base_apk=True if args.install_base else None)
+                        install_base_apk=True if args.install_base else None, only=only or None, fresh=args.fresh)
         return result, 0 if result["status"] in {"replayed", "partial"} else 1
     if args.command == "next":
         from android_workflow.decide import next_action

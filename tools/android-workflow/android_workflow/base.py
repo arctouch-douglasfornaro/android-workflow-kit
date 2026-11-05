@@ -28,6 +28,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from android_workflow import gradle_cache
 from android_workflow.paths import KIT_ROOT, state_home
 
 KEEP_APK_SETS = 6
@@ -232,9 +233,9 @@ def _run(command: str, cwd: Path, log: Path | None, timeout: float) -> int:
         with handle:
             handle.write(f"$ {command}  (in {cwd})\n")
             handle.flush()
-            result = subprocess.run(shlex.split(command) + (["--console=plain"] if "gradlew" in command else []),
-                                    cwd=cwd, stdout=handle, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                                    timeout=timeout, check=False)
+            parts, env = gradle_cache.wrap(shlex.split(command) + (["--console=plain"] if "gradlew" in command else []), cwd)
+            result = subprocess.run(parts, cwd=cwd, env=env, stdout=handle, stderr=subprocess.STDOUT,
+                                    stdin=subprocess.DEVNULL, timeout=timeout, check=False)
         return result.returncode
     except subprocess.TimeoutExpired:
         return 124

@@ -509,10 +509,10 @@ class ReplayTests(unittest.TestCase):
         self.path.stop()
         self.project.__exit__(None, None, None)
 
-    def replay(self) -> tuple[dict, int]:
+    def replay(self, *extra: str) -> tuple[dict, int]:
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            code = main(["device", "replay", "--target", str(self.root), "--serial", "emu-1"])
+            code = main(["device", "replay", "--target", str(self.root), "--serial", "emu-1", *extra])
         text = out.getvalue()
         return json.loads(text[text.index("{"):]), code
 
@@ -560,6 +560,40 @@ class ReplayTests(unittest.TestCase):
         (self.flows / "_open.yaml").write_text("- openLink: https://x/1\n", encoding="utf-8")  # a helper edit reruns it
         fourth, _ = self.replay()
         self.assertNotIn("skipped", fourth["flows"][0])
+
+    def test_a_flow_that_passed_on_this_build_is_not_run_again(self) -> None:
+        (self.flows / "a.yaml").write_text("- takeScreenshot: a-shot\n", encoding="utf-8")
+        (self.flows / "b.yaml").write_text("- takeScreenshot: b-shot\n", encoding="utf-8")
+        self.replay()
+        (self.flows / "b.yaml").write_text("- launchApp\n- takeScreenshot: b-shot\n", encoding="utf-8")
+        second, code = self.replay()
+        self.assertEqual((second["status"], code), ("replayed", 0))
+        self.assertEqual([item.get("reused", False) for item in second["flows"]], [True, False])
+        self.assertTrue((run_dir(self.root) / "media/after/a-shot.png").is_file())
+        (run_dir(self.root) / "media/after/a-shot.png").unlink()  # a capture that is gone runs again
+        third, _ = self.replay()
+        self.assertEqual([item.get("reused", False) for item in third["flows"]], [False, True])
+        fresh, _ = self.replay("--fresh")
+        self.assertFalse(any(item.get("reused") for item in fresh["flows"]))
+
+    def test_only_the_named_flow_runs_and_the_others_keep_their_result(self) -> None:
+        (self.flows / "a.yaml").write_text("- takeScreenshot: a-shot\n", encoding="utf-8")
+        (self.flows / "b.yaml").write_text("- FAILME\n", encoding="utf-8")
+        self.replay()
+        (self.flows / "b.yaml").write_text("- takeScreenshot: b-shot\n", encoding="utf-8")
+        result, code = self.replay("--flow", "b")
+        self.assertEqual((result["status"], code), ("replayed", 0))
+        self.assertEqual([(item["flow"], item.get("reused", False)) for item in result["flows"]],
+                         [("a.yaml", True), ("b.yaml", False)])
+        self.assertTrue((run_dir(self.root) / "media/after/a-shot.png").is_file())
+        unknown, code = self.replay("--flow", "nope")
+        self.assertEqual((unknown["status"], code), ("failed", 1))
+        self.assertIn("nope", unknown["reason"])
+
+    def test_a_flow_failing_on_the_base_build_is_not_retried(self) -> None:
+        (self.flows / "a.yaml").write_text("- FLAKY\n- takeScreenshot: a-shot\n", encoding="utf-8")
+        result, _ = self.replay("--phase", "before")
+        self.assertEqual((result["flows"][0]["attempts"], result["flows"][0]["status"]), (1, "failed"))
 
     def test_a_failing_flow_is_reported_with_its_log(self) -> None:
         (self.flows / "a.yaml").write_text("- launchApp\n", encoding="utf-8")
@@ -612,6 +646,18 @@ class ReplayTests(unittest.TestCase):
         self.assertFalse((run_dir(self.root) / "media/after").exists())
         self.assertFalse(any("installDebug" in call for call in gradle_calls(self.root)))
         self.assertTrue((run_dir(self.root) / "replay-before.json").is_file())
+
+    def test_a_script_can_skip_setup_an_earlier_flow_of_the_same_replay_did(self) -> None:
+        script = ('#!/bin/sh\nmark="$AW_REPLAY_STATE/flag"\n'
+                  'if [ -f "$mark" ]; then echo reused >> "$AW_TARGET/setup.log"; else echo set >> "$AW_TARGET/setup.log"; '
+                  'touch "$mark"; fi\n"$AW_MAESTRO" --device "$AW_SERIAL" test --test-output-dir "$AW_OUT" "$AW_FLOW"\n')
+        for name in ("a", "b"):
+            (self.flows / f"{name}.yaml").write_text(f"- takeScreenshot: {name}-shot\n", encoding="utf-8")
+            (self.flows / f"{name}.sh").write_text(script, encoding="utf-8")
+            os.chmod(self.flows / f"{name}.sh", 0o755)
+        self.replay()
+        self.replay("--fresh")  # a new replay starts with no marks
+        self.assertEqual((self.root / "setup.log").read_text().split(), ["set", "reused", "set", "reused"])
 
     def test_a_script_runs_with_the_device_and_the_flow_in_its_environment(self) -> None:
         (self.flows / "err.yaml").write_text("- takeScreenshot: x-err\n", encoding="utf-8")

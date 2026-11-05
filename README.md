@@ -168,6 +168,11 @@ stepping on each other:
   `"dedicated": false` (or `ANDROID_WORKFLOW_DEDICATED_DEVICE=0` for one session).
   With 3+ runs on one laptop, keep 2 build slots (or 1) and close Android Studio.
 - **Base build**: one per repository at a time, shared by commit.
+- **Build cache**: when the project keeps its Gradle build cache inside the checkout
+  (`new File(rootDir, 'gradle-build-cache')`), every worktree (a review, the base checkout) would start
+  with an empty one and build the whole app. Each Gradle run the workflow starts in a worktree gets an
+  init script that points that cache at the main checkout's, so it reuses the outputs your own builds
+  left there. `ANDROID_WORKFLOW_SHARED_BUILD_CACHE=0` turns it off.
 
 ### 4. What you get
 
