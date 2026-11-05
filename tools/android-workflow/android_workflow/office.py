@@ -88,6 +88,30 @@ LIVE_AGENT_SECONDS = 4 * 3600
 LIVE_IDLE_SECONDS = 2 * 3600  # an unfinished run nobody touched this long was left behind (a closed session)
 
 
+def run_status(run: Path, state: dict[str, Any]) -> tuple[str, float | None]:
+    """`(status, since)`: the run's status as the office shows it and, when its clock has stopped, when.
+
+    A review whose verdict is posted only follows the PR: `watching`, its clock stopped at the post. Runs
+    from before the status existed are read the same way from `review-state.json`."""
+    status = str(state.get("status") or "idle")
+    if status == "watching":
+        return status, _number(state.get("watching_since")) or _number(state.get("updated_at"))
+    if status == "completed":
+        return status, _number(state.get("finished_at"))
+    working = any(isinstance(entry, dict) and str(entry.get("status") or "") in WORKING
+                  for entry in (state.get("stages") or {}).values())
+    if status in {"running", "awaiting_host"} and not working:
+        posted = [item for item in _json(run / "review-state.json").get("posted") or [] if isinstance(item, dict)]
+        head = _json(run / "pr-context.json").get("head")
+        if posted and (not head or posted[-1].get("head") == head):
+            return "watching", _number(posted[-1].get("at")) or _number(state.get("updated_at"))
+    return status, None
+
+
+def _number(value: Any) -> float | None:
+    return float(value) if isinstance(value, (int, float)) and value > 0 else None
+
+
 def run_is_live(run: Path, current: bool = True) -> bool:
     """A run is live while it is going: an agent works on it (for up to a few hours: one left `started`
     by a crashed session stops counting), so several tickets in one checkout can be live at once and
@@ -103,7 +127,8 @@ def run_is_live(run: Path, current: bool = True) -> bool:
         since = (metrics.get(stage) or {}).get("running_since")
         if now - float(since if isinstance(since, (int, float)) else updated) < LIVE_AGENT_SECONDS:
             return True
-    unfinished = (state.get("status") or "idle") not in {"completed", "idle", "moved"}
+    # A posted review only follows its PR: nothing works on it, so it is not live (and its clock stopped).
+    unfinished = run_status(run, state)[0] not in {"completed", "idle", "moved", "watching"}
     return current and unfinished and now - updated < LIVE_IDLE_SECONDS
 
 
@@ -356,6 +381,7 @@ def collect(target: Path, ticket: str | None = None, page_dir: Path | None = Non
             "running_since": since if state_name == "working" and isinstance(since, (int, float)) else None,
         })
     running = run_is_live(run, current=ticket == current)
+    shown_status, stopped_at = run_status(run, state)
     live_tokens = _live_tokens(target, run, desks, measured_stages, state) if running and not snapshot else 0
     final_totals = dict(metrics.get("totals") or {})
     totals = final_totals
@@ -363,8 +389,11 @@ def collect(target: Path, ticket: str | None = None, page_dir: Path | None = Non
         reported = [item.get("tokens") for item in measured_stages.values()
                     if isinstance(item, dict) and isinstance(item.get("tokens"), int)]
         created = state.get("created_at")
+        # The clock stops when the run does: at the post (watching), at the end, or, for a run left
+        # unfinished that nothing works on any more, at its last update.
+        end = stopped_at or (now if running else float(state.get("updated_at") or now))
         totals = {
-            "wall_time_seconds": max(now - created, 0) if created else None,
+            "wall_time_seconds": max(end - created, 0) if created else None,
             "tokens": sum(reported) + live_tokens if reported or live_tokens else None,
             "tokens_live": bool(live_tokens),
         }
@@ -383,7 +412,8 @@ def collect(target: Path, ticket: str | None = None, page_dir: Path | None = Non
         patches = live_patches(target, changes)
     data.update({
         "title": (spec.get("ticket") or {}).get("title") or "",
-        "status": state.get("status") or "idle",
+        "status": shown_status,
+        "stopped_at": stopped_at,
         "current": state.get("current_stage"),
         "question": (state.get("pending_question") or {}).get("question"),
         "draft": draft.get("issues") or [],
@@ -675,6 +705,8 @@ code { font-family: ui-monospace, Menlo, monospace; }
 .chip.running, .chip.awaiting_host, .chip.working, .chip.started { color: #0b1020; background: var(--warn); border-color: transparent; }
 .chip.completed, .chip.done, .chip.passed, .chip.approved, .chip.pass { color: #062012; background: var(--ok); border-color: transparent; }
 .chip.escalated, .chip.failed, .chip.blocked, .chip.changes_requested, .chip.fail, .chip.needs { color: #fff; background: #c53b3b; border-color: transparent; }
+.chip.watching { color: #04131f; background: #5aa9e6; border-color: transparent; }
+.chip.unfinished { color: var(--muted, #aab); background: transparent; }
 .chip.paused, .chip.waiting, .chip.draft, .chip.waived { color: #1a1300; background: #e2a92b; border-color: transparent; }
 .chip.skipped, .chip.not_run, .chip.idle, .chip.not { color: var(--muted); }
 .room-wrap { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 12px;
@@ -888,9 +920,16 @@ const fmtT = v => v == null ? "—" : v >= 1e6 ? `${(v / 1e6).toFixed(1)}M` : v 
 // Tokens still growing: an agent is working and its count so far comes from the host's transcript.
 const liveTok = on => on ? `<i class="livedot tokdot" title="So far: still working (read from the ${on === true ? "host" : esc(on)} transcript)"></i>` : "";
 const fmtB = v => v == null ? "" : v >= 1e6 ? `${(v / 1e6).toFixed(1)} MB` : v >= 1000 ? `${Math.round(v / 1000)} KB` : `${v} B`;
-const live = () => Boolean(DATA.live);
+// The run's own data says live, unless the index already knows nothing works on it any more (a run whose
+// worktree was removed keeps its last data script, written while it was live).
+const live = () => {
+  if (!DATA.live) return false;
+  try { const entry = runOf(RUN_KEY); return !entry || entry.live !== false; } catch (e) { return true; }
+};
 // The run waits for the host while its agents work: show that as running.
-const runStatus = () => DATA.status === "awaiting_host" && (DATA.desks || []).some(d => d.state === "working") ? "running" : (DATA.status || "idle");
+// A run left running that nothing works on any more (a closed session, a removed worktree) is "unfinished".
+const runStatus = () => DATA.status === "awaiting_host" && (DATA.desks || []).some(d => d.state === "working") ? "running"
+  : ["running", "awaiting_host"].includes(DATA.status) && !live() ? "unfinished" : (DATA.status || "idle");
 const now = () => Date.now() / 1000;
 // Seconds an agent has worked: what was recorded, plus the open stretch while it is working right now.
 function liveSeconds(desk) {

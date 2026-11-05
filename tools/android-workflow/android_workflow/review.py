@@ -1507,6 +1507,28 @@ def _log_posted(agent_dir: Path, note: str) -> None:
         append_stage_log(agent_dir, "T10", "completed", "cli", note)
     except Exception:  # noqa: BLE001 - the log is a convenience
         pass
+    _set_status(agent_dir.parents[2], "watching")
+
+
+def _set_status(target: Path, status: str, **fields: Any) -> None:
+    """The run's own status as the office shows it. `watching`: the review is posted and only the PR is
+    followed, so the run's clock stops there (`watching_since`); a new round starts a new run state."""
+    try:
+        from android_workflow.cli import load_state, run_lock, save_state
+
+        with run_lock(target):
+            run_state = load_state(target)
+            if not run_state:
+                return
+            now = int(time.time())
+            run_state.update({"status": status, "current_stage": None, **fields})
+            if status == "watching":
+                run_state.setdefault("watching_since", now)
+            else:
+                run_state.setdefault("finished_at", now)
+            save_state(target, run_state)
+    except Exception:  # noqa: BLE001 - bookkeeping only
+        pass
 
 
 RESOLVE_MUTATION = "mutation($thread: ID!) { resolveReviewThread(input: {threadId: $thread}) { thread { id isResolved } } }"
@@ -1677,15 +1699,7 @@ def _record_manual(agent_dir: Path, pr: dict[str, Any], state: dict[str, Any]) -
 
 def _finish_run(target: Path, outcome: str) -> None:
     """The PR is merged or closed: the run is over (it no longer shows as running)."""
-    try:
-        from android_workflow.cli import load_state, run_lock, save_state
-
-        with run_lock(target):
-            run_state = load_state(target)
-            run_state.update({"status": "completed", "current_stage": None, "outcome": outcome})
-            save_state(target, run_state)
-    except Exception:  # noqa: BLE001 - bookkeeping only
-        pass
+    _set_status(target, "completed", outcome=outcome)
 
 
 def _reply_state(state: dict[str, Any]) -> dict[str, Any]:

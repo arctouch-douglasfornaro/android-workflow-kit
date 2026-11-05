@@ -330,6 +330,16 @@ class FlowTests(unittest.TestCase):
             self.assertEqual(payload["comments"][1]["body"], "nit: shorter")
             self.assertIn("/pulls/7/reviews", gh.call_args.args[0][3])
             self.assertEqual(review.next_action(worktree)["next"], "done")
+            # posted: the run only follows the PR now, and its clock stops at the post
+            from android_workflow import office
+            from android_workflow.cli import run_dir as current_run
+
+            run_state = read_json(current_run(worktree) / "run-state.json")
+            self.assertEqual(run_state["status"], "watching")
+            self.assertIsInstance(run_state["watching_since"], int)
+            self.assertFalse(office.run_is_live(current_run(worktree)))
+            self.assertEqual(office.run_status(current_run(worktree), run_state),
+                             ("watching", float(run_state["watching_since"])))
 
     def test_a_moved_head_refuses_the_post(self) -> None:
         with Project(self.CHANGE) as project:

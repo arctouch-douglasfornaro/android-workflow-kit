@@ -239,7 +239,10 @@ turns the reading off.
 The page also shows who sent work back for a fix, time and tokens per agent and the run's activity as
 a chat. It is **one office for every app and run**: a **Project** selector (worktrees count as their
 repository) and a **Workflow** selector (running runs first, then past ones) switch the office in place,
-and the address keeps the run (`#run=…`) so a reload or a bookmark reopens it. **Click any desk,
+and the address keeps the run (`#run=…`) so a reload or a bookmark reopens it. A review whose verdict
+is posted shows as **watching** (it only follows the PR) and its clock stops at the post; a merged or
+closed PR shows **completed**; a run nothing works on any more (a closed session, a removed worktree)
+shows **unfinished**, its clock stopped at its last update. **Click any desk,
 agent, file card or message** to read what that agent produced, formatted: the plan and acceptance
 criteria, the implementation notes and changed files, every quality-gate check (with the Gradle
 logs), the review's blocking points and suggestions, the device report with before/after
