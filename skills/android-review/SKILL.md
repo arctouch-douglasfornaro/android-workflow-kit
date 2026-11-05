@@ -90,7 +90,14 @@ CLI gate | prebuild | device … | emulator … | log …  --target WT         (
      those threads open), show the new draft, ask again. Only on an explicit OK → `CLI review post --draft-id <id>`
      with the id of the draft they saw. `refused: head_moved` → `CLI review start` again (delta round).
      Never post on silence, on a standing preference, or with another draft id.
-   - `done`: run `also` (gives the device back), then follow the PR (step 4) unless `--no-watch`.
+   - `ask_user` with `show` on a **quiet** draft (`Event: none`: we already approved an earlier head and
+     the delta raised nothing new): print it as is and ask: resolve the listed threads without a new
+     review, keep one open (`--keep-open T1`), post a review anyway (`CLI review edit --event APPROVE`
+     composes the full review, show it again), or stop. Only on an explicit OK → `CLI review post
+     --draft-id <id>` (it resolves the threads and posts no review).
+   - `done`: run `also` (gives the device back), then follow the PR (step 4) unless `--no-watch`. A
+     `done` whose `why` says "no new review" means the round was quiet with nothing to resolve: say so
+     in one line and keep watching.
    Agents log their own `completed` (Planner, Reviewer, Device); `aw-media` writes
    `media-review.json` and does not log.
 4. **Watch** (default; skipped with `--no-watch`): `CLI review wait --target WT` (background, `--timeout 3300` on Claude Code)
@@ -116,6 +123,10 @@ CLI gate | prebuild | device … | emulator … | log …  --target WT         (
 
 - **Ticket**: every Jira key in the title, body or branch is read into `RUN/ticket/` before the
   Planner; the Planner and the Reviewer both read it.
+- **Run**: the change set is the PR's diff (no ticket-text Localizer), and nothing is implemented: no
+  generic `plan.md`, no `implementation-notes.md`, no Implementer hand-over. A delta round keeps
+  `review-spec.json` (no Planner) when the PR title, body and Jira keys did not change. A merged or
+  closed PR marks the run completed.
 - **Copied code**: a new source file that is mostly a copy of a file the PR changed or deleted (a
   split, a legacy fork) gets `RUN/copy-diff/<name>.diff` (original at the base vs the new file); the
   Reviewer explains every divergence (intended, or a finding).
@@ -127,15 +138,23 @@ CLI gate | prebuild | device … | emulator … | log …  --target WT         (
   by code. No UI change → the review says "not verified on a device: no UI change".
 - **CI** is trusted when every required check (else every check) on the PR head passed. Pending →
   wait up to `review.ci_wait_minutes` (30), then the local gate; no check at all, or all skipped →
-  the local gate for the touched modules.
+  the local gate for the touched modules. **Documentation only** (every changed file `.md`/`.txt`/…,
+  or CI passed on the previous head and the new commits are docs only) → CI is not waited for, the
+  gate never runs, and pending CI does not hold the approval (the body says why).
 - **Acceptance** is reconciled at draft time with what ran after the Reviewer: a device scenario
   `ACn …: PASS` proves an AC (FAIL makes it unmet), media shown proves it, and an attachment the tool
   could not download is marked "not checked", never held against the author.
 - **Verdict**: any blocking finding, failing CI, a failed local gate, a device FAIL or an unmet AC
-  → `REQUEST_CHANGES`; else concerns, unverified claims (checked template items without evidence),
-  a BLOCKED device, a PARTIAL device with a device AC still open, or CI still pending → `COMMENT`;
-  else `APPROVE`. **Only nits → `APPROVE`**, the nits posted with it as optional comments. Own
-  PR → always `COMMENT` (GitHub's rule). `review.allow_approve: false` → `COMMENT` instead of approve.
+  → `REQUEST_CHANGES`; else unverified claims (checked template items without evidence), a BLOCKED
+  device, a PARTIAL device with a device AC still open, or CI still pending → `COMMENT`; else
+  `APPROVE`. **Concerns and nits approve** (posted with it as comments; `review.approve_with_concerns:
+  false` makes concerns `COMMENT` again). Own PR → always `COMMENT` (GitHub's rule).
+  `review.allow_approve: false` → `COMMENT` instead of approve. `edit --event` rewrites the body's
+  generated first line to match the new event.
+- **Quiet delta round**: we already approved an earlier head and the delta Reviewer, the media and
+  CI found nothing new (every earlier thread addressed, no device needed) → no CI wait and no second
+  review: a draft with `Event: none` that only resolves our addressed threads after the OK, or `done`
+  at once when there is nothing to resolve.
 - **Body**: the headline, `verified` (what the Reviewer proved, with evidence), checks, device,
   acceptance, other notes.
 - **Comments**: at most `review.max_inline_comments` inline (default 10, max 15), blocking first,
@@ -159,12 +178,15 @@ CLI gate | prebuild | device … | emulator … | log …  --target WT         (
 
 Config, per project in `.ai/android-workflow.json`:
 `{"review": {"max_inline_comments": 10, "allow_approve": true, "media_max_mb": 100, "ci_wait_minutes": 30,
-"nits_inline": true}}`.
+"nits_inline": true, "approve_with_concerns": true}}`.
 
 Attachments of a private repo download through the signed URL GitHub renders in the PR's
 `body_html` (`private-user-images…?jwt=`); the plain `user-attachments` link answers a login page.
-Every `CLI review edit` is logged in `review-decisions.jsonl` (dropped/rewritten comments by
-severity): the measure of which findings developers find useless.
+Every `CLI review edit` is logged in `review-decisions.jsonl`: dropped and rewritten comments by
+severity with their text, the event override (from, to and the computed reasons) and the body diff:
+the measure of which findings developers find useless. The watch also logs as `missed` each comment
+the developer writes on the PR by hand after our post (inline, review body or PR comment): what the
+review did not catch.
 
 ## Run files
 

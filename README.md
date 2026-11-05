@@ -304,10 +304,11 @@ It only wakes up for:
 
 | What happens on the PR | What it does |
 | --- | --- |
-| New commits | A delta review of only the new commits, checking whether each of our earlier comments was addressed. |
+| New commits | A delta review of only the new commits, checking whether each of our earlier comments was addressed. The Planner runs again only when the PR text changed. If we already approved and the new commits raise nothing new, **no second review is posted**: it only offers to resolve our addressed threads (or ends quietly when there are none). |
 | Someone answers a thread we took part in, or @mentions us | Drafts the replies and shows them; posts only after your OK. |
 | One of **our** threads is settled (fix confirmed on the head, or the author was right) | Proposes resolving it, listed in the draft you approve; resolved right after the review or reply posts. `--keep-open T1` (or `R1`) leaves it open. |
-| Merged or closed | Stops. |
+| You comment on the PR by hand | Recorded as `missed` in `review-decisions.jsonl`: what the review did not catch. |
+| Merged or closed | Stops, and the run is marked completed. |
 | `watch.max_hours` passed | Tells you and stops; run `/android-review` again to keep following it. |
 
 It never resolves another reviewer's thread, never posts or resolves without your OK, and never

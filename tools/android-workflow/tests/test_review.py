@@ -154,6 +154,51 @@ class PureRuleTests(unittest.TestCase):
         self.assertEqual(review.verdict([], ci_ok, {}, None, [{"status": "unmet"}], {}, True)[0], "REQUEST_CHANGES")
         self.assertEqual(review.verdict([], ci_ok, {}, None, [], {}, False)[0], "COMMENT")
         self.assertEqual(review.verdict([blocking], ci_ok, {}, None, [], {"own_pr": True}, True)[0], "COMMENT")
+        # approve_with_concerns: concerns ride along an approval; an unproven claim still comments
+        self.assertEqual(review.verdict([concern, nit], ci_ok, {}, None, [], {}, True, True), ("APPROVE", []))
+        self.assertEqual(review.verdict([concern], ci_ok, {}, None, [{"status": "unverified"}], {}, True, True)[0],
+                         "COMMENT")
+        # CI still running holds the approval, unless the change cannot affect the build
+        pending = {"status": "pending"}
+        self.assertEqual(review.verdict([], pending, {}, None, [], {}, True)[0], "COMMENT")
+        self.assertEqual(review.verdict([], pending, {}, None, [], {}, True, ci_waived=True)[0], "APPROVE")
+
+    def test_headline_follows_the_event(self) -> None:
+        counts = {"blocking": 0, "concern": 2, "nit": 1}
+        self.assertEqual(review.headline("APPROVE", counts, []),
+                         "Looks good to me. 2 point(s) worth a look below, none blocking. 1 optional nit(s).")
+        self.assertEqual(review.headline("COMMENT", counts, ["2 concern(s)"]), "A few points to look at. (2 concern(s))")
+        self.assertEqual(review.headline("APPROVE", {"nit": 2}, []), "Looks good to me. 2 optional nit(s), none blocking.")
+
+    def test_docs_only_changes(self) -> None:
+        self.assertTrue(review.docs_only(["README.md", ".ai/skills/x/SKILL.md", "docs/a.txt"]))
+        self.assertFalse(review.docs_only(["README.md", "app/build.gradle.kts"]))
+        self.assertFalse(review.docs_only([]))
+        self.assertTrue(review.ci_not_needed({"files": ["README.md"]}, {}))
+        delta = {"files": ["A.kt", "README.md"], "delta_files": ["README.md"]}
+        self.assertIsNone(review.ci_not_needed(delta, {"previous_head": "abc"}))
+        self.assertIn("CI passed on abc", review.ci_not_needed(delta, {"previous_head": "abc", "ci_passed_heads": ["abc"]}))
+
+    def test_manual_comments_are_what_the_developer_wrote_by_hand_after_the_post(self) -> None:
+        state = {"posted": [{"at": 1793822000, "url": "https://g/pull/7#pullrequestreview-1"}],
+                 "replies": {"handled": {"x": {"how": "replied", "reply": "c_reply"}}}}
+        ours = {"url": "https://g/pull/7#pullrequestreview-1"}
+        def node(cid: str, who: str, body: str = "text", stamp: str = "2026-11-04T20:47:39Z", review_url: dict | None = None):
+            return {"id": cid, "author": {"login": who}, "body": body, "url": f"u/{cid}", "createdAt": stamp,
+                    "pullRequestReview": review_url}
+        pr = {"reviewThreads": {"nodes": [{"path": REPO, "line": 3, "comments": {"nodes": [
+                  node("c_ours", "bob", review_url=ours),                    # our posted review
+                  node("c_manual", "bob", "As a fast follow, aggregate these", review_url={"url": "https://g/pull/7#pullrequestreview-2"}),
+                  node("c_reply", "bob"),                                     # a reply this workflow posted
+                  node("c_alice", "alice"),                                   # someone else
+                  node("c_old", "bob", stamp="2026-11-01T00:00:00Z")]}}]},   # before our review
+              "reviews": {"nodes": [{"id": "r2", "author": {"login": "bob"}, "body": "", "url": "https://g/pull/7#pullrequestreview-2",
+                                     "submittedAt": "2026-11-04T20:47:39Z"}]},
+              "comments": {"nodes": [node("pc1", "bob", "Also: the summary endpoint")]}}
+        found = review.manual_comments(pr, "bob", state)
+        self.assertEqual([(i["id"], i["kind"]) for i in found], [("c_manual", "inline"), ("pc1", "comment")])
+        self.assertEqual(review.manual_comments(pr, "bob", {**state, "manual_seen": ["c_manual", "pc1"]}), [])
+        self.assertEqual(review.manual_comments(pr, "bob", {}), [])
 
     def test_comment_cap_is_clamped(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
@@ -192,6 +237,20 @@ class StartTests(unittest.TestCase):
     def test_a_closed_pr_is_not_reviewed(self) -> None:
         with Project({REPO: "x\n"}) as project:
             self.assertEqual(project.start(fake_pr(project.head, state="MERGED"))["status"], "not_open")
+
+
+def push_fix(project: "Project", path: str = REPO, text: str = "package com.example\n\nclass ProfileRepository\n") -> str:
+    """The author pushes one more commit to the PR; returns the new head."""
+    clone = project.root / f"author-{len(list(project.root.glob('author-*')))}"
+    subprocess.run(["git", "clone", "-q", str(project.root / "origin.git"), str(clone)], check=True)
+    git(clone, "fetch", "-q", "origin", "refs/pull/7/head")
+    git(clone, "checkout", "-q", "FETCH_HEAD")
+    (clone / path).parent.mkdir(parents=True, exist_ok=True)
+    (clone / path).write_text(text, encoding="utf-8")
+    git(clone, "add", "-A")
+    git(clone, "-c", "user.email=a@x", "-c", "user.name=A", "commit", "-qm", "fix")
+    git(clone, "push", "-q", "origin", "HEAD:refs/pull/7/head")
+    return git(clone, "rev-parse", "HEAD")
 
 
 def write_profile(worktree: Path) -> None:
@@ -331,11 +390,25 @@ class FlowTests(unittest.TestCase):
             self.assertEqual((result["round"], result["head"]), (2, new_head))
             self.assertTrue((agent_dir / review.DELTA_FILE).read_text())
             self.assertFalse((agent_dir / "review.json").exists())
-            review.next_action(worktree)  # the Planner again, on the new head
-            (agent_dir / review.SPEC_FILE).write_text(json.dumps({"status": "ready", "acceptance": []}))
-            log_stage(worktree, "Planner", "completed", "0 AC", "host")
-            checks = review.next_action(worktree)
+            self.assertTrue((agent_dir / review.SPEC_FILE).exists())  # same PR text: the spec stands
+            checks = review.next_action(worktree)  # no Planner again: straight to the delta review
+            self.assertEqual(read_json(agent_dir / "run-state.json")["stages"]["T3"]["status"], "completed")
+            self.assertIn("spec kept", (agent_dir / "stage-log.md").read_text())
         self.assertEqual(checks["run"][0]["mode"], "pr-delta")
+
+    def test_a_changed_pr_text_runs_the_planner_again(self) -> None:
+        with Project(self.CHANGE) as project:
+            worktree = self.run_to_draft(project, {"status": "approved", "blocking": []})
+            state_path = review.agent_dir_for(worktree) / review.STATE_FILE
+            state = read_json(state_path)
+            state["posted"] = [{"head": project.head, "draft_id": "x"}]
+            state_path.write_text(json.dumps(state))
+            new_head = push_fix(project)
+            result = project.start(fake_pr(new_head, body="Loads the profile once, and caches it."))
+            agent_dir = Path(result["run"])
+            self.assertFalse((agent_dir / review.SPEC_FILE).exists())
+            planner = review.next_action(worktree)
+        self.assertEqual((planner["next"], planner["agent"]), ("spawn", "aw-planner"))
 
 
     def test_addressed_threads_of_ours_are_resolved_after_the_post_with_the_same_ok(self) -> None:
@@ -393,6 +466,150 @@ class FlowTests(unittest.TestCase):
                 self.assertEqual(posted["resolve_failed"][0]["thread"], "T_a")
                 again = review.post(worktree, drafted["draft_id"])
             self.assertEqual(again["resolved"], ["T_a"])
+
+
+class ReviewModeRunTests(unittest.TestCase):
+    def test_the_run_takes_the_pr_diff_as_change_set_and_implements_nothing(self) -> None:
+        with Project(FlowTests.CHANGE) as project:
+            worktree = FlowTests().run_to_draft(project, {"status": "approved", "blocking": []})
+            agent_dir = review.agent_dir_for(worktree)
+            change_set = read_json(agent_dir / "change-set-map.json")
+            log = (agent_dir / "stage-log.md").read_text()
+            metrics = read_json(agent_dir / "stage-metrics.json")
+            self.assertEqual([item["path"] for item in change_set["candidate_files"]], [REPO])
+            self.assertEqual(change_set["source"], "pr_diff")
+            self.assertIn("1 file(s) changed by the PR", log)  # no ticket-text guess
+            self.assertLess(metrics["stages"]["T2"]["wall_time_seconds"], 5)
+            self.assertNotIn("awaiting_host", log)
+            self.assertNotIn("Implementer", log)
+            self.assertFalse((agent_dir / "implementation-notes.md").exists())
+            self.assertNotIn("T4", metrics["stages"])
+            self.assertEqual(metrics["stages"]["T3"]["attempts"], 1)  # the Planner ran once, counted once
+
+
+class QuietRoundTests(unittest.TestCase):
+    CHANGE = FlowTests.CHANGE
+
+    def approved_then_new_commits(self, project: Project, threads: list[dict] | None = None, ci: str = "pending") -> Path:
+        """Round 1 approved and posted; the author pushes; round 2's delta review finds nothing new."""
+        worktree = FlowTests().run_to_draft(project, {"status": "approved", "blocking": [], "acceptance": []})
+        agent_dir = review.agent_dir_for(worktree)
+        state = read_json(agent_dir / review.STATE_FILE)
+        state["posted"] = [{"head": project.head, "draft_id": "x", "event": "APPROVE", "url": "https://g/pull/7#pullrequestreview-1",
+                            "at": 1793822000}]
+        (agent_dir / review.STATE_FILE).write_text(json.dumps(state))
+        new_head = push_fix(project)
+        checks = {"nodes": [{"commit": {"oid": new_head, "statusCheckRollup": {"contexts": {"nodes": [
+            {"__typename": "CheckRun", "name": "build", "status": "IN_PROGRESS" if ci == "pending" else "COMPLETED",
+             "conclusion": None if ci == "pending" else "SUCCESS", "isRequired": True}]}}}}]}
+        pr = fake_pr(new_head, commits=checks)
+        project.start(pr)
+        self.assertEqual(review.next_action(worktree)["next"], "checks")
+        (agent_dir / "review.json").write_text(json.dumps({"status": "approved", "blocking": [], "concerns": [],
+                                                           "suggestions": [], "threads": threads or []}))
+        log_stage(worktree, "Reviewer", "completed", "delta", "host")
+        with mock.patch.object(review, "fetch_pr", return_value=pr):
+            review.ci(worktree)
+        return worktree
+
+    def test_nothing_new_after_our_approval_posts_nothing_and_does_not_wait_for_ci(self) -> None:
+        with Project(self.CHANGE) as project:
+            worktree = self.approved_then_new_commits(project)
+            done = review.next_action(worktree)
+            state = read_json(review.agent_dir_for(worktree) / review.STATE_FILE)
+        self.assertEqual(done["next"], "done")
+        self.assertIn("no new review", done["why"])
+        self.assertEqual((state["posted"][-1]["quiet"], state["posted"][-1]["event"]), (True, None))
+
+    def test_addressed_threads_are_resolved_without_a_new_review_after_the_ok(self) -> None:
+        with Project(self.CHANGE) as project:
+            worktree = self.approved_then_new_commits(project, threads=[{"id": "T_a", "addressed": True, "note": "fixed"}])
+            agent_dir = review.agent_dir_for(worktree)
+            context = read_json(agent_dir / review.CONTEXT_FILE)
+            context["our_threads"] = [{"id": "T_a", "path": REPO, "line": 3, "resolved": False}]
+            (agent_dir / review.CONTEXT_FILE).write_text(json.dumps(context))
+            self.assertEqual(review.next_action(worktree)["next"], "draft")  # not wait_ci
+            drafted = review.draft(worktree)
+            self.assertTrue(drafted["quiet"])
+            ask = review.next_action(worktree)
+            self.assertEqual((ask["next"], ask["draft_id"]), ("ask_user", drafted["draft_id"]))
+            self.assertIn("without a new review", ask["question"])
+            self.assertIn("no new review is posted", (agent_dir / review.DRAFT_MD).read_text())
+            with mock.patch.object(review, "fetch_pr", return_value=fake_pr(context["head"])), \
+                    mock.patch("android_workflow.watch._gh") as gh, \
+                    mock.patch("android_workflow.watch._graphql") as graphql:
+                posted = review.post(worktree, drafted["draft_id"])
+            gh.assert_not_called()  # no review POST
+            self.assertEqual((posted["status"], posted["resolved"]), ("posted", ["T_a"]))
+            self.assertEqual(graphql.call_args.kwargs, {"thread": "T_a"})
+            self.assertEqual(review.next_action(worktree)["next"], "done")
+
+    def test_the_developer_can_still_post_a_review(self) -> None:
+        with Project(self.CHANGE) as project:
+            worktree = self.approved_then_new_commits(project, threads=[{"id": "T_a", "addressed": True}])
+            agent_dir = review.agent_dir_for(worktree)
+            context = read_json(agent_dir / review.CONTEXT_FILE)
+            context["our_threads"] = [{"id": "T_a", "path": REPO, "line": 3, "resolved": False}]
+            (agent_dir / review.CONTEXT_FILE).write_text(json.dumps(context))
+            review.draft(worktree)
+            edited = review.edit(worktree, event="APPROVE")
+            value = read_json(agent_dir / review.DRAFT_FILE)
+        self.assertEqual(edited["event"], "APPROVE")
+        self.assertFalse(value.get("quiet"))
+        self.assertTrue(value["body"].startswith("Looks good to me."))
+
+    def test_a_new_finding_after_our_approval_is_a_normal_review(self) -> None:
+        with Project(self.CHANGE) as project:
+            worktree = self.approved_then_new_commits(project, ci="passed")
+            agent_dir = review.agent_dir_for(worktree)
+            (agent_dir / "review.json").write_text(json.dumps({"status": "approved", "blocking": [], "suggestions": [
+                {"id": "S1", "file": REPO, "line": 3, "problem": "name"}]}))
+            self.assertEqual(review.next_action(worktree)["next"], "draft")
+            self.assertFalse(review.draft(worktree).get("quiet"))
+
+
+class DraftEditTests(unittest.TestCase):
+    def test_an_event_override_rewrites_the_headline_and_is_logged(self) -> None:
+        with Project(FlowTests.CHANGE) as project:
+            worktree = FlowTests().run_to_draft(project, {"status": "approved", "blocking": [], "acceptance": [
+                {"id": "AC1", "status": "unverified"}], "concerns": [{"id": "C1", "file": REPO, "line": 5, "problem": "p"}]})
+            agent_dir = review.agent_dir_for(worktree)
+            drafted = review.draft(worktree)
+            self.assertEqual(drafted["event"], "COMMENT")
+            self.assertTrue(read_json(agent_dir / review.DRAFT_FILE)["body"].startswith("A few points to look at."))
+            review.edit(worktree, event="APPROVE", set_text=[["C1", "shorter"]])
+            value = read_json(agent_dir / review.DRAFT_FILE)
+            self.assertTrue(value["body"].startswith("Looks good to me. 1 point(s) worth a look below"))
+            review.edit(worktree, body="Approving, thanks!")
+            edits = [json.loads(line)["edit"] for line in (agent_dir / "review-decisions.jsonl").read_text().splitlines()
+                     if "edit" in json.loads(line)]
+        self.assertEqual((edits[0]["event"]["from"], edits[0]["event"]["to"]), ("COMMENT", "APPROVE"))
+        self.assertIn("1 claim(s) without evidence", edits[0]["event"]["computed"])
+        self.assertEqual((edits[0]["rewritten"][0]["before"], edits[0]["rewritten"][0]["after"]), ("p", "shorter"))
+        self.assertIn("+Approving, thanks!", edits[1]["body"]["diff"])
+
+    def test_a_docs_only_pr_does_not_wait_for_ci(self) -> None:
+        with Project({"README.md": "# Benchmarks\n"}) as project:
+            pending = {"nodes": [{"commit": {"oid": project.head, "statusCheckRollup": {"contexts": {"nodes": [
+                {"__typename": "CheckRun", "name": "build", "status": "IN_PROGRESS", "conclusion": None, "isRequired": True}]}}}}]}
+            pr = fake_pr(project.head, commits=pending)
+            result = project.start(pr)
+            worktree = Path(result["worktree_path"])
+            write_profile(worktree)
+            review.next_action(worktree)
+            agent_dir = Path(result["run"])
+            (agent_dir / review.SPEC_FILE).write_text(json.dumps({"status": "ready", "acceptance": []}))
+            log_stage(worktree, "Planner", "completed", "0 AC", "host")
+            review.next_action(worktree)
+            (agent_dir / "review.json").write_text(json.dumps({"status": "approved", "blocking": []}))
+            log_stage(worktree, "Reviewer", "completed", "done", "host")
+            with mock.patch.object(review, "fetch_pr", return_value=pr):
+                self.assertEqual(review.ci(worktree)["status"], "pending")
+            self.assertEqual(review.next_action(worktree)["next"], "draft")
+            drafted = review.draft(worktree)
+            body = read_json(agent_dir / review.DRAFT_FILE)["body"]
+        self.assertEqual(drafted["event"], "APPROVE")
+        self.assertIn("not waited for: only documentation changed", body)
 
 
 class DeviceTests(unittest.TestCase):
@@ -646,6 +863,26 @@ class ReplyWatchTests(unittest.TestCase):
                 (agent_dir / review.STATE_FILE).write_text(json.dumps(state))
                 waited = review.wait(worktree, timeout=0)
         self.assertEqual((waited["status"], waited["reason"]), ("needs_user", "watched for 72 hours"))
+
+    def test_a_merged_pr_ends_the_run_and_manual_comments_are_recorded(self) -> None:
+        with Project(self.CHANGE) as project:
+            worktree = FlowTests().run_to_draft(project, {"status": "approved", "blocking": []})
+            agent_dir = review.agent_dir_for(worktree)
+            state = read_json(agent_dir / review.STATE_FILE)
+            state["posted"] = [{"head": project.head, "draft_id": "x", "event": "APPROVE", "at": 1793822000,
+                                "url": "https://g/pull/7#pullrequestreview-1"}]
+            (agent_dir / review.STATE_FILE).write_text(json.dumps(state))
+            manual = {"id": "pc1", "author": {"login": "bob"}, "body": "fast follow: aggregate use case",
+                      "url": "u/pc1", "createdAt": "2026-11-04T20:47:39Z"}
+            with mock.patch.object(review, "fetch_pr", return_value=fake_pr(project.head, state="MERGED",
+                                                                           comments={"nodes": [manual]})):
+                waited = review.wait(worktree, timeout=0)
+            decisions = (agent_dir / "review-decisions.jsonl").read_text()
+            run_state = read_json(agent_dir / "run-state.json")
+        self.assertEqual(waited["status"], "merged")
+        self.assertEqual((run_state["status"], run_state["outcome"]), ("completed", "merged"))
+        self.assertIn('"missed"', decisions)
+        self.assertIn("aggregate use case", decisions)
 
     def test_new_commits_come_before_replies(self) -> None:
         with Project(self.CHANGE) as project:

@@ -59,10 +59,14 @@ DEFAULT_REVIEW = {
     "media_max_mb": 100,
     "ci_wait_minutes": 30,
     "nits_inline": True,
+    # Concerns alone approve (posted as comments): what developers did by hand on every run that had them.
+    "approve_with_concerns": True,
 }
 MAX_INLINE_LIMIT = 15
 EVENTS = ("APPROVE", "COMMENT", "REQUEST_CHANGES")
 SEVERITY_ORDER = {"blocking": 0, "concern": 1, "nit": 2}
+# A diff of only these files cannot change the build: CI is not waited for and the local gate never runs.
+DOC_SUFFIXES = (".md", ".mdx", ".markdown", ".txt", ".rst", ".adoc")
 
 # Hosts the PR's attachments may live on. Anything else in the PR text is never fetched.
 AUTH_MEDIA_HOSTS = {"github.com"}
@@ -102,7 +106,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
       comments(last: 50) { nodes { id author { __typename login } body url createdAt } }
       reviews(last: 50) { nodes { id author { __typename login } state body url submittedAt } }
       reviewThreads(first: 100) { nodes { id isResolved isOutdated path line
-        comments(last: 30) { nodes { id author { __typename login } body url createdAt } } } }
+        comments(last: 30) { nodes { id author { __typename login } body url createdAt pullRequestReview { url } } } } }
       commits(last: 1) { nodes { commit { oid statusCheckRollup { state contexts(first: 100) { nodes {
         __typename
         ... on CheckRun { name status conclusion detailsUrl isRequired(pullRequestNumber: $number) }
@@ -201,6 +205,17 @@ def checks_of(pr: dict[str, Any]) -> tuple[str | None, list[dict[str, Any]]]:
         return None, []
     nodes = (((commit.get("statusCheckRollup") or {}).get("contexts") or {}).get("nodes")) or []
     return commit.get("oid"), [_check(node) for node in nodes if node]
+
+
+def docs_only(files: list[str]) -> bool:
+    """Whether every changed file is documentation (Markdown, text): nothing CI builds or tests."""
+    return bool(files) and all(path.lower().endswith(DOC_SUFFIXES) for path in files)
+
+
+def claims_hash(title: str, body: str, jira: list[str]) -> str:
+    """What the Planner derives the spec from (the PR text and its tickets): unchanged → the spec stands."""
+    payload = json.dumps({"title": title or "", "body": body or "", "jira": sorted(jira or [])}, sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
 def template_items(body: str) -> list[dict[str, Any]]:
@@ -494,25 +509,36 @@ def start(main_target: Path, pr_ref: str, worktree: Path | None = None, download
     set_current(path, slug)
     state = _read(agent_dir / STATE_FILE)
     previous_head = state.get("head")
+    body = pr.get("body") or ""
+    claims = claims_hash(pr.get("title") or "", body, jira_keys(pr.get("title") or "", body, pr.get("headRefName") or ""))
+    delta_files: list[str] = []
     if previous_head and previous_head != head:
         diff = _git(path, "diff", previous_head, head).stdout
         (agent_dir / DELTA_FILE).write_text(diff, encoding="utf-8")
+        delta_files = [line for line in _git(path, "diff", "--name-only", previous_head, head).stdout.splitlines()
+                       if line.strip()]
+        # The spec is what the PR claims: unchanged PR text and tickets → the Planner does not run again.
+        keep_spec = state.get("claims") == claims and (agent_dir / SPEC_FILE).is_file()
         # A new round: the earlier round's verdicts and draft describe the old head.
-        for name in (SPEC_FILE, MEDIA_FILE, CI_FILE, DRAFT_FILE, DRAFT_MD, "review.json", "device-report.md",
-                     "run-state.json", "plan.md"):
+        stale_files = [MEDIA_FILE, CI_FILE, DRAFT_FILE, DRAFT_MD, "review.json", "device-report.md", "run-state.json"]
+        if not keep_spec:
+            stale_files += [SPEC_FILE, "plan.md"]
+        for name in stale_files:
             (agent_dir / name).unlink(missing_ok=True)
         for stale in (agent_dir / COPY_DIR).glob("*.diff"):
             stale.unlink()
         state["round"] = int(state.get("round") or 1) + 1
         state["previous_head"] = previous_head
+        state["spec_kept"] = keep_spec
         state.pop("begun", None)
         state.pop("media_agent", None)
-        state.pop("planner_answers", None)
+        if not keep_spec:
+            state.pop("planner_answers", None)
     else:
         state.setdefault("round", 1)
+    state["claims"] = claims
 
     checks_commit, checks = checks_of(pr)
-    body = pr.get("body") or ""
     comments = [node.get("body") or "" for node in ((pr.get("comments") or {}).get("nodes")) or []]
     from android_workflow.cli import find_pr_template
 
@@ -533,6 +559,7 @@ def start(main_target: Path, pr_ref: str, worktree: Path | None = None, download
         "head": head,
         "base": base,
         "files": files,
+        "delta_files": delta_files,
         "files_total": ((pr.get("files") or {}).get("totalCount")) or len(files),
         "jira": jira_keys(pr.get("title") or "", body, pr.get("headRefName") or ""),
         "template": template,
@@ -621,6 +648,11 @@ def ci(target: Path, wait: bool = False, timeout: float = 540, interval: float =
             break
         time.sleep(interval)
     report["at"] = int(time.time())
+    if report["status"] == "passed":
+        state = _read(agent_dir / STATE_FILE)
+        if context["head"] not in (state.get("ci_passed_heads") or []):
+            state["ci_passed_heads"] = [*(state.get("ci_passed_heads") or []), context["head"]][-10:]
+            _write(agent_dir / STATE_FILE, state)
     started = _read(agent_dir / CI_FILE).get("first_pending_at")
     if report["status"] == "pending":
         report["first_pending_at"] = started or report["at"]
@@ -669,7 +701,7 @@ def begin(target: Path) -> dict[str, Any]:
         "acceptance_criteria": [],
         "level": "standard",
     }
-    cli.run(target, ticket, take_over=True)
+    cli.run(target, ticket, take_over=True, review_files=list(context.get("files") or []))
     repo_map_path = cache_dir(target) / "repo-map.json"
     repo_map = cli.read_json(repo_map_path) if repo_map_path.exists() else {}
     repo_map["base_commit"] = context["base"]
@@ -691,6 +723,13 @@ def begin(target: Path) -> dict[str, Any]:
         cli.save_state(target, run_state)
     cli.append_stage_log(agent_dir, "T1", "completed", "cli",
                          f"review of PR #{context['number']} at {context['head'][:12]} (base {context['base'][:12]})")
+    if state.get("spec_kept") and (agent_dir / SPEC_FILE).is_file():
+        note = f"spec kept (round {state.get('round')}): the PR text and tickets did not change"
+        with cli.run_lock(target):
+            run_state = cli.load_state(target)
+            run_state.setdefault("stages", {})["T3"] = {"status": "completed", "note": note}
+            cli.save_state(target, run_state)
+        cli.append_stage_log(agent_dir, "T3", "skipped", "cli", note)
     state["begun"] = context["head"]
     _write(agent_dir / STATE_FILE, state)
     return {"route": route, "ui": ui}
@@ -729,6 +768,63 @@ def _device_needed(agent_dir: Path, context: dict[str, Any], state: dict[str, An
     return bool((context.get("ui_change") or {}).get("ui") or state.get("device_forced") or review.get("device_required"))
 
 
+def ci_not_needed(context: dict[str, Any], state: dict[str, Any]) -> str | None:
+    """Why CI need not be waited for (nor the local gate run), or None: the PR changes only documentation,
+    or CI passed on the previous head and the new commits change only documentation."""
+    if docs_only(context.get("files") or []):
+        return "only documentation changed: nothing for CI to build or test"
+    previous = state.get("previous_head")
+    if docs_only(context.get("delta_files") or []) and previous in (state.get("ci_passed_heads") or []):
+        return f"CI passed on {str(previous)[:7]} and the new commits change only documentation"
+    return None
+
+
+def _earlier_approval(state: dict[str, Any], head: str) -> dict[str, Any] | None:
+    return next((item for item in reversed(state.get("posted") or [])
+                 if item.get("event") == "APPROVE" and item.get("head") != head), None)
+
+
+def quiet_round(agent_dir: Path, context: dict[str, Any], state: dict[str, Any]) -> dict[str, Any] | None:
+    """A delta round with nothing to say: we already approved an earlier head, and the Reviewer, the media
+    and CI found nothing new on the new commits (every earlier thread addressed). Returns that approval.
+    Posting another APPROVE then is noise: only the addressed threads are resolved, with the developer's OK."""
+    if int(state.get("round") or 1) < 2:
+        return None
+    approved = _earlier_approval(state, context.get("head") or "")
+    review = _review_json(agent_dir)
+    if not approved or review.get("status") in (None, "not_run"):
+        return None
+    if any(review.get(key) for key in ("blocking", "concerns", "suggestions")):
+        return None
+    if any(isinstance(t, dict) and not t.get("addressed") for t in review.get("threads") or []):
+        return None
+    if any(isinstance(a, dict) and a.get("status") == "unmet" for a in review.get("acceptance") or []):
+        return None
+    if _read(agent_dir / MEDIA_FILE).get("findings") or _read(agent_dir / CI_FILE).get("status") == "failed":
+        return None
+    if _device_needed(agent_dir, context, state):
+        return None
+    return approved
+
+
+def threads_to_resolve(context: dict[str, Any], review: dict[str, Any]) -> list[dict[str, Any]]:
+    """Our own open threads the delta Reviewer saw addressed on the new head."""
+    threads = [t for t in review.get("threads") or [] if isinstance(t, dict)]
+    still_open = {t.get("id"): t for t in context.get("our_threads") or [] if not t.get("resolved")}
+    return [{"id": f"T{index}", "thread": t["id"], "path": still_open[t["id"]].get("path"),
+             "line": still_open[t["id"]].get("line"), "note": str(t.get("note") or "")[:300]}
+            for index, t in enumerate((t for t in threads if t.get("addressed") is True and t.get("id") in still_open),
+                                      start=1)]
+
+
+def _done(state: dict[str, Any], context: dict[str, Any], why: str) -> dict[str, Any]:
+    return _answer("done", why, posted=(state.get("posted") or [None])[-1],
+                   also=["CLI emulator --target TARGET --stop"],
+                   then=f"CLI review wait --target TARGET (new commits → CLI review start --target "
+                        f"{state.get('main')} --pr {context['number']}; replies → aw-pr-watcher mode review, "
+                        f"then CLI review replies)")
+
+
 def next_action(target: Path, record: bool = True, no_device: bool = False) -> dict[str, Any]:
     answer = _decide(target, record, no_device)
     if record:
@@ -755,11 +851,7 @@ def _decide(target: Path, record: bool, no_device: bool) -> dict[str, Any]:
                        command=f"CLI setup --target TARGET --source-repo {state.get('main') or 'MAIN'}",
                        then="CLI review next --target TARGET")
     if any(item.get("head") == context["head"] for item in state.get("posted") or []):
-        return _answer("done", "the review of this head is posted", posted=state["posted"][-1],
-                       also=["CLI emulator --target TARGET --stop"],
-                       then=f"CLI review wait --target TARGET (new commits → CLI review start --target "
-                            f"{state.get('main')} --pr {context['number']}; replies → aw-pr-watcher mode review, "
-                            f"then CLI review replies)")
+        return _done(state, context, "the review of this head is posted")
     if state.get("begun") != context["head"] or not (agent_dir / "run-state.json").is_file():
         if not record:
             return _answer("begin", "the run is created on the next recorded call")
@@ -828,7 +920,18 @@ def _decide(target: Path, record: bool, no_device: bool) -> dict[str, Any]:
     if run or commands:
         return _answer("checks", "independent checks, all at once", run=run, commands=commands, also=also,
                        waiting=waiting or None)
-    if ci_report.get("status") == "pending":
+    quiet = None if waiting else quiet_round(agent_dir, context, state)
+    if quiet and not threads_to_resolve(context, _review_json(agent_dir)):
+        why = (f"already approved on {str(quiet.get('head'))[:7]} and the new commits raise nothing new: "
+               "no new review is posted")
+        if record:
+            state.setdefault("posted", []).append({"head": context["head"], "draft_id": None, "event": None,
+                                                   "quiet": True, "at": int(time.time())})
+            _write(agent_dir / STATE_FILE, state)
+            _log_posted(agent_dir, f"no new review: {why}")
+        return _done(state, context, why)
+    skip_ci = bool(quiet) or bool(ci_not_needed(context, state))
+    if ci_report.get("status") == "pending" and not skip_ci:
         waited = time.time() - float(ci_report.get("first_pending_at") or time.time())
         limit = float(review_config(target)["ci_wait_minutes"]) * 60
         if waited < limit:
@@ -837,7 +940,7 @@ def _decide(target: Path, record: bool, no_device: bool) -> dict[str, Any]:
         if _read(agent_dir / "gate-report.json").get("status") not in {"passed", "failed", "blocked"}:
             return _answer("gate", f"CI still pending after {int(waited // 60)} min: the local gate runs instead",
                            command="CLI gate --target TARGET", then="CLI review next --target TARGET")
-    if ci_report.get("status") == "none":
+    if ci_report.get("status") == "none" and not skip_ci:
         if _read(agent_dir / "gate-report.json").get("status") not in {"passed", "failed", "blocked"}:
             return _answer("gate", ci_report.get("reason") or "no CI on the PR head",
                            command="CLI gate --target TARGET", then="CLI review next --target TARGET")
@@ -859,6 +962,17 @@ def _decide(target: Path, record: bool, no_device: bool) -> dict[str, Any]:
     if not draft or draft.get("head") != context["head"] or draft.get("stale"):
         return _answer("draft", "every check is in: compose the review", command="CLI review draft --target TARGET",
                        then="CLI review next --target TARGET")
+    if draft.get("quiet"):
+        count = len(draft.get("resolve") or [])
+        return _answer("ask_user", "already approved and the new commits raise nothing new: only our addressed "
+                                   "threads are left to resolve; nothing is resolved before the OK",
+                       question=f"Already approved on {str(draft.get('approved_head'))[:7]}; the new commits raise "
+                                f"nothing new. Resolve {count} addressed thread(s) without a new review?",
+                       show=f"RUN/{DRAFT_MD}", draft_id=draft["id"],
+                       options=[f"resolve → CLI review post --target TARGET --draft-id {draft['id']}",
+                                "keep one open → CLI review edit --target TARGET --keep-open T1, then show it again",
+                                "post a review anyway → CLI review edit --target TARGET --event APPROVE, then show it again",
+                                "stop → resolve nothing"])
     return _answer("ask_user", "show the draft and wait for the developer's OK; nothing is posted before it",
                    question=f"Post this review? ({draft['event']}, {len(draft.get('comments') or [])} inline comment(s))",
                    show=f"RUN/{DRAFT_MD}", draft_id=draft["id"],
@@ -980,9 +1094,11 @@ def _comment_body(item: dict[str, Any]) -> str:
 
 
 def verdict(findings: list[dict[str, Any]], ci_report: dict[str, Any], gate: dict[str, Any], device: str | None,
-            acceptance: list[dict[str, Any]], context: dict[str, Any], allow_approve: bool) -> tuple[str, list[str]]:
-    """The event, by rule: anything blocking requests changes; concerns or an unproven claim comment;
-    nits alone never change the verdict."""
+            acceptance: list[dict[str, Any]], context: dict[str, Any], allow_approve: bool,
+            approve_with_concerns: bool = False, ci_waived: bool = False) -> tuple[str, list[str]]:
+    """The event, by rule: anything blocking requests changes; an unproven claim comments; concerns
+    comment unless `approve_with_concerns` (then they ride along an approval); nits never change it.
+    CI still pending holds the approval unless `ci_waived` (a documentation-only change)."""
     reasons: list[str] = []
     blocking = [f for f in findings if f["severity"] == "blocking"]
     if blocking:
@@ -1000,13 +1116,13 @@ def verdict(findings: list[dict[str, Any]], ci_report: dict[str, Any], gate: dic
     if event == "APPROVE":
         concerns = [f for f in findings if f["severity"] == "concern"]
         unverified = [a for a in acceptance if a.get("status") == "unverified"]
-        if concerns:
+        if concerns and not approve_with_concerns:
             reasons.append(f"{len(concerns)} concern(s)")
         if unverified:
             reasons.append(f"{len(unverified)} claim(s) without evidence")
         if device in {"partial", "blocked"}:
             reasons.append(f"device check {device}")
-        if ci_report.get("status") == "pending" and gate.get("status") != "passed":
+        if ci_report.get("status") == "pending" and gate.get("status") != "passed" and not ci_waived:
             reasons.append("CI still pending")
         if reasons:
             event = "COMMENT"
@@ -1016,6 +1132,24 @@ def verdict(findings: list[dict[str, Any]], ci_report: dict[str, Any], gate: dic
         reasons.append(f"own PR: GitHub only allows a comment (would be {event})")
         event = "COMMENT"
     return event, reasons
+
+
+def headline(event: str | None, counts: dict[str, int], reasons: list[str]) -> str:
+    """The body's first line, from the event and how many findings of each severity the review carries."""
+    concerns, nits = counts.get("concern", 0), counts.get("nit", 0)
+    if event == "APPROVE":
+        text = "Looks good to me."
+        if concerns:
+            text += f" {concerns} point(s) worth a look below, none blocking."
+        if nits:
+            text += f" {nits} optional nit(s)" + (", none blocking." if not concerns else ".")
+        return text
+    if event == "COMMENT":
+        text = "A few points to look at." if concerns or counts.get("blocking") else "No problems found in the code."
+    else:
+        text = "Changes needed before this can merge."
+    shown = [r for r in reasons if r != "chosen by the developer"]
+    return text + (f" ({'; '.join(shown)})" if shown else "")
 
 
 DEVICE_SCENARIO = re.compile(r"\b(AC\d+)\b[^\n]*?:\s*\**(PASS|FAIL|BLOCKED|PARTIAL)\b", re.I)
@@ -1073,7 +1207,7 @@ def _acceptance(agent_dir: Path, context: dict[str, Any] | None = None,
     return rows
 
 
-def draft(target: Path) -> dict[str, Any]:
+def draft(target: Path, allow_quiet: bool = True) -> dict[str, Any]:
     from android_workflow.cli import device_report_status, recorded_verdict, text_if_exists
 
     agent_dir = agent_dir_for(target)
@@ -1082,6 +1216,18 @@ def draft(target: Path) -> dict[str, Any]:
     if not context:
         raise ValueError("no review context: run `CLI review start` first")
     config = review_config(target)
+    quiet = quiet_round(agent_dir, context, state) if allow_quiet else None
+    if quiet:
+        # Already approved and nothing new: no review, only our addressed threads resolved after the OK.
+        resolve = threads_to_resolve(context, _review_json(agent_dir))
+        result = _save_draft(agent_dir, {
+            "schema_version": 1, "pr": context["number"], "url": context.get("url"), "head": context["head"],
+            "event": None, "quiet": True, "approved_head": quiet.get("head"), "approved_url": quiet.get("url"),
+            "reasons": [f"already approved on {str(quiet.get('head'))[:7]}; the new commits raise nothing new"],
+            "body": "", "comments": [], "resolve": resolve, "overflow": 0,
+            "max_inline_comments": config["max_inline_comments"]})
+        return {"status": "drafted", "draft_id": result["id"], "event": None, "quiet": True, "inline": 0,
+                "in_body": 0, "resolve": len(resolve), "show": str(agent_dir / DRAFT_MD), "security": None}
     findings = sorted(_findings(agent_dir), key=lambda f: (SEVERITY_ORDER[f["severity"]], f["path"] or "~", f["line"] or 0))
     valid = commentable_lines(target, context["base"], context["head"])
     inline: list[dict[str, Any]] = []
@@ -1106,16 +1252,14 @@ def draft(target: Path) -> dict[str, Any]:
     # what it left out is listed in the body. It counts only while an AC the device should prove is open.
     device_open = [a for a in acceptance if a.get("evidence") == "device" and a["status"] in {"unverified", "unmet"}]
     device_for_verdict = "pass" if device == "partial" and not device_open else device
+    ci_waived = ci_not_needed(context, state)
     event, reasons = verdict(findings, ci_report, gate, device_for_verdict, acceptance, context,
-                             bool(config["allow_approve"]))
+                             bool(config["allow_approve"]), bool(config["approve_with_concerns"]), bool(ci_waived))
 
     lines: list[str] = []
-    concerns = any(f["severity"] in {"blocking", "concern"} for f in findings)
-    nits = sum(1 for f in findings if f["severity"] == "nit")
-    headline = {"APPROVE": "Looks good to me." + (f" {nits} optional nit(s), none blocking." if nits else ""),
-                "COMMENT": "A few points to look at." if concerns else "No problems found in the code.",
-                "REQUEST_CHANGES": "Changes needed before this can merge."}[event]
-    lines.append(headline + (f" ({'; '.join(reasons)})" if reasons and event != "APPROVE" else ""))
+    counts = {severity: sum(1 for f in findings if f["severity"] == severity) for severity in SEVERITY_ORDER}
+    first = headline(event, counts, reasons)
+    lines.append(first)
     lines.append("")
     verified = [str(v).strip() for v in _review_json(agent_dir).get("verified") or [] if str(v).strip()][:6]
     if verified:
@@ -1126,7 +1270,10 @@ def draft(target: Path) -> dict[str, Any]:
         lines.append(f"**Checks:** CI passed on {context['head'][:7]} ({ci_report.get('passed')} check(s)).")
     elif ci_report.get("status") == "failed":
         lines.append("**Checks:** failing on CI: " + ", ".join(ci_report.get("failed") or []) + ".")
-    elif gate.get("status"):
+    elif ci_waived:
+        lines.append(f"**Checks:** CI {ci_report.get('status') or 'not read'} on {context['head'][:7]}, not waited for: "
+                     f"{ci_waived}.")
+    elif gate.get("status") and gate.get("status") != "not_run":
         lines.append(f"**Checks:** no complete CI run on {context['head'][:7]}; local gate {gate.get('status')}.")
     else:
         lines.append(f"**Checks:** CI {ci_report.get('status') or 'not read'}.")
@@ -1171,16 +1318,13 @@ def draft(target: Path) -> dict[str, Any]:
     body = "\n".join(lines).strip()
     # Our own threads the delta Reviewer saw addressed on the new head: resolved after the post, with
     # the same OK (the developer keeps any open with `edit --keep-open T1`).
-    still_open = {t.get("id"): t for t in context.get("our_threads") or [] if not t.get("resolved")}
-    resolve = [{"id": f"T{index}", "thread": t["id"], "path": still_open[t["id"]].get("path"),
-                "line": still_open[t["id"]].get("line"), "note": str(t.get("note") or "")[:300]}
-               for index, t in enumerate((t for t in threads if t.get("addressed") is True and t.get("id") in still_open),
-                                         start=1)]
+    resolve = threads_to_resolve(context, _review_json(agent_dir))
     comments = [{"id": f"C{index}", "path": item["path"], "line": item["line"], "side": "RIGHT",
                  "severity": item["severity"], "finding": item["id"], "body": _comment_body(item)}
                 for index, item in enumerate(inline, start=1)]
     result = _save_draft(agent_dir, {"schema_version": 1, "pr": context["number"], "url": context.get("url"),
                                      "head": context["head"], "event": event, "reasons": reasons, "body": body,
+                                     "headline": first, "counts": counts,
                                      "comments": comments, "resolve": resolve, "overflow": len(overflow),
                                      "max_inline_comments": config["max_inline_comments"]})
     security = [item["id"] for item in findings if item.get("security")]
@@ -1200,14 +1344,21 @@ def _save_draft(agent_dir: Path, value: dict[str, Any]) -> dict[str, Any]:
     value.pop("stale", None)
     value["id"] = _draft_id(value)
     _write(agent_dir / DRAFT_FILE, value)
-    md = [f"# Review draft `{value['id']}` — PR #{value['pr']}", "",
-          f"**Event:** {value['event']}" + (f" ({'; '.join(value.get('reasons') or [])})" if value.get("reasons") else ""),
-          f"**Commit:** {value['head'][:12]}", "", "## Body", "", value["body"], "",
-          f"## Inline comments ({len(value['comments'])})", ""]
+    reasons = f" ({'; '.join(value.get('reasons') or [])})" if value.get("reasons") else ""
+    if value.get("quiet"):
+        md = [f"# Review draft `{value['id']}` — PR #{value['pr']}", "",
+              f"**Event:** none — no new review is posted{reasons}",
+              f"**Commit:** {value['head'][:12]}",
+              (f"**Our approval:** {value['approved_url']}" if value.get("approved_url") else ""), ""]
+    else:
+        md = [f"# Review draft `{value['id']}` — PR #{value['pr']}", "",
+              f"**Event:** {value['event']}{reasons}",
+              f"**Commit:** {value['head'][:12]}", "", "## Body", "", value["body"], "",
+              f"## Inline comments ({len(value['comments'])})", ""]
     for comment in value["comments"]:
         md += [f"### {comment['id']} · `{comment['path']}:{comment['line']}` · {comment['severity']}", "", comment["body"], ""]
     if value.get("resolve"):
-        md += [f"## Threads to resolve after posting ({len(value['resolve'])})", "",
+        md += [f"## Threads to resolve {'on the OK' if value.get('quiet') else 'after posting'} ({len(value['resolve'])})", "",
                "Our earlier comments the new commits addressed (keep one open: `edit --keep-open T1`).", ""]
         md += [f"- {t['id']} · `{t['path']}:{t['line']}`" + (f" — {t['note']}" if t.get("note") else "")
                for t in value["resolve"]]
@@ -1223,6 +1374,11 @@ def edit(target: Path, drop: list[str] | None = None, event: str | None = None,
     value = _read(agent_dir / DRAFT_FILE)
     if not value:
         raise ValueError("no draft yet: run `CLI review draft` first")
+    if value.get("quiet") and (event or body is not None):
+        # "Post a review anyway" on a round that had nothing new: compose the full review first.
+        draft(target, allow_quiet=False)
+        value = _read(agent_dir / DRAFT_FILE)
+    before = json.loads(json.dumps(value))
     wanted = {item.upper() for item in drop or []}
     unknown = wanted - {c["id"] for c in value["comments"]}
     if unknown:
@@ -1245,20 +1401,36 @@ def edit(target: Path, drop: list[str] | None = None, event: str | None = None,
         context = _read(agent_dir / CONTEXT_FILE)
         if context.get("own_pr") and event != "COMMENT":
             raise ValueError("GitHub only allows COMMENT on your own PR")
+        # The generated first line follows the event (an APPROVE never opens with "A few points to look at").
+        old_first = value.get("headline")
+        if body is None and old_first and value["body"].startswith(old_first):
+            new_first = headline(event, value.get("counts") or {}, ["chosen by the developer"])
+            value["body"] = new_first + value["body"][len(old_first):]
+            value["headline"] = new_first
         value["event"] = event
         value["reasons"] = ["chosen by the developer"]
     if body is not None:
         value["body"] = body
+        value.pop("headline", None)
     value["edited"] = True
     # What the developer changed is the measure of the review's usefulness: dropped and rewritten
-    # comments by severity, and event overrides, for tuning the Reviewer.
-    severity = {c["id"]: c.get("severity") for c in _read(agent_dir / DRAFT_FILE).get("comments") or []}
+    # comments by severity (with the text before and after), the event override and the body diff.
+    old_comments = {c["id"]: c for c in before.get("comments") or []}
+    body_diff = "\n".join(difflib.unified_diff(str(before.get("body") or "").splitlines(), value["body"].splitlines(),
+                                               "drafted", "edited", n=0, lineterm="")) if body is not None else ""
     try:
         with (agent_dir / "review-decisions.jsonl").open("a", encoding="utf-8") as handle:
             handle.write(json.dumps({"at": round(time.time(), 3), "edit": {
-                "dropped": [{"id": key, "severity": severity.get(key)} for key in sorted(wanted)],
-                "rewritten": [{"id": key.upper(), "severity": severity.get(key.upper())} for key, _ in set_text or []],
-                "event": event, "body": body is not None, "kept_open": sorted(keep)}}, ensure_ascii=False) + "\n")
+                "dropped": [{"id": key, "severity": (old_comments.get(key) or {}).get("severity"),
+                             "text": str((old_comments.get(key) or {}).get("body") or "")[:600]} for key in sorted(wanted)],
+                "rewritten": [{"id": key.upper(), "severity": (old_comments.get(key.upper()) or {}).get("severity"),
+                               "before": str((old_comments.get(key.upper()) or {}).get("body") or "")[:600],
+                               "after": text[:600]} for key, text in set_text or []],
+                "event": {"from": before.get("event"), "to": event,
+                          "computed": [r for r in before.get("reasons") or [] if r != "chosen by the developer"]}
+                if event else None,
+                "body": {"changed": True, "diff": body_diff[:4000]} if body is not None else False,
+                "kept_open": sorted(keep)}}, ensure_ascii=False) + "\n")
     except OSError:
         pass
     saved = _save_draft(agent_dir, value)
@@ -1295,6 +1467,16 @@ def post(target: Path, draft_id: str) -> dict[str, Any]:
     if pr.get("headRefOid") != value["head"]:
         return {"status": "refused", "reason": "head_moved", "head": pr.get("headRefOid"),
                 "next": f"new commits since the review: CLI review start --target {state.get('main')} --pr {value['pr']}"}
+    if value.get("quiet"):
+        # Nothing new since our approval: no review is posted, only the approved threads are resolved.
+        entry = {"draft_id": draft_id, "head": value["head"], "event": None, "quiet": True, "comments": 0,
+                 "at": int(time.time())}
+        state.setdefault("posted", []).append(entry)
+        _write(agent_dir / STATE_FILE, state)
+        resolved, failed = _resolve_threads(env, state, [t["thread"] for t in value.get("resolve") or []])
+        _write(agent_dir / STATE_FILE, state)
+        _log_posted(agent_dir, f"no new review (already approved); {len(resolved)} thread(s) resolved")
+        return {"status": "posted", **entry, "resolved": resolved, "resolve_failed": failed or None}
     payload = {"commit_id": value["head"], "event": value["event"], "body": value["body"],
                "comments": [{"path": c["path"], "line": c["line"], "side": c.get("side", "RIGHT"), "body": c["body"]}
                             for c in value["comments"]]}
@@ -1310,13 +1492,17 @@ def post(target: Path, draft_id: str) -> dict[str, Any]:
     resolved, failed = _resolve_threads(env, state, [t["thread"] for t in value.get("resolve") or []])
     _write(agent_dir / STATE_FILE, state)
     entry = {**entry, "resolved": resolved, "resolve_failed": failed or None}
+    _log_posted(agent_dir, f"review posted: {value['event']}, {len(value['comments'])} comment(s)")
+    return {"status": "posted", **entry}
+
+
+def _log_posted(agent_dir: Path, note: str) -> None:
     try:
         from android_workflow.cli import append_stage_log
 
-        append_stage_log(agent_dir, "T10", "completed", "cli", f"review posted: {value['event']}, {len(value['comments'])} comment(s)")
+        append_stage_log(agent_dir, "T10", "completed", "cli", note)
     except Exception:  # noqa: BLE001 - the log is a convenience
         pass
-    return {"status": "posted", **entry}
 
 
 RESOLVE_MUTATION = "mutation($thread: ID!) { resolveReviewThread(input: {threadId: $thread}) { thread { id isResolved } } }"
@@ -1433,6 +1619,71 @@ def reply_inbox(pr: dict[str, Any], viewer: str | None, handled: set[str], since
     return items
 
 
+def manual_comments(pr: dict[str, Any], viewer: str | None, state: dict[str, Any]) -> list[dict[str, Any]]:
+    """What the developer wrote on the PR by hand after our first post (an inline comment, a review body or
+    a PR comment that is not part of a review or reply this workflow posted): a finding the review missed.
+    Already recorded ones are left out. Pure."""
+    from android_workflow.watch import _epoch, _login
+
+    posted = [item for item in state.get("posted") or [] if item.get("at")]
+    if not viewer or not posted:
+        return []
+    since = min(float(item["at"]) for item in posted) - 60
+    ours = {str(item.get("url") or "").split("#")[-1] for item in posted if item.get("url")}
+    replies = {str(entry.get("reply")) for entry in ((state.get("replies") or {}).get("handled") or {}).values()
+               if isinstance(entry, dict) and entry.get("reply")}
+    seen = set(state.get("manual_seen") or [])
+    found: list[dict[str, Any]] = []
+
+    def fresh(node: dict[str, Any]) -> bool:
+        stamp = _epoch(node.get("createdAt") or node.get("submittedAt"))
+        return (bool(node.get("id")) and node["id"] not in seen and node["id"] not in replies
+                and _login(node) == viewer and bool(stamp and stamp >= since) and bool((node.get("body") or "").strip()))
+
+    for thread in ((pr.get("reviewThreads") or {}).get("nodes")) or []:
+        for comment in ((thread.get("comments") or {}).get("nodes")) or []:
+            review_url = str(((comment.get("pullRequestReview") or {}).get("url")) or "").split("#")[-1]
+            if fresh(comment) and review_url not in ours:
+                found.append({"id": comment["id"], "kind": "inline", "path": thread.get("path"), "line": thread.get("line"),
+                              "body": comment["body"][:600], "url": comment.get("url")})
+    for node in ((pr.get("reviews") or {}).get("nodes")) or []:
+        if fresh(node) and str(node.get("url") or "").split("#")[-1] not in ours:
+            found.append({"id": node["id"], "kind": "review", "body": node["body"][:600], "url": node.get("url")})
+    for node in ((pr.get("comments") or {}).get("nodes")) or []:
+        if fresh(node):
+            found.append({"id": node["id"], "kind": "comment", "body": node["body"][:600], "url": node.get("url")})
+    return found
+
+
+def _record_manual(agent_dir: Path, pr: dict[str, Any], state: dict[str, Any]) -> int:
+    """Each comment the developer wrote by hand goes to `review-decisions.jsonl` as `missed` (the review's recall)."""
+    found = manual_comments(pr, pr.get("viewer"), state)
+    if not found:
+        return 0
+    try:
+        with (agent_dir / "review-decisions.jsonl").open("a", encoding="utf-8") as handle:
+            for item in found:
+                handle.write(json.dumps({"at": round(time.time(), 3), "missed": item}, ensure_ascii=False) + "\n")
+    except OSError:
+        return 0
+    state["manual_seen"] = [*(state.get("manual_seen") or []), *(item["id"] for item in found)][-200:]
+    _write(agent_dir / STATE_FILE, state)
+    return len(found)
+
+
+def _finish_run(target: Path, outcome: str) -> None:
+    """The PR is merged or closed: the run is over (it no longer shows as running)."""
+    try:
+        from android_workflow.cli import load_state, run_lock, save_state
+
+        with run_lock(target):
+            run_state = load_state(target)
+            run_state.update({"status": "completed", "current_stage": None, "outcome": outcome})
+            save_state(target, run_state)
+    except Exception:  # noqa: BLE001 - bookkeeping only
+        pass
+
+
 def _reply_state(state: dict[str, Any]) -> dict[str, Any]:
     replies = state.setdefault("replies", {})
     replies.setdefault("handled", {})
@@ -1474,7 +1725,9 @@ def wait(target: Path, timeout: float = 540, interval: float = 60) -> dict[str, 
             watching["started_at"] = time.time()
             _write(agent_dir / STATE_FILE, state)
         pr = fetch_pr(env, repo, int(context["number"]))
+        _record_manual(agent_dir, pr, state)
         if pr.get("state") != "OPEN":
+            _finish_run(target, str(pr.get("state")).lower())
             return True, {"status": str(pr.get("state")).lower(), "next": "stop: the PR is over"}, ""
         items = _write_inbox(agent_dir, pr, state)
         if pr.get("headRefOid") != context.get("head"):

@@ -61,12 +61,16 @@ flowchart TD
    captures with the author's media.
 5. **Verdict in code** (`decide.py`, new `review` branch):
    - any blocking, failing CI that is ours, or device FAIL → `REQUEST_CHANGES`
-   - concerns, unverified claims, device PARTIAL/BLOCKED or CI still pending → `COMMENT`
-   - otherwise → `APPROVE` (nits alone never change it; own PR → always `COMMENT`)
+   - unverified claims, device PARTIAL/BLOCKED or CI still pending (not for a docs-only change) → `COMMENT`
+   - otherwise → `APPROVE`, concerns and nits riding along as comments (`review.approve_with_concerns:
+     false` makes concerns `COMMENT`; own PR → always `COMMENT`). Every run reviewed on 2026-11-04 had
+     its `COMMENT` overridden to `APPROVE` by the developer.
 6. **Developer OK** — shows the draft: event, body, each inline comment (`file:line`, text). The
    developer can drop/edit comments or change the event. `CLI review post` sends it via
    `gh api repos/{o}/{r}/pulls/{n}/reviews` in one call, pinned to the reviewed `commit_id`.
    If the head moved since the review, `post` refuses and offers a delta re-review.
+   A delta round after our approval that raises nothing new posts no second review: it only offers
+   to resolve our addressed threads (two of three such drafts were never posted by hand either).
 7. **Follow-up** — on by default (`--no-watch` to stop at the post; `CLI review wait`): on new commits, `CLI delta` re-reviews only
    the new hunks and checks whether each thread we opened was addressed; when someone answers a thread
    we took part in (or @mentions us after the review), `aw-pr-watcher` mode `review` drafts the answers

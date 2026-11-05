@@ -813,7 +813,7 @@ LEVELS = ("express", "standard", "full")
 RUN_VERDICTS = ("gate-report.json", "review.json", "device-report.md", "delivery.json", "prebuild.json")
 
 
-def initialize_later_artifacts(agent_dir: Path) -> None:
+def initialize_later_artifacts(agent_dir: Path, review: bool = False) -> None:
     artifacts = {
         "change-set-map.json": {
             "schema_version": 1, "candidate_files": [], "symbols": [], "related_tests": [],
@@ -839,6 +839,9 @@ def initialize_later_artifacts(agent_dir: Path) -> None:
         "device-report.md": "# Status\n\nnot_run\n\n# Device\n\n# Scenarios\n\n# Evidence\n\n# Not verified\n",
         "stage-log.md": "# Stage log\n\n| time | stage | status | actor | note |\n|---|---|---|---|---|\n",
     }
+    if review:  # reviewing someone else's PR: nothing is implemented here, the Planner writes plan.md
+        markdown.pop("plan.md")
+        markdown.pop("implementation-notes.md")
     for name, value in markdown.items():
         path = agent_dir / name
         if not path.exists():
@@ -915,6 +918,24 @@ def record_totals(metrics: dict[str, Any], state: dict[str, Any]) -> None:
         "stages_reporting_tokens": len(reported),
         # Agents that ran but never reported tokens: the total above leaves them out.
         "stages_missing_tokens": missing,
+    }
+
+
+def review_change_set(target: Path, files: list[str], repo_map: dict[str, Any]) -> dict[str, Any]:
+    """The change set of a PR under review: its changed files, the modules they live in and the tests it touches."""
+    modules = repo_map.get("modules") or []
+    prefixes = {module: str(module_dir(target, module).relative_to(target)) + "/" for module in modules}
+    affected = sorted({module for path in files for module, prefix in prefixes.items() if path.startswith(prefix)})
+    return {
+        "schema_version": 1,
+        "candidate_files": [{"path": path, "reason": "changed by the PR"} for path in files],
+        "symbols": [],
+        "related_tests": [path for path in files if "test" in {part.lower() for part in Path(path).parts}][:12],
+        "extension_points": [],
+        "neighbor_patterns": [],
+        "affected_modules": affected,
+        "public_api_changed": False,
+        "source": "pr_diff",
     }
 
 
@@ -3208,17 +3229,28 @@ def execute_pipeline(target: Path, state: dict[str, Any], spec: dict[str, Any]) 
     repo_map = read_json(cache_dir(target) / "repo-map.json")
     metrics = read_json(agent_dir / "stage-metrics.json")
     state["stages"]["T1"] = {"status": "completed"}
+    review_files = spec.get("review_files")
 
     started = stage_start(state, "T2")
-    change_set = locate_change_set(target, spec, repo_map)
+    # Reviewing a PR: the change set is the PR's diff, not a guess from the ticket text.
+    change_set = (review_change_set(target, review_files, repo_map) if review_files is not None
+                  else locate_change_set(target, spec, repo_map))
     write_json(agent_dir / "change-set-map.json", change_set)
-    append_stage_log(agent_dir, "T2", "completed", "cli", f"{len(change_set['candidate_files'])} candidate file(s)")
+    append_stage_log(agent_dir, "T2", "completed", "cli",
+                     f"{len(change_set['candidate_files'])} file(s) changed by the PR" if review_files is not None
+                     else f"{len(change_set['candidate_files'])} candidate file(s)")
     stage_end(state, metrics, "T2", started)
     from android_workflow.decide import apply_level
 
     apply_level(spec, change_set, spec.pop("level_override", None))
     write_json(agent_dir / "ticket-spec.json", spec)
     append_stage_log(agent_dir, "T1", "completed", "cli", f"level {spec['level']}: " + "; ".join(spec["level_reasons"]))
+    if review_files is not None:
+        # The review's own steps follow (`CLI review next`): the Planner writes the spec and plan, and
+        # nothing is implemented, so no generic plan, no Planner attempt and no Implementer hand-over.
+        state.update({"status": "running", "current_stage": "T3"})
+        save_state(target, state, metrics)
+        return state
 
     started = stage_start(state, "T3")
     if "T3" in spec["route"]:
@@ -3309,7 +3341,8 @@ def mark_moved_copies(target: Path, ticket_id: str) -> list[str]:
     return moved
 
 
-def run(target: Path, ticket: dict[str, Any], take_over: bool = False) -> dict[str, Any]:
+def run(target: Path, ticket: dict[str, Any], take_over: bool = False,
+        review_files: list[str] | None = None) -> dict[str, Any]:
     started = time.monotonic()
     ensure_gitignore(target)
     bootstrap(target)
@@ -3324,6 +3357,8 @@ def run(target: Path, ticket: dict[str, Any], take_over: bool = False) -> dict[s
     set_current(target, ticket_id)
     mark_moved_copies(target, ticket_id)
     spec = keep_planner_decisions(agent_dir, spec, ticket)
+    if review_files is not None:
+        spec["review_files"] = list(review_files)
     write_json(agent_dir / "ticket-spec.json", spec)
     write_json(agent_dir / TOOLKIT_FINGERPRINT_FILE, {"files": toolkit_fingerprint()})
     kept = still_valid_verdicts(target, agent_dir)
@@ -3332,7 +3367,7 @@ def run(target: Path, ticket: dict[str, Any], take_over: bool = False) -> dict[s
     for verdict in RUN_VERDICTS:
         if verdict not in kept:
             (agent_dir / verdict).unlink(missing_ok=True)
-    initialize_later_artifacts(agent_dir)
+    initialize_later_artifacts(agent_dir, review=review_files is not None)
     # A new start is a new run: metrics from an earlier start of this ticket would be double-counted,
     # so they move to `earlier_runs` (kept, never added to this run's totals).
     metrics: dict[str, Any] = {"schema_version": 1, "stages": {}}
