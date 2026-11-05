@@ -136,6 +136,8 @@ CLI gate | prebuild | device … | emulator … | log …  --target WT         (
   manifest change. The Reviewer can require it (`CLI review device --require`), which beats the
   waiver. `after` = PR head, `before` = the base APK replayed
   by code. No UI change → the review says "not verified on a device: no UI change".
+  The device is this run's own lease, as in android-workflow; with `device.dedicated` (default `true`) it is
+  always an emulator the workflow started, never the developer's own emulator or phone.
 - **CI** is trusted when every required check (else every check) on the PR head passed. Pending →
   wait up to `review.ci_wait_minutes` (30), then the local gate; no check at all, or all skipped →
   the local gate for the touched modules. **Documentation only** (every changed file `.md`/`.txt`/…,

@@ -10,6 +10,10 @@ runs never install their builds on one device. `claim` is the one entry point:
   again with `-read-only`);
 * else `busy`, naming who holds each device; `unavailable` with the reason when there is no SDK or AVD.
 
+`device.dedicated` (default true; `false` or `ANDROID_WORKFLOW_DEDICATED_DEVICE=0` turns it off): a run
+only ever uses an emulator the workflow started. An emulator the developer opened and a connected phone are never leased, waited
+for or touched; a workflow emulator another run gave back is still reused (the lease keeps it to one run).
+
 `--stop` gives the run's device back and closes the emulators the workflow started that no lease
 holds and no other live run is waiting for; a device the developer connected or opened is never
 closed. No AVD is ever created and nothing is downloaded. The pool record lives in
@@ -36,6 +40,7 @@ LEGACY_NAMES = ("emulator.json", "emulators-extra.json")
 DEFAULT_BOOT_TIMEOUT = 300.0
 DEFAULT_FREE_TIMEOUT = 1800.0
 DEFAULT_MAX_EMULATORS = 2
+DEDICATED_ENV = "ANDROID_WORKFLOW_DEDICATED_DEVICE"
 PORTS = range(5554, 5586, 2)
 NO_DEVICE_CHECK_ENV = "ANDROID_WORKFLOW_NO_DEVICE_CHECK"  # the test suites: never touch a real device
 
@@ -211,6 +216,16 @@ def _max_emulators(target: Path) -> int:
         return DEFAULT_MAX_EMULATORS
 
 
+def dedicated(target: Path) -> bool:
+    """Only emulators the workflow started: never the developer's own emulator or phone. On by default;
+    the environment variable wins over `device.dedicated` in `.ai/android-workflow.json`."""
+    value = os.environ.get(DEDICATED_ENV, "").strip().lower()
+    if value:
+        return value not in {"0", "false", "no", "off"}
+    configured = _overrides(target).get("dedicated", True)
+    return str(configured).strip().lower() not in {"0", "false", "no", "off"}
+
+
 def _order(serials: list[str]) -> list[str]:
     """Emulators first (a phone may be in the developer's hand), then the rest, in adb's order."""
     return sorted(serials, key=lambda serial: not serial.startswith("emulator-"))
@@ -235,6 +250,9 @@ def status(target: Path) -> dict[str, Any]:
         if record or any(item["serial"] == serial for item in listed):
             return {**(record or {}), "status": "booting", "serial": serial, "devices": ready,
                     "started_by_workflow": bool(record), "leased": True}
+    if dedicated(target):  # the developer's own devices are not this run's to see
+        listed = [item for item in listed if item["serial"] in pool]
+        ready = [serial for serial in ready if serial in pool]
     if ready:
         serial = _order(ready)[0]
         record = pool.get(serial)
@@ -335,6 +353,7 @@ def claim(target: Path, record: bool = True, avd: str | None = None, headless: b
         pool = {str(item["serial"]): item for item in _read_pool()}
         listed = devices(adb)
         ready = [item["serial"] for item in listed if item["state"] == "device"]
+        only_ours = dedicated(target)
         for serial in held_by(run):
             if serial in ready and _booted(adb, serial):
                 return {**pool.get(serial, {}), "status": "ready" if serial in pool else "connected", "serial": serial,
@@ -344,7 +363,8 @@ def claim(target: Path, record: bool = True, avd: str | None = None, headless: b
                         "started_by_workflow": serial in pool, "leased": True}
             if record:
                 release(run, serial=serial)  # its emulator is gone: lease another one below
-        free = [serial for serial in _order(free_serials(ready, run)) if _booted(adb, serial)]
+        free = [serial for serial in _order(free_serials(ready, run))
+                if (serial in pool or not only_ours) and _booted(adb, serial)]
         if free:
             serial = free[0]
             if record:
@@ -358,12 +378,12 @@ def claim(target: Path, record: bool = True, avd: str | None = None, headless: b
                 acquire(idle_booting[0], run)
             return {**pool[idle_booting[0]], "status": "booting", "started_by_workflow": True, "leased": record}
         unready = [item for item in listed if item["state"] != "device" and item["serial"] not in pool]
-        if unready and not held and all(item["state"] != "unauthorized" for item in unready):
+        if unready and not held and not only_ours and all(item["state"] != "unauthorized" for item in unready):
             return {"status": "booting", "devices": [f"{item['serial']} ({item['state']})" for item in unready],
                     "started_by_workflow": False, "reason": "a device is connected but not ready yet"}
         maximum = _max_emulators(target)
-        holders = {serial: run_label((held.get(serial) or {}).get("run") or "?") for serial in [*ready, *pool]
-                   if serial in held}
+        holders = {serial: run_label((held.get(serial) or {}).get("run") or "?")
+                   for serial in [*(serial for serial in ready if serial in pool or not only_ours), *pool] if serial in held}
         if len(pool) < maximum:
             if not record:
                 return {"status": "would_start", "reason": "no free device: one more emulator starts for this run",
@@ -375,11 +395,12 @@ def claim(target: Path, record: bool = True, avd: str | None = None, headless: b
             if not holders:
                 return started
             return {"status": "busy", "holders": holders, "reason": f"could not start one more emulator: {started.get('reason')}"}
-        if not holders and listed and all(item["state"] == "unauthorized" for item in listed):
+        if not holders and listed and not only_ours and all(item["state"] == "unauthorized" for item in listed):
             return {"status": "unauthorized", "devices": [item["serial"] for item in listed], "started_by_workflow": False,
                     "reason": "a phone is connected but USB debugging is not authorized: accept the prompt on the phone"}
-        return {"status": "busy", "holders": holders,
-                "reason": f"every device is in use and {len(pool)} of device.max_emulators={maximum} emulators already run"}
+        return {"status": "busy", "holders": holders, **({"dedicated": True} if only_ours else {}),
+                "reason": f"every device is in use and {len(pool)} of device.max_emulators={maximum} emulators already run"
+                          + ("; device.dedicated: devices the developer opened or connected are never used" if only_ours else "")}
 
 
 def _claim_reported(target: Path, run: Path | None, record: bool) -> dict[str, Any]:

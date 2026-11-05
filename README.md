@@ -161,6 +161,11 @@ stepping on each other:
   emulator already open that no run uses is reused; otherwise one more emulator starts just for that
   run (another AVD, or the same one read-only), up to `"device": {"max_emulators": 2}` in
   `.ai/android-workflow.json`. Past that, the run waits (`next` says which run holds each device).
+  By default (`"device": {"dedicated": true}`) the workflows stay off **your** devices: each run
+  only uses an emulator the workflow started for it, never the emulator you opened or your phone
+  (those are never leased, touched or closed). An emulator another run gave back is still reused, and
+  the lease keeps it to one run at a time. To let runs use your open emulator or a phone, set
+  `"dedicated": false` (or `ANDROID_WORKFLOW_DEDICATED_DEVICE=0` for one session).
   With 3+ runs on one laptop, keep 2 build slots (or 1) and close Android Studio.
 - **Base build**: one per repository at a time, shared by commit.
 

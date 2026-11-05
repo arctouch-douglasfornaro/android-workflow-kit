@@ -698,6 +698,7 @@ def emulator_args(**values: object) -> argparse.Namespace:
 
 
 class EmulatorTests(unittest.TestCase):
+    @mock.patch.dict(os.environ, {"ANDROID_WORKFLOW_DEDICATED_DEVICE": "0"})  # device.dedicated off
     def test_a_connected_device_is_used_and_never_closed(self) -> None:
         with FakeSdk() as (target, state_dir):
             (state_dir / "devices").write_text("R5CT123\tdevice\n", encoding="utf-8")
@@ -761,6 +762,7 @@ class EmulatorTests(unittest.TestCase):
         self.assertEqual(no_tool["status"], "unavailable")
         self.assertIn("emulator was not found", no_tool["reason"])
 
+    @mock.patch.dict(os.environ, {"ANDROID_WORKFLOW_DEDICATED_DEVICE": "0"})  # device.dedicated off
     def test_a_device_that_is_not_ready_is_waited_for_never_doubled(self) -> None:
         with FakeSdk() as (target, state_dir):
             (state_dir / "devices").write_text("emulator-5554\toffline\n", encoding="utf-8")
@@ -833,6 +835,7 @@ class EmulatorTests(unittest.TestCase):
         self.assertEqual(args[:2], ["-avd", "Pixel_9"])
         self.assertIn("-read-only", args)
 
+    @mock.patch.dict(os.environ, {"ANDROID_WORKFLOW_DEDICATED_DEVICE": "0"})  # device.dedicated off
     def test_an_open_emulator_nobody_uses_is_reused_and_never_closed(self) -> None:
         with FakeSdk() as (target, state_dir):
             (state_dir / "devices").write_text("emulator-5560\tdevice\n", encoding="utf-8")
@@ -846,6 +849,61 @@ class EmulatorTests(unittest.TestCase):
         self.assertFalse(launched)
         self.assertEqual(stopped["status"], "left_running")
         self.assertFalse(killed)
+
+    def dedicate(self, *apps: Path, value: bool = True) -> None:
+        for app in apps:
+            (app / ".ai").mkdir(exist_ok=True)
+            (app / ".ai/android-workflow.json").write_text(json.dumps({"device": {"dedicated": value}}), encoding="utf-8")
+
+    def test_dedicated_never_uses_the_developers_emulator_or_phone_and_starts_its_own(self) -> None:
+        with FakeSdk() as (target, state_dir):
+            (state_dir / "devices").write_text("emulator-5560\tdevice\nR5CT123\tdevice\n", encoding="utf-8")
+            (state_dir / "booted").touch()
+            (app,) = self.apps(target.parent, "A-1")
+            self.dedicate(app)
+            claimed = emulator.claim(app)
+            args = self.launched(state_dir, 5554)
+            ready = emulator.claim(app)
+            seen = emulator.status(app)
+            stopped = emulator.stop(app, grace=10)
+            killed_mine = (state_dir / "kill-5560").exists()
+        self.assertEqual((claimed["status"], claimed["serial"], claimed["started_by_workflow"]),
+                         ("booting", "emulator-5554", True))
+        self.assertEqual(args[:2], ["-avd", "Pixel_9"])
+        self.assertEqual((ready["status"], ready["serial"]), ("ready", "emulator-5554"))
+        self.assertEqual(seen["serial"], "emulator-5554")
+        self.assertEqual(stopped["stopped"], ["emulator-5554"])
+        self.assertFalse(killed_mine)  # the developer's emulator stays open, untouched
+
+    def test_dedicated_reuses_a_workflow_emulator_another_run_gave_back(self) -> None:
+        with FakeSdk() as (target, state_dir):
+            (state_dir / "devices").write_text("emulator-5560\tdevice\n", encoding="utf-8")
+            first, second = self.apps(target.parent, "A-1", "B-1")
+            self.dedicate(first, second)
+            with mock.patch.dict(os.environ, {"ANDROID_WORKFLOW_DEDICATED_DEVICE": ""}):
+                emulator.claim(first)
+                self.launched(state_dir, 5554)
+                (state_dir / "booted").touch()
+                emulator.claim(first)
+                with mock.patch.object(emulator, "_max_emulators", return_value=1):
+                    busy = emulator.claim(second)  # the developer's 5560 is free, but never ours
+                    emulator.stop(first, grace=10)  # B-1 still wants a device: 5554 stays open for it
+                    reused = emulator.claim(second)
+                emulator.stop(second, grace=10)
+        self.assertEqual(busy["status"], "busy")
+        self.assertTrue(busy["dedicated"])
+        self.assertEqual((reused["status"], reused["serial"]), ("ready", "emulator-5554"))
+
+    def test_the_environment_switches_dedicated_on_and_off(self) -> None:
+        with FakeSdk() as (target, _):
+            (app,) = self.apps(target.parent, "A-1")
+            self.assertTrue(emulator.dedicated(app))  # on by default
+            with mock.patch.dict(os.environ, {"ANDROID_WORKFLOW_DEDICATED_DEVICE": "0"}):
+                self.assertFalse(emulator.dedicated(app))
+            self.dedicate(app, value=False)
+            self.assertFalse(emulator.dedicated(app))
+            with mock.patch.dict(os.environ, {"ANDROID_WORKFLOW_DEDICATED_DEVICE": "1"}):
+                self.assertTrue(emulator.dedicated(app))
 
     def test_a_leased_emulator_that_died_is_replaced(self) -> None:
         with FakeSdk() as (target, state_dir):
@@ -880,6 +938,7 @@ class EmulatorTests(unittest.TestCase):
         self.assertTrue(waiting["why"].startswith(decide.BOOTING))
         self.assertEqual((ready, none), ("emulator-5554", None))
 
+    @mock.patch.dict(os.environ, {"ANDROID_WORKFLOW_DEDICATED_DEVICE": "0"})  # device.dedicated off
     def test_an_unauthorized_phone_is_reported_at_once(self) -> None:
         with FakeSdk() as (target, state_dir):
             (state_dir / "devices").write_text("R5CT123\tunauthorized\n", encoding="utf-8")

@@ -60,7 +60,10 @@ every run, so prove each fact from a file; unknown stays empty.
   "android_lint": "./gradlew {module}:lintProdDebug"}, "device": {"app_module": ":app",
   "application_id": "com.example.debug", "launch_activity": ".MainActivity", "avd": "Pixel_8_API_35",
   "max_emulators": 2}}`. `max_emulators`: emulators the workflow may start at once for parallel runs
-  (each run gets its own device); lower it to 1 on a machine with little memory.
+  (each run gets its own device); lower it to 1 on a machine with little memory. `dedicated` is
+  `true` by default: runs use only emulators the workflow started, never the developer's own emulator
+  or phone (each concurrent run needs one, so size `max_emulators` for it). Write `"dedicated": false`
+  only when the developer asks for it, or the project is tested on a phone with no AVD.
   No formatter in the repo: `{"commands": {"format_check": "", "format_apply": ""}}` with a
   profile row saying so. Optional `quality_gates` keys, only when the project needs them:
   `"lint_scope": "all"` (fail on findings in untouched files too) or `"changed_files"` (fail on

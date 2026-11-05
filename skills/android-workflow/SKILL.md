@@ -279,7 +279,10 @@ Implementers of a team with each other (one owner per file).
 - each run has its own device: the first time it needs one it leases a ready device nobody uses (an
   emulator already open, a phone), else one more emulator starts just for it, up to
   `device.max_emulators` (default 2; a second copy of an AVD runs `-read-only`); past that, `next`
-  answers `wait_device` naming who holds each device. The lease lasts until `finish` (a command
+  answers `wait_device` naming who holds each device. `device.dedicated` (default `true`): only
+  emulators the workflow started are leased, never the developer's own emulator or phone; one another
+  run gave back is still reused. `false` (or `ANDROID_WORKFLOW_DEDICATED_DEVICE=0`) lets a run lease an
+  emulator already open or a phone. The lease lasts until `finish` (a command
   still installing keeps it until it exits), so between its `before` and `after` rounds no other run
   installs on that device. A leased emulator that dies is replaced;
 - the Device APK is built before the device is held (`CLI device build`, started with the gate):

@@ -63,7 +63,9 @@ Flows live in `RUN/media/flows/`, one per behavior in the plan's recipe (`<surfa
 - `serial`: the device `CLI next` leased to this run. Use only that serial (`adb -s`, `maestro
   --device`), never another one: another run may be installing its own build on it right now. Not
   ready → return `BLOCKED` (never PASS without a device). Never start, wipe or close an emulator
-  yourself: the orchestrator does that.
+  yourself: the orchestrator does that. With `device.dedicated` (the default) the serial is always an
+  emulator the workflow started for this run: never fall back to another device `adb devices` lists (the
+  developer's own emulator or phone).
 - Never run Gradle (`gradlew assemble…`/`install…`): `CLI device replay` installs the current build,
   and `CLI device install --target TARGET --serial <serial>` does it alone (the APK is built first with
   no device held, usually already by the background `CLI device build`, then `adb install`ed, with its
