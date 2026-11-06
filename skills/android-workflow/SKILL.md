@@ -77,8 +77,11 @@ pass it to the Planner.
 | Delivery | `aw-delivery` | fast | after `finish`, unless `--no-commit`: writes the PR body, runs `CLI deliver` |
 | PR Watcher | `aw-pr-watcher` | standard | after the PR opens, unless `--no-watch`: triages new comments and failing checks, answers on the PR |
 
-Tier maps to opus/sonnet/haiku on Claude Code and high/medium/low reasoning on Codex;
-Cursor and Gemini inherit the session model.
+Tier maps to opus/sonnet/haiku on Claude Code and to `gpt-6.1-sol`/`gpt-6.1-terra`/`gpt-6-luna` with
+high/medium/low reasoning on Codex (`model` and `model_reasoning_effort` in `.codex/agents/aw-*.toml`;
+a newer model is a one-line change there and in the test that pins them); Cursor and Gemini inherit
+the session model. Setup is strong because it runs once per build configuration and every later run
+trusts what it records.
 
 ### How to delegate, per host
 
@@ -167,7 +170,8 @@ CLI status|list --target T                          CLI clean --target T [--tick
      visible change is `ui`), then `next`.
    - `spawn`: spawn (or, with `resume`, resume) `agent` with `mode`, `level`, `ids` (fix-round
      finding IDs) and `read` (the reports they come from), as in *How to delegate*. With `tier:
-     standard` use the standard tier (Claude Code: `model: sonnet`; Codex: reasoning `medium`).
+     standard` use the standard tier (Claude Code: `model: sonnet`; Codex: `model: gpt-6.1-terra`, reasoning
+     `medium`, when `spawn_agent` takes model overrides, else the agent's own `.toml` model).
      `also` lists commands to start in the same turn, in the background (the emulator, the base
      build, a second `next` that says whether to capture the device `before`). `slices` → one
      `aw-implementer` per slice in the same turn, each logged with `--stage Implementer --slice S<n>`.

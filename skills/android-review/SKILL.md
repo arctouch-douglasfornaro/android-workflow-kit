@@ -79,7 +79,7 @@ CLI gate | prebuild | device … | emulator … | log …  --target WT         (
      started. Start its `also` in the background in the same turn: on a UI change the Planner's spawn
      carries the base build and the PR-head APK, so they build while the Planner and the Reviewer read.
    - `checks`: in the same turn, spawn every `run` agent (`aw-reviewer` mode `pr`/`pr-delta`,
-     `aw-media`), run every `commands` entry, and start `also` in the background (base build and the
+     `aw-media`; a `run` entry with `tier: standard`, the `pr-delta` review, uses the standard tier), run every `commands` entry, and start `also` in the background (base build and the
      PR-head APK when the PR changes UI).
    - `wait_ci`: run `command` (polls up to 9 min), then `next`. `gate`: run `command` (long timeout).
    - `wait` / `wait_device` / `wait_prebuild` / `replay_before`: as in android-workflow.

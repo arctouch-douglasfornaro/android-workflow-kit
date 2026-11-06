@@ -1,5 +1,6 @@
 name = "aw-device"
 description = "android-workflow Device: installs the debug build, navigates to the changed surface with Maestro, verifies device acceptance criteria and captures before/after screenshots or clips. Writes device-report.md. Never edits source."
+model = "gpt-6.1-terra"
 model_reasoning_effort = "medium"
 developer_instructions = '''
 Pointer only. Read `~/.ai/skills/android-workflow/agents/aw-device.md` and act exactly as that role:

@@ -277,6 +277,7 @@ class HostDrivenTests(unittest.TestCase):
         self.assertEqual(set(roles), {"aw-setup", "aw-planner", "aw-tech-lead", "aw-implementer", "aw-reviewer", "aw-device", "aw-delivery", "aw-pr-watcher", "aw-media"})
         models = {"strong": "opus", "standard": "sonnet", "fast": "haiku"}
         efforts = {"strong": "high", "standard": "medium", "fast": "low"}
+        codex_models = {"strong": "gpt-6.1-sol", "standard": "gpt-6.1-terra", "fast": "gpt-6-luna"}
         for host in (".claude", ".cursor", ".gemini"):
             self.assertEqual({path.stem for path in (KIT_ROOT / host / "agents").glob("*.md")}, set(roles), host)
         self.assertEqual({path.stem for path in (KIT_ROOT / ".codex/agents").glob("*.toml")}, set(roles))
@@ -294,6 +295,7 @@ class HostDrivenTests(unittest.TestCase):
             codex = load_toml((KIT_ROOT / ".codex/agents" / f"{name}.toml").read_text(encoding="utf-8"))
             self.assertEqual((codex["name"], codex["description"]), (name, meta["description"]))
             self.assertEqual(codex["model_reasoning_effort"], efforts[meta["tier"]])
+            self.assertEqual(codex["model"], codex_models[meta["tier"]], name)
             self.assertIn(source, codex["developer_instructions"])
         for host in (".claude", ".codex", ".cursor", ".gemini", ".agents"):
             for skill in ("android-workflow", "android-review", "device-driving"):

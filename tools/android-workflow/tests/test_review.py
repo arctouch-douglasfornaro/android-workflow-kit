@@ -406,6 +406,7 @@ class FlowTests(unittest.TestCase):
             self.assertEqual(read_json(agent_dir / "run-state.json")["stages"]["T3"]["status"], "completed")
             self.assertIn("spec kept", (agent_dir / "stage-log.md").read_text())
         self.assertEqual(checks["run"][0]["mode"], "pr-delta")
+        self.assertEqual(checks["run"][0]["tier"], "standard")  # a delta review runs on the standard tier
 
     def test_a_changed_pr_text_runs_the_planner_again(self) -> None:
         with Project(self.CHANGE) as project:

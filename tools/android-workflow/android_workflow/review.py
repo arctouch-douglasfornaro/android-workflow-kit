@@ -902,6 +902,7 @@ def _decide(target: Path, record: bool, no_device: bool) -> dict[str, Any]:
         else:
             _log_started(target, "Reviewer", "PR review" + (" (delta)" if delta else ""), record)
             run.append({"agent": "aw-reviewer", "mode": "pr-delta" if delta else "pr", "stage": "Reviewer",
+                        **({"tier": "standard"} if delta else {}),
                         "read": [f"RUN/{CONTEXT_FILE}", f"RUN/{SPEC_FILE}", *ticket_read,
                                  *[item["diff"] for item in context.get("copies") or []]]
                                 + ([f"RUN/{DELTA_FILE}"] if delta else [])})
