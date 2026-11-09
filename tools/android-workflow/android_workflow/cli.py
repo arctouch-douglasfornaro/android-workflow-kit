@@ -3680,7 +3680,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                                help="drop runs whose app or run folder is gone (a removed worktree, a clean)")
     office_parser.add_argument("--days", type=float, help="with --prune: also drop past runs idle this many days")
     pr_parser = subparsers.add_parser("pr", help="PR Watcher: follow the open PR until it is merged")
-    pr_parser.add_argument("action", choices=("status", "wait", "reply", "rerequest", "ci", "sync", "merge"))
+    pr_parser.add_argument("action", choices=("status", "wait", "reply", "rerequest", "ci", "sync", "merge", "feedback"))
     pr_parser.add_argument("--target", required=True, type=Path)
     pr_parser.add_argument("--pr", type=int, help="PR number (default: the one this run opened, else the branch's)")
     pr_parser.add_argument("--timeout", type=float, default=540.0, help="wait: give up after this many seconds")

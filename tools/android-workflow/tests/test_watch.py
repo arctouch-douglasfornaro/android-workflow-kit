@@ -332,6 +332,58 @@ class ReplyTests(unittest.TestCase):
         self.assertEqual(state["ci"]["ci:abc:unit"], "rerun")
 
 
+class FeedbackCheckTests(unittest.TestCase):
+    def setup(self, root: Path, feedback: dict, handled: dict | None = None, ci: dict | None = None) -> None:
+        watch._write(run_dir(root) / "pr-watch.json", {"pr": {"number": 5, "repo": "o/r", "node": "PR_1"},
+                                                       "handled": handled or {}, "ci": ci or {}})
+        watch._write(run_dir(root) / "pr-inbox.json", {"items": [
+            {"id": "C1", "kind": "thread", "author": "ana", "body": "Hoist this to a val"},
+            {"id": "C2", "kind": "thread", "author": "ana", "body": "Why not a sealed class?"},
+            {"id": "C3", "kind": "thread", "author": "ana", "body": "Should disabled rows still open the game?"},
+        ], "ci": [{"id": "ci:abc:lint", "name": "lint"}]})
+        watch._write(run_dir(root) / "pr-feedback.json", feedback)
+
+    def test_a_complete_triage_passes(self) -> None:
+        with AndroidProject() as root:
+            finished_run(root)
+            self.setup(root, {
+                "changes": [{"id": "PR-1", "items": ["C1", "ci:abc:lint"], "what": "hoist the filter", "files": ["A.kt"]}],
+                "answered": ["C2"],
+                "ask_user": [{"items": ["C3"], "reason": "product", "recommendation": "keep it enabled, as the design",
+                              "question": "Disabled rows: open the game or not?"}],
+            }, handled={"C2": {"how": "replied"}}, ci={"ci:abc:lint": "ours"})
+            result, code = watch.check_feedback(root)
+        self.assertEqual(code, 0, result)
+        self.assertEqual(result["ask_user"], 1)
+
+    def test_nits_sent_to_the_developer_without_a_reason_are_refused(self) -> None:
+        with AndroidProject() as root:
+            finished_run(root)
+            self.setup(root, {
+                "changes": [], "answered": [],
+                "fixed_reply_pending": [{"items": ["C2"]}],
+                "ask_user": [{"items": ["C1"], "question": "nit: hoist it?"},
+                             {"items": ["C3"], "reason": "scope", "question": "agree?"}],
+            })
+            result, code = watch.check_feedback(root)
+        errors = "\n".join(result["errors"])
+        self.assertEqual(code, 1)
+        self.assertIn("fixed_reply_pending", errors)
+        self.assertIn("C2 (ana) has no decision", errors)
+        self.assertIn("`reason` must be one of", errors)
+        self.assertIn("`recommendation` is missing", errors)
+        self.assertIn("check lint has no verdict", errors)
+
+    def test_answered_means_posted(self) -> None:
+        with AndroidProject() as root:
+            finished_run(root)
+            self.setup(root, {"changes": [{"id": "PR-1", "items": ["C1", "C3"], "what": "x"}], "answered": ["C2"]},
+                       ci={"ci:abc:lint": "unrelated"})
+            result, code = watch.check_feedback(root)
+        self.assertEqual(code, 1)
+        self.assertIn("C2 is `answered` but nothing was posted", result["errors"][0])
+
+
 class SyncTests(unittest.TestCase):
     def prepare(self, root: Path, base_change: str, path: str = "app/src/main/java/com/example/ProfileScreen.kt") -> Path:
         finished_run(root)

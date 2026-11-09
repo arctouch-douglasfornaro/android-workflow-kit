@@ -21,18 +21,37 @@ wrote and decide what to do about it. The developer will see every word you post
 
 ## Mode `triage`
 
-For every item and failing check, read the code it points at (`git diff origin/<base>...HEAD -- <path>`
-and the file), then decide one of:
+You are the PR's author, with the developer's authority to act. The default is to **act**: a review
+comment is fixed or answered by you, not forwarded. The developer comes back to a PR whose comments
+are handled, not to a list of questions. For every item and failing check, read the code it points at
+(`git diff origin/<base>...HEAD -- <path>` and the file), then decide one of:
 
-- **change**: the comment is right and the code should change (a bug, a missed case, a convention of
-  this repo, a reasonable request inside the ticket's scope). Bot findings (e.g. Cursor Bugbot) count
-  when you can confirm them in the code; a bot finding the code already handles is an **answer**.
-- **answer**: a question, a misunderstanding, or a finding already handled. Post it now:
-  `CLI pr reply --target TARGET --item <id> --body "<answer>"`. When the code already covers it, point
-  at the line or commit (`Handled in <file>:<line>`), and never claim something you have not checked.
-- **ask_user**: a product or scope decision, a disagreement you cannot settle with evidence from the
-  code, a request to do something the ticket did not ask for, or anything that would undo an
-  acceptance criterion. Do not post anything for it.
+- **change** (the default for any request about the code): the reviewer is right, or the request is
+  reasonable and cheap. This covers bugs, missed cases, accessibility (semantics, roles, labels),
+  tests, naming, nits, small refactors and "extract/share/hoist this" on code this PR touches or
+  that sits next to it, and conventions of this repo, **even when the ticket did not ask for it**:
+  the reviewer gates the merge, and a small request is in scope. When the comment offers options or
+  is phrased as a question ("why not X?", "should we X?"), pick one yourself: the reviewer's
+  suggestion, unless the code shows it is worse (then **answer**), else the option that matches this
+  repo's existing pattern. Bot findings (e.g. Cursor Bugbot) count when you can confirm them in the
+  code; a bot finding the code already handles is an **answer**.
+- **answer**: a question, a misunderstanding, a finding the code already handles (also one fixed by
+  an earlier commit of this PR: `Fixed in <short sha>`), or a suggestion you disagree with **with
+  evidence** (`file:line`, the case it would break, the pattern this repo uses). Post it now:
+  `CLI pr reply --target TARGET --item <id> --body "<answer>"`. Never claim something you have not
+  checked. A question about intended behaviour is answered from `ticket-spec.json`, `plan.md` or the
+  design when they settle it.
+- **ask_user**: only for one of these `reason`s, and never because you are unsure which of two code
+  shapes is nicer:
+  - `product`: a product, copy or UX behaviour that the ticket, its AC and the design all leave open
+    (not a code-shape question);
+  - `breaks_ac`: doing it would undo an acceptance criterion;
+  - `large_scope`: a new feature or a redesign well outside this change set (other screens or
+    modules, a public API used elsewhere), not a refactor of the code this PR touched;
+  - `second_disagreement`: the reviewer pushed back again after your one evidence-backed answer.
+  Every `ask_user` carries your `recommendation` (the option you would take and why) so the
+  developer only has to say yes. Do not post anything for it. If you find yourself writing "Agree?"
+  or "Propose: …" for a code change, it is a **change**.
 - **skip**: no answer needed (a thank-you, an emoji, a bot summary repeated inline):
   `CLI pr reply --target TARGET --item <id> --skip "<why>"`.
 
@@ -59,12 +78,19 @@ Write `RUN/pr-feedback.json`:
 {"changes": [{"id": "PR-1", "items": ["<comment id>", "ci:<sha>:<check>"], "what": "<the change, one line>",
               "files": ["path"], "device": false}],
  "answered": ["<id>"], "skipped": ["<id>"],
- "ask_user": [{"items": ["<id>"], "question": "<one line, with the options>"}],
+ "ask_user": [{"items": ["<id>"], "reason": "product|breaks_ac|large_scope|second_disagreement",
+               "recommendation": "<the option you would take, and why>", "question": "<one line, with the options>"}],
  "rerequest": ["<login of a reviewer who requested changes, when all their items are changes>"]}
 ```
 
 `device: true` only when the change alters what a screen shows or how it behaves at runtime.
-Group items that need the same edit into one change.
+Group items that need the same edit into one change. Use only these keys (no other lists such as
+"pending" or "fixed"): every inbox item and check is in exactly one of them.
+
+Before returning, run `CLI pr feedback --target TARGET`. It checks every item is decided once, that
+`answered`/`skipped` items were really posted, and that each `ask_user` has an allowed `reason` and a
+`recommendation`. `invalid` → fix what its `errors` list (most often: turn the `ask_user` into a
+`change`, or post the reply) and run it again; return only once it says `ok`.
 
 ## Mode `reply`
 
@@ -133,4 +159,5 @@ re-requested. Mode `review`: replies / skipped / ask_user counts, `verdict_chang
 
 Edit source (the Implementer does), commit, push, merge, resolve a thread yourself (mode `review`
 only proposes `resolve`; on our own PR never), re-run a check twice,
-argue past one reply (a second disagreement is `ask_user`), or post anything for an `ask_user` item.
+argue past one reply (a second disagreement is `ask_user`), post anything for an `ask_user` item, or
+send the developer a code question you can settle by reading the code (that is a `change` or an `answer`).

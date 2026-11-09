@@ -237,9 +237,14 @@ CLI status|list --target T                          CLI clean --target T [--tick
     with the default `--timeout 540` and a 10-minute command timeout; `timed_out` → run it again.
     - `respond`: `CLI log --stage "PR Watcher" --status started --note "<n> comment(s), <m> check(s)"`,
       spawn `aw-pr-watcher` mode `triage`. It answers questions on the PR itself and returns the
-      `changes`, `ask_user` and CI verdicts (`RUN/pr-feedback.json`).
-      `ask_user` → ask the developer in one message (the rest goes on); their answer becomes a change,
-      or a reply through `CLI pr reply`.
+      `changes`, `ask_user` and CI verdicts (`RUN/pr-feedback.json`). Then run
+      `CLI pr feedback --target TARGET`; `invalid` → resume the watcher with its `errors`, never pass
+      them to the developer. Review comments are acted on without asking: every `change` goes into the
+      fix round below with no confirmation, and is answered on its thread once pushed.
+      `ask_user` (only `product`, `breaks_ac`, `large_scope` or `second_disagreement`, each with the
+      watcher's `recommendation`) → one message listing them with the recommendation as the default
+      choice, while the changes go on in parallel; the answer becomes a change, or a reply through
+      `CLI pr reply`. Never ask "should I apply these comments?".
       `changes` → a fix round on the same Implementer (IDs `PR-1`…, `RUN/pr-feedback.json`), then the
       gate and a delta Reviewer in parallel (`CLI next`, same limits), then Device `after` only when a
       change has `device: true` (when `next` asks for the device and none has it, do not spawn it); otherwise `CLI finish --target TARGET --keep-device "<why nothing

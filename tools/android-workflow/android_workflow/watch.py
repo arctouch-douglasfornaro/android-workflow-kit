@@ -860,7 +860,87 @@ def merge(target: Path, number: int | None = None) -> tuple[dict[str, Any], int]
     return {"status": "merged", "pr": watch["pr"]["number"], "url": watch["pr"]["url"], "method": method}, 0
 
 
+FEEDBACK_FILE = "pr-feedback.json"
+FEEDBACK_KEYS = {"changes", "answered", "skipped", "ask_user", "rerequest"}
+# The only reasons a review comment goes to the developer instead of being fixed or answered.
+ASK_REASONS = {
+    "product": "a product, copy or UX behaviour that the ticket, its AC and the design leave open",
+    "breaks_ac": "doing it would undo an acceptance criterion",
+    "large_scope": "a new feature or a redesign well outside this change set",
+    "second_disagreement": "the reviewer disagreed again after one reply with evidence",
+}
+
+
+def check_feedback(target: Path) -> tuple[dict[str, Any], int]:
+    """Validate `pr-feedback.json` against the inbox: every item is decided exactly once, answered and
+    skipped items were really posted/marked, and every `ask_user` names an allowed reason and the
+    watcher's own recommendation. Errors go back to the watcher, never to the developer."""
+    agent_dir = run_dir(target)
+    feedback = _read(agent_dir / FEEDBACK_FILE)
+    inbox = _read(agent_dir / INBOX_FILE)
+    watch = load_watch(agent_dir)
+    errors: list[str] = []
+    if not feedback:
+        return {"status": "invalid", "errors": [f"{FEEDBACK_FILE} is missing or empty"]}, 1
+    unknown = sorted(set(feedback) - FEEDBACK_KEYS)
+    if unknown:
+        errors.append(f"unknown keys {unknown}: only {sorted(FEEDBACK_KEYS)} (an item already fixed is "
+                      "`answered`: reply with the commit now)")
+    decided: dict[str, list[str]] = {}
+
+    def note(item_id: str, where: str) -> None:
+        decided.setdefault(str(item_id), []).append(where)
+
+    for change in feedback.get("changes") or []:
+        if not str(change.get("what") or "").strip():
+            errors.append(f"change {change.get('id')} has no `what`")
+        for item_id in change.get("items") or []:
+            note(item_id, f"change {change.get('id')}")
+    for key in ("answered", "skipped"):
+        for item_id in feedback.get(key) or []:
+            note(item_id, key)
+            if not str(item_id).startswith("ci:") and str(item_id) not in (watch.get("handled") or {}):
+                errors.append(f"{item_id} is `{key}` but nothing was posted: run `CLI pr reply --item {item_id} "
+                              + ("--body …`" if key == "answered" else "--skip …`"))
+    asks = feedback.get("ask_user") or []
+    for ask in asks:
+        items = ask.get("items") or []
+        for item_id in items:
+            note(item_id, "ask_user")
+        reason = ask.get("reason")
+        if reason not in ASK_REASONS:
+            errors.append(f"ask_user {items}: `reason` must be one of {sorted(ASK_REASONS)}; anything else is "
+                          "a `change` (or one `answer` with evidence when you disagree)")
+        if not str(ask.get("recommendation") or "").strip():
+            errors.append(f"ask_user {items}: `recommendation` is missing: say which option you would take and why")
+    comments = [item for item in inbox.get("items") or [] if item.get("kind") in {"thread", "comment", "review"}]
+    for item in comments:
+        where = decided.get(item["id"]) or []
+        if not where:
+            errors.append(f"{item['id']} ({item.get('author')}) has no decision")
+        elif len(where) > 1:
+            errors.append(f"{item['id']} is decided twice: {where}")
+    for check in inbox.get("ci") or []:
+        verdict = (watch.get("ci") or {}).get(check["id"])
+        if not verdict:
+            errors.append(f"check {check.get('name')} has no verdict: `CLI pr ci --check … --as …`")
+        elif verdict == "ours" and "change" not in " ".join(decided.get(check["id"]) or []):
+            errors.append(f"check {check.get('name')} is `ours` but no change lists {check['id']}")
+    result: dict[str, Any] = {
+        "status": "invalid" if errors else "ok",
+        "changes": len(feedback.get("changes") or []),
+        "answered": len(feedback.get("answered") or []),
+        "skipped": len(feedback.get("skipped") or []),
+        "ask_user": len(asks),
+    }
+    if errors:
+        result["errors"] = errors
+    return result, 1 if errors else 0
+
+
 def dispatch(target: Path, args: Any) -> tuple[dict[str, Any], int]:
+    if args.action == "feedback":
+        return check_feedback(target)
     if args.action == "status":
         return status(target, args.pr), 0
     if args.action == "wait":
