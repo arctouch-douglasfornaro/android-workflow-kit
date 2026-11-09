@@ -2173,6 +2173,21 @@ def write_delivery(agent_dir: Path, spec: dict[str, Any], state: dict[str, Any])
 STAGE_LOG_DEDUPE_SECONDS = 15
 
 
+def last_stage_log_time(agent_dir: Path) -> float | None:
+    """When the run's stage log got its latest row (epoch), or None."""
+    try:
+        lines = (agent_dir / "stage-log.md").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        logged = line[2:].partition(" ")[0]
+        try:
+            return datetime.strptime(logged, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+        except ValueError:
+            continue
+    return None
+
+
 def append_stage_log(
     agent_dir: Path,
     stage: str,
@@ -2660,6 +2675,8 @@ def _log_stage(
         spec = read_json(spec_path) if spec_path.is_file() else {}
         if spec.pop("replan", None):  # the Planner finished with the developer's answers
             write_json(spec_path, spec)
+    # A round that ends without a `started` counts from the last event: read it before this one is logged.
+    previous_event = last_stage_log_time(agent_dir)
     append_stage_log(agent_dir, stage, status, actor, note, role=shown)
     # A Device round ending keeps the device: it stays this run's until `finish` (the next round
     # finds this run's build and flows on it, and no other run installs in between).
@@ -2709,7 +2726,10 @@ def _log_stage(
         if duplicate:
             seconds = None
         elif seconds is None:
-            seconds = since if since is not None else (now - int(state["updated_at"]) if state.get("updated_at") else None)
+            # No `started`: the gap since the last recorded event (a stage-log row, e.g. the PR Watcher's
+            # `sync`, or a state change), never the hours the run sat waiting before that.
+            last_event = max(previous_event or 0, float(state.get("updated_at") or 0))
+            seconds = since if since is not None else (max(now - last_event, 0) if last_event else None)
     if wait_seconds and seconds is not None:
         seconds = max(seconds - wait_seconds, 0)
     source = "reported" if tokens is not None else None

@@ -43,5 +43,27 @@ class RunStatusTests(unittest.TestCase):
         self.assertEqual(office.run_status(self.run, {"status": "completed", "finished_at": 100}), ("completed", 100.0))
 
 
+class ActiveTimeTests(unittest.TestCase):
+    def test_waiting_with_nobody_at_work_does_not_count(self) -> None:
+        work = {"Orchestrator": [[0.0, None]], "Implementer": [[10.0, 70.0]], "Reviewer": [[50.0, 100.0]],
+                "PR Watcher": [[1000.0, 1010.0]]}
+        self.assertEqual(office._active(work), {"seconds": 100.0, "since": None})
+
+    def test_an_agent_at_work_keeps_the_clock_open(self) -> None:
+        work = {"Implementer": [[10.0, 20.0]], "Quality gate": [[100.0, None]], "Reviewer": [[110.0, 120.0]]}
+        self.assertEqual(office._active(work), {"seconds": 10.0, "since": 100.0})
+
+    def test_a_round_logged_only_at_its_end_ran_since_the_event_before(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp)
+            (run / "stage-log.md").write_text(
+                "| 2026-11-09T13:53:09Z | PR Watcher | started | host | watching |\n"
+                "| 2026-11-09T13:53:22Z | PR Watcher | wait | cli | checks running |\n"
+                "| 2026-11-09T16:37:00Z | PR Watcher | sync | cli | conflict |\n"
+                "| 2026-11-09T16:39:35Z | Implementer | completed | host | merge conflicts resolved |\n")
+            work = office._work(run, {}, [{"role": "PR Watcher", "state": "waiting"}], 0.0)
+            self.assertEqual(office._active(work)["seconds"], 13.0 + 155.0)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -157,37 +157,53 @@ def _timeline(run: Path, limit: int = 60) -> list[dict[str, str]]:
 ROLE_ALIASES = {"Triage": "Planner", "Localizer": "Planner", "Bootstrap": "Orchestrator", "Telemetry": "Orchestrator"}
 
 
-def _work(run: Path, state: dict[str, Any], desks: list[dict[str, Any]], now: float) -> dict[str, list[list[float | None]]]:
-    """When each agent was working, as [start, end] epoch intervals (end None = still working).
-
-    Built from `started` and the next event of the same role in the stage log. The office uses it to
-    keep working agents at their desk and to let the others follow their routine.
-    """
+def _events(run: Path) -> list[tuple[float, str, str, str]]:
+    """The stage log as `(epoch, role, status, note)` rows, roles folded into the office's desks."""
     try:
         lines = (run / "stage-log.md").read_text(encoding="utf-8").splitlines()
     except OSError:
-        lines = []
-    events: list[tuple[float, str, str]] = []
+        return []
+    events: list[tuple[float, str, str, str]] = []
     for line in lines:
-        match = re.match(r"^\| (\S+Z) \| (.+?) \| (.+?) \|", line)
+        match = re.match(r"^\| (\S+Z) \| (.+?) \| (.+?) \| (?:.+?) \| (.*?) \|$", line)
         if not match:
             continue
         try:
             stamp = datetime.strptime(match.group(1), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
         except ValueError:
             continue
-        events.append((stamp, ROLE_ALIASES.get(match.group(2), match.group(2)), match.group(3)))
+        role = ROLE_ALIASES.get(match.group(2), match.group(2))
+        events.append((stamp, role, match.group(3), match.group(4).replace("\\|", "|")))
+    return events
+
+
+def _work(run: Path, state: dict[str, Any], desks: list[dict[str, Any]], now: float,
+          events: list[tuple[float, str, str, str]] | None = None) -> dict[str, list[list[float | None]]]:
+    """When each agent was working, as [start, end] epoch intervals (end None = still working).
+
+    Built from `started` and the next event of the same role in the stage log. The office uses it to
+    keep working agents at their desk and to let the others follow their routine. A desk can say when
+    an agent that never logged its end stopped (`ended_at`, e.g. Setup once the profile is written).
+    """
+    events = _events(run) if events is None else events
     states = {desk["role"]: desk["state"] for desk in desks}
+    ended = {desk["role"]: desk["ended_at"] for desk in desks if desk.get("ended_at")}
     work: dict[str, list[list[float | None]]] = {}
     open_at: dict[str, float] = {}
-    for stamp, role, status in events:
+    previous: float | None = None
+    for stamp, role, status, _note in events:
         if status in WORKING:
             open_at.setdefault(role, stamp)
         elif role in open_at:
             work.setdefault(role, []).append([open_at.pop(role), stamp])
+        elif status == "completed" and role != "Orchestrator" and previous is not None and stamp > previous:
+            # A round logged only at its end (a PR fix, a conflict): it ran since the event before it.
+            work.setdefault(role, []).append([previous, stamp])
+        previous = stamp
     last = events[-1][0] if events else now
     for role, start in open_at.items():
-        work.setdefault(role, []).append([start, None if states.get(role) == "working" else last])
+        end = None if states.get(role) == "working" else max(start, min(ended.get(role, last), last))
+        work.setdefault(role, []).append([start, end])
     for role, desk_state in states.items():  # working without a `started` row (an older run)
         if desk_state == "working" and not any(end is None for _, end in work.get(role, [])):
             work.setdefault(role, []).append([float(state.get("updated_at") or now), None])
@@ -196,6 +212,42 @@ def _work(run: Path, state: dict[str, Any], desks: list[dict[str, Any]], now: fl
         live = (state.get("status") or "") not in {"completed", "idle"}
         work["Orchestrator"] = [[float(created), None if live else last]]
     return work
+
+
+def _active(work: dict[str, list[list[float | None]]]) -> dict[str, float | None]:
+    """The run's working time: the union of every agent's working stretches (the Orchestrator's own whole-run
+    stretch left out). Waiting on CI, a reviewer or the developer, with nobody at work, does not count.
+
+    `seconds` is the closed part; `since` is the start of the stretch still open (an agent is working now)."""
+    spans = sorted((float(start), end) for role, items in work.items() if role != "Orchestrator"
+                   for start, end in items if start is not None)
+    seconds, since = 0.0, None
+    cur_start: float | None = None
+    cur_end: float | None = None
+    for start, end in spans:
+        if cur_start is not None and (cur_end is None or start <= cur_end):
+            cur_end = None if cur_end is None or end is None else max(cur_end, float(end))
+            continue
+        if cur_start is not None and cur_end is not None:
+            seconds += cur_end - cur_start
+        cur_start, cur_end = start, (None if end is None else float(end))
+    if cur_start is not None:
+        if cur_end is None:
+            since = cur_start
+        else:
+            seconds += cur_end - cur_start
+    return {"seconds": round(seconds, 3), "since": since}
+
+
+def _setup_finished_at(target: Path) -> float | None:
+    """When Setup last wrote a complete project profile (`_setup/profile-state.json`), if it did."""
+    path = workflow_root(target) / "_setup" / "profile-state.json"
+    if not _json(path).get("complete"):
+        return None
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return None
 
 
 def _link(path: Path, page_dir: Path) -> dict[str, Any]:
@@ -257,7 +309,9 @@ def _desk_state(stage: str, entry: dict[str, Any], route: list[str], gate: dict[
     if status == "completed":
         if stage == "T6" and (review.get("status") != "approved" or review.get("blocking")):
             return "failed"
-        if stage == "T7" and str(entry.get("verdict") or "pass") not in {"pass", "passed"}:
+        verdict = str(entry.get("verdict") or "pass")
+        # A PARTIAL device check the developer accepted (`finish --accept-partial`) shipped: it is done.
+        if stage == "T7" and verdict not in {"pass", "passed"} and not (verdict == "partial" and entry.get("accepted")):
             return "failed"
         return "done"
     if status == "awaiting_host":
@@ -351,6 +405,11 @@ def collect(target: Path, ticket: str | None = None, page_dir: Path | None = Non
     route = list(spec.get("route") or [])
     team = _team(run, stages)
     team_slices = {item["id"] for item in (team or {}).get("slices") or []}
+    events = _events(run)
+    last_event = {role: (stamp, status, note) for stamp, role, status, note in events}
+    accepted_partial = bool(state.get("device_partial")) or any(
+        role == "Device" and status == "accepted" for _, role, status, _ in events)
+    setup_done = _setup_finished_at(target)
     desks = []
     for stage, role, kind, colour in DESKS:
         if stage in TEAM_ROLES and (not team or (stage.startswith("T4:") and stage[3:] not in team_slices)):
@@ -363,15 +422,29 @@ def collect(target: Path, ticket: str | None = None, page_dir: Path | None = Non
             state_name = _desk_state("T4", entry, route + ["T4"], gate, review)
         else:
             entry = stages.get(stage) or {}
+            if stage == "T7" and accepted_partial:
+                entry = {**entry, "accepted": True}
             measured = measured_stages.get(stage) or {}
             state_name = _desk_state(stage, entry, route + (["T4L"] if team else []), gate, review)
         note = entry.get("note") or entry.get("reason") or ""
+        ended_at = None
+        since = measured.get("running_since")
+        if stage == "T0" and state_name == "working" and setup_done and setup_done >= float(since or 0):
+            # Setup wrote a complete profile but never logged `completed`: it finished then.
+            state_name, note, ended_at = "done", "project profile ready", setup_done
+        if stage == "T10" and state_name == "working":
+            # The watcher's agent logs `started` once and then only polls: between its turns (the last
+            # PR Watcher row is a `wait`, `sync`…) it waits on CI or a reviewer, not working.
+            stamp, status, last_note = last_event.get(role, (0.0, "started", ""))
+            if status not in WORKING:
+                state_name, note = "waiting", last_note or note
         if stage == "T5" and state_name == "working" and not _alive(entry.get("pid")):
             # The gate was killed (a host's command timeout): it is not running any more.
             state_name, note = "failed", "the gate stopped before it finished"
-        if stage == "T5" and gate.get("status") and gate["status"] != "not_run":
+        if stage == "T5" and state_name == "working":
+            note = entry.get("note") or "running the checks"  # not the previous run's verdict
+        elif stage == "T5" and gate.get("status") and gate["status"] != "not_run":
             note = note or f"gate {gate['status']}"
-        since = measured.get("running_since")
         desks.append({
             "stage": stage, "role": role, "kind": kind, "colour": colour,
             "state": state_name,
@@ -379,6 +452,7 @@ def collect(target: Path, ticket: str | None = None, page_dir: Path | None = Non
             "seconds": measured.get("wall_time_seconds"),
             "tokens": measured.get("tokens"),
             "running_since": since if state_name == "working" and isinstance(since, (int, float)) else None,
+            "ended_at": ended_at,
         })
     running = run_is_live(run, current=ticket == current)
     shown_status, stopped_at = run_status(run, state)
@@ -399,6 +473,7 @@ def collect(target: Path, ticket: str | None = None, page_dir: Path | None = Non
         }
     elif live_tokens:  # a finished run an agent works on again (Delivery after `finish`): count it too
         totals = {**totals, "tokens": (totals.get("tokens") or 0) + live_tokens, "tokens_live": True}
+    work = _work(run, state, desks, now, events)
     pr = delivery.get("pr") or {}
     draft = state.get("draft") or {}
     # A snapshot (a run the app has moved on from) never follows the run live.
@@ -433,7 +508,9 @@ def collect(target: Path, ticket: str | None = None, page_dir: Path | None = Non
                   if path.is_file() and "media" not in path.relative_to(run).parts
                   and path.name not in {OFFICE_NAME, DATA_NAME, f"{Path(OFFICE_NAME).stem}.tmp"}
                   and not path.name.endswith(".tmp") and not path.name.startswith(".")],
-        "work": _work(run, state, desks, now),
+        "work": work,
+        # The Orchestrator's clock: time some agent was working, not the hours spent waiting on CI or people.
+        "active": _active(work),
         # Only the run that is going right now keeps updating; a past run's page is a snapshot.
         "live": live,
     })
@@ -935,7 +1012,7 @@ const now = () => Date.now() / 1000;
 function liveSeconds(desk) {
   if (!desk) return null;
   let since = desk.running_since;
-  if (since == null && desk.state === "working" && live()) {
+  if (since == null && desk.state === "working" && live() && desk.stage !== "boss") {
     const open = ((DATA.work || {})[desk.role] || []).find(([, e]) => e == null);
     if (open) since = open[0];
   }
@@ -970,16 +1047,22 @@ const chip = (s, label) => `<span class="chip ${esc(String(s).toLowerCase().spli
 
 function bossDesk() {
   const s = DATA.status || "idle";
-  const state = s === "completed" ? "done" : s === "escalated" ? "failed" : s === "paused" ? "waiting" : s === "idle" ? "idle" : "working";
   const current = (DATA.desks || []).find(d => d.stage === DATA.current);
   const busy = (DATA.desks || []).filter(d => d.state === "working").map(d => d.role);
+  // Running with nobody at work (CI, a reviewer, the developer): the Orchestrator waits too.
+  const state = s === "completed" ? "done" : s === "escalated" ? "failed" : s === "paused" ? "waiting" : s === "idle" ? "idle"
+    : busy.length ? "working" : "waiting";
   const note = s === "paused" ? `Waiting for your answer: ${DATA.question || ""}`
     : busy.length ? `Coordinating · now ${busy.length > 2 ? `${busy.length} agents` : busy.join(" + ")}`
     : s === "completed" ? (DATA.pr ? ((DATA.draft || []).length ? "Draft PR delivered" : "PR delivered") : "Run finished")
+    : (DATA.desks || []).some(d => d.role === "PR Watcher" && d.state === "waiting") ? "Waiting on the PR"
     : current ? `Coordinating · next ${current.role}` : "";
-  const running = live() && !DATA.totals_final && DATA.created_at;
+  // Its clock is the time some agent worked (`active`); older data without it falls back to the wall clock.
+  const active = DATA.active;
+  const running = !active && live() && !DATA.totals_final && DATA.created_at;
   return { stage: "boss", role: "Orchestrator", kind: "agent", colour: "#d4a72c", state, note,
-    seconds: running ? 0 : (DATA.totals || {}).wall_time_seconds, running_since: running ? DATA.created_at : null,
+    seconds: active ? active.seconds : running ? 0 : (DATA.totals || {}).wall_time_seconds,
+    running_since: active ? active.since : running ? DATA.created_at : null,
     tokens: (DATA.totals || {}).tokens, tokens_live: (DATA.totals || {}).tokens_live };
 }
 const desks = () => DATA.ticket ? [bossDesk(), ...(DATA.desks || [])] : [];
