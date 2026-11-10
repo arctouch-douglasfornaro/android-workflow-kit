@@ -167,6 +167,12 @@ CLI gate | prebuild | device … | emulator … | log …  --target WT         (
   overlapping, no change) is posted as the text fix and listed under `suggestions_as_text` in the draft result.
 - **Post**: one review via `POST /repos/{o}/{r}/pulls/{n}/reviews` pinned to the reviewed commit;
   refused when the draft changed since the OK or the PR head moved. The PR is never merged from this mode.
+- **Others' comments**: `pr-context.json` carries `other_threads` (inline threads others opened, open
+  first, max 40) and `discussion` (PR comments and review bodies, max 30). A finding may repeat a point
+  from one of them with more detail (`thread` → the comment links it); `replies` (agree, disagree,
+  still_open, addressed; max 5) are listed in the draft under *Replies in others' threads*, posted as
+  thread replies right after the review with the same OK (`edit --drop R1` / `--set R1 "text"`),
+  recorded as they land (a retry never posts twice) and never resolve the thread.
 - **Resolving threads**: only threads **we opened**, only with the developer's OK, never on a thread
   of another reviewer. Two ways: (1) a delta round — the Reviewer marks each of our earlier threads
   `addressed`; the addressed ones are listed in the draft under *Threads to resolve* and resolved

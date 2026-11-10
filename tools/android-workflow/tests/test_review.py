@@ -200,6 +200,26 @@ class PureRuleTests(unittest.TestCase):
         self.assertEqual(review.manual_comments(pr, "bob", {**state, "manual_seen": ["c_manual", "pc1"]}), [])
         self.assertEqual(review.manual_comments(pr, "bob", {}), [])
 
+    def test_others_threads_and_discussion_leave_ours_out(self) -> None:
+        def note(login: str, body: str, kind: str = "User", **extra: str) -> dict:
+            return {"author": {"__typename": kind, "login": login}, "body": body, "url": f"u/{body}", **extra}
+
+        pr = {"reviewThreads": {"nodes": [
+            {"id": "T1", "isResolved": True, "path": "A.kt", "line": 3, "comments": {"nodes": [note("carol", "old")]}},
+            {"id": "T2", "isResolved": False, "path": "A.kt", "line": 4,
+             "comments": {"nodes": [note("dave", "why?"), note("bob", "agreed")]}},
+            {"id": "T3", "isResolved": False, "comments": {"nodes": [note("bob", "ours")]}}]},
+            "comments": {"nodes": [note("ci[bot]", "coverage 80%", "Bot", createdAt="2026-01-02"),
+                                   note("bob", "mine", createdAt="2026-01-01")]},
+            "reviews": {"nodes": [note("carol", "LGTM", state="APPROVED", submittedAt="2026-01-01"),
+                                  note("dave", "", state="COMMENTED")]}}
+        threads = review.other_threads(pr, "bob")
+        self.assertEqual([t["id"] for t in threads], ["T2", "T1"])  # open first, ours left out
+        self.assertEqual(threads[0]["replies"], [{"author": "bob", "ours": True, "body": "agreed"}])
+        talk = review.discussion(pr, "bob")
+        self.assertEqual([(d["author"], d["kind"], d["bot"]) for d in talk],
+                         [("carol", "review", False), ("ci[bot]", "comment", True)])
+
     def test_comment_cap_is_clamped(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             target = Path(folder)
@@ -403,6 +423,45 @@ class FlowTests(unittest.TestCase):
         self.assertTrue(comment["body"].endswith("````suggestion\n  fun load() = 2 // ```\n````"))
         self.assertTrue(edited["draft_id"])
         self.assertNotIn("start_line", value["comments"][0])  # the developer's text dropped the suggestion
+
+    def test_others_threads_back_a_finding_and_get_replies(self) -> None:
+        threads = [{"id": "T_carol", "path": REPO, "line": 5, "resolved": False, "outdated": False, "author": "carol",
+                    "comment": "cache() looks stale", "url": "https://x/t1", "replies": []},
+                   {"id": "T_done", "path": REPO, "line": 4, "resolved": True, "outdated": False, "author": "dave",
+                    "comment": "rename", "url": "https://x/t2", "replies": []}]
+        findings = {"status": "approved", "acceptance": [], "blocking": [], "concerns": [
+            {"id": "C1", "file": REPO, "line": 5, "problem": "cache() never expires after logout", "fix": "clear it",
+             "thread": "T_carol"}],
+            "replies": [{"thread": "T_carol", "stance": "agree", "body": "Agreed, and logout keeps it too."},
+                        {"thread": "T_done", "stance": "agree", "body": "late"},
+                        {"thread": "T_nope", "body": "x"}]}
+        with Project(self.CHANGE) as project:
+            worktree = self.run_to_draft(project, findings)
+            agent_dir = review.agent_dir_for(worktree)
+            context = read_json(agent_dir / review.CONTEXT_FILE)
+            (agent_dir / review.CONTEXT_FILE).write_text(json.dumps({**context, "other_threads": threads}))
+            drafted = review.draft(worktree)
+            value = read_json(agent_dir / review.DRAFT_FILE)
+            shown = (agent_dir / review.DRAFT_MD).read_text()
+            ask = review.next_action(worktree)
+            with mock.patch.object(review, "fetch_pr", return_value=fake_pr(project.head)), \
+                    mock.patch("android_workflow.watch._gh") as gh, \
+                    mock.patch("android_workflow.watch._graphql") as graphql:
+                gh.return_value = subprocess.CompletedProcess([], 0, json.dumps({"id": 1, "html_url": "u"}), "")
+                graphql.return_value = {"addPullRequestReviewThreadReply": {"comment": {"id": "c9", "url": "https://x/r"}}}
+                posted = review.post(worktree, drafted["draft_id"])
+                again = review.post(worktree, drafted["draft_id"])
+            state = read_json(agent_dir / review.STATE_FILE)
+        self.assertIn("_Also raised in [this thread](https://x/t1)", value["comments"][0]["body"])
+        self.assertEqual([r["thread"] for r in value["thread_replies"]], ["T_carol"])
+        self.assertEqual({d["reason"] for d in drafted["replies_dropped"]}, {"thread already resolved", "unknown thread"})
+        self.assertIn("## Replies in others' threads (1)", shown)
+        self.assertIn("1 reply(ies) in others' threads", ask["question"])
+        self.assertEqual(graphql.call_count, 1)  # the retry posts nothing twice
+        self.assertEqual(graphql.call_args.kwargs["thread"], "T_carol")
+        self.assertEqual(posted["thread_replies"], [{"id": "R1", "url": "https://x/r"}])
+        self.assertEqual(again["status"], "already_posted")
+        self.assertEqual(len(state["thread_replies"]), 1)
 
     def test_a_blocking_finding_requests_changes_and_flags_security(self) -> None:
         with Project(self.CHANGE) as project:
