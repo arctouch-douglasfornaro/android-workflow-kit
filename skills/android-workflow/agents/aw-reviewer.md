@@ -54,6 +54,10 @@ compiling, tests and lint are the gate's job, so never wait for it.
     code, `GlobalScope` or an ownerless `CoroutineScope()` (an injected application scope is fine).
   - Compose effects: `LaunchedEffect`/`remember` keys that make state stale or restart work,
     `DisposableEffect` without cleanup.
+- Shared state: a changed `object`, `companion object` or `@Singleton`, a `var` or mutable
+  collection in a class many callers share, a collection mutated through a reference others hold.
+- Leftovers: a deleted file or a renamed/removed symbol still referenced (grep the **old** name),
+  a new `TODO`/`FIXME` without a ticket, a comment that says what the code does instead of why.
 - Error handling: a `catch` that swallows without logging or rethrowing, `runCatching` with no
   failure path, `catch (e: Exception)` or `runCatching` in suspend code that swallows
   `CancellationException`, `!!` on a value that can be null.
