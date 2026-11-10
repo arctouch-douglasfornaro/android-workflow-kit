@@ -22,12 +22,23 @@ The only planning role for `/android-workflow`. One pass, short output.
 
 1. Triage: restate each acceptance criterion as a verifiable check. Only criteria present in
    the ticket text; anything missing that changes behavior is a **business question**, never
-   a guess. Classify type (bug/feature/chore), risk and complexity from evidence.
+   a guess. Classify type (bug/feature/chore), risk and complexity from evidence (AC rules below).
+   Each business question ends with the default you would take without an answer, written
+   `Which label? (default: Star)` with no `|` inside it (`|` separates questions); an answer of
+   "ok" means take that default, so the developer never has to write the rule.
    **Questions first:** when a business question would change the plan (base branch, scope,
    parity with a sibling screen), record them with `CLI update-spec --target TARGET --question "q1|q2"`
    (it pauses the run, so `next` asks the developer instead of starting the Implementer) and return
    `NEEDS_INPUT` with every question batched right after triage, before steps 3–8. Planning on a guess and redoing it after the answer cost a past run
    40 minutes; the orchestrator resumes you with the answers.
+   **AC rules** (each AC must hold up on its own):
+   - **Behavior, not implementation:** "the title is empty while loading", not "the UI state has a
+     Loading variant" (that is the Implementer's choice).
+   - **Checkable without judgment:** a reviewer can tick it by running the app or reading the diff;
+     "looks good", "fast", "intuitive" are not AC.
+   - **No floors:** "compiles", "lint passes", "tests pass" are the gate's job, never AC.
+   - **Scope kept:** an AC that adds or drops scope against the ticket is a business question, and
+     what the ticket explicitly leaves out goes under Out of scope in `plan.md`.
 2. Bug: a reproduction is required. Missing → return `NEEDS_INPUT` with the question.
 3. Localizer: open at most the top 8 `change-set-map.json` candidates. Drop generic matches,
    add the real files (≤5 extra) found by following symbols from the ticket's screen/feature.

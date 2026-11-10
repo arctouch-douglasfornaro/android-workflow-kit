@@ -43,7 +43,26 @@ compiling, tests and lint are the gate's job, so never wait for it.
   case (grep for it); copy-pasted blocks inside the diff.
 - Project best practices: every Blocking convention; deviations from a Code patterns row
   without a reason in the notes (state holder, DI, error handling, test style).
-- Security and privacy: secrets, logging PII, exported components, intent handling.
+- Side effects Android diffs hide (check the ones the diff touches):
+  - DI: a new `@Provides`/`@Binds` that collides with an existing binding, a changed scope
+    (`@Singleton` ↔ narrower) that changes every consumer's lifetime, a removed binding.
+  - Stored data: a Room schema change without a migration, a DTO/serializer change that breaks
+    reading old payloads, a renamed SharedPreferences/DataStore key (silent user data loss).
+  - Navigation: a route or argument changed without updating every `navigate(...)` caller and
+    the destination's parsing (deep links included).
+  - Flows and threading: `replay`/`buffer` or dispatcher changed, `runBlocking` in production
+    code, `GlobalScope` or an ownerless `CoroutineScope()` (an injected application scope is fine).
+  - Compose effects: `LaunchedEffect`/`remember` keys that make state stale or restart work,
+    `DisposableEffect` without cleanup.
+- Error handling: a `catch` that swallows without logging or rethrowing, `runCatching` with no
+  failure path, `catch (e: Exception)` or `runCatching` in suspend code that swallows
+  `CancellationException`, `!!` on a value that can be null.
+- Security and privacy: no secret, credential, keystore or `.env` file added; logging PII,
+  exported components, intent handling.
+- Hygiene: new user-facing strings in `strings.xml`, not hardcoded (translations follow the
+  project's own flow); no merge markers; no debug logs left behind.
+- Severity: data loss, a crash or a security hole (missing migration, renamed key, swallowed
+  cancellation, unsafe `!!`, a committed secret) is `blocking`; hygiene items are `concerns`.
 - Skip style nits the formatter owns.
 
 ## Writes
