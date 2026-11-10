@@ -41,12 +41,20 @@ every run, so prove each fact from a file; unknown stays empty.
    (its test tag, or that it has none), and the log source that shows analytics events (the tag or
    class that prints them, checked in code). Pin the AVD: `device.avd` (`emulator -list-avds`; the
    developer's choice, else the newest API), `device.event_log_source` (the tag or class) when it is known.
-5. **Code patterns** (≤25 rows, one exemplar `path:line` each). Read 2–3 recent, representative
+5. **JVM renders.** Only when the app uses Compose and its unit tests use Robolectric: find a test
+   with `@GraphicsMode(GraphicsMode.Mode.NATIVE)` and the base class it extends (its compose rule field),
+   and the app theme composable. Record `"render": {"base_class": "com.x.BaseComposeTest", "rule":
+   "composeTestRule", "theme": {"wrap": "AppTheme(darkTheme = $DARK) { $CONTENT }", "imports":
+   ["com.x.AppTheme"]}}` (no base class → leave it out: a generic `createComposeRule` is used). Then
+   `CLI render probe --target TARGET --module :feature:x` for the 1–3 modules with the most screens; it
+   records whether a render works there and how long it takes. A failed or slow probe keeps the device
+   for that module: never add a test dependency or a screenshot library to make it pass.
+6. **Code patterns** (≤25 rows, one exemplar `path:line` each). Read 2–3 recent, representative
    features end to end rather than scanning everything. Cover: module layering, screen state
    (ViewModel/UiState/events), DI, repository/use case, errors and loading, navigation,
    resources/strings, feature flags, analytics, dispatchers, reusable UI components, test style
    (fakes vs mocks, naming, rules, Turbine, Robolectric), Compose previews/test tags.
-6. **Blocking conventions**: rules a reviewer must enforce (e.g. "no hardcoded strings",
+7. **Blocking conventions**: rules a reviewer must enforce (e.g. "no hardcoded strings",
    "use cases are single-method", "every screen has a preview").
 
 ## Writes

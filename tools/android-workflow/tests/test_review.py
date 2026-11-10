@@ -917,6 +917,50 @@ class TriageTests(unittest.TestCase):
         self.assertEqual([item["agent"] for item in checks["run"]], ["aw-media"])
 
 
+
+class RenderRouteTests(unittest.TestCase):
+    """Static UI the Planner proves with `evidence: render` is rendered on the JVM, not driven on a device."""
+
+    def test_static_ui_is_proved_by_renders_and_the_draft_says_so(self) -> None:
+        from android_workflow import render
+        from android_workflow.cli import source_fingerprint
+
+        with Project({SCREEN: "package com.example\n\n@Composable\nfun ProfileScreen() {}\n"}) as project:
+            result = project.start()
+            worktree, agent_dir = Path(result["worktree_path"]), Path(result["run"])
+            write_profile(worktree)
+            overrides = read_json(worktree / ".ai/android-workflow.json") if (worktree / ".ai/android-workflow.json").is_file() else {}
+            overrides["render"] = {"modules": {":app": {"ok": True, "seconds": 40}}}
+            (worktree / ".ai/android-workflow.json").write_text(json.dumps(overrides))
+            review.next_action(worktree)
+            (agent_dir / review.SPEC_FILE).write_text(json.dumps({"status": "ready", "acceptance": [
+                {"id": "AC1", "text": "The title reads Profile", "source": "pr_body", "evidence": "render"}]}))
+            log_stage(worktree, "Planner", "completed", "1 AC", "host")
+            checks = review.next_action(worktree)
+            self.assertNotIn("also", checks)  # no APK builds: nothing is installed
+            (agent_dir / "review.json").write_text(json.dumps({"status": "approved", "blocking": [],
+                                                               "acceptance": [{"id": "AC1", "status": "unverified"}]}))
+            log_stage(worktree, "Reviewer", "completed", "done", "host")
+            with mock.patch.object(review, "fetch_pr", return_value=fake_pr(project.head)):
+                review.ci(worktree)
+            spawn = review.next_action(worktree)
+            self.assertEqual((spawn["agent"], spawn["mode"], spawn["ac"]), ("aw-media", "render", ["AC1"]))
+            (agent_dir / "media/render").mkdir(parents=True, exist_ok=True)
+            (agent_dir / "media/render/title.png").write_bytes(b"png")
+            (agent_dir / render.REPORT_FILE).write_text(json.dumps({
+                "status": "passed", "module": ":app", "seconds": 41, "fingerprint": source_fingerprint(worktree),
+                "captures": [{"name": "title", "status": "rendered", "path": str(agent_dir / "media/render/title.png")}]}))
+            (agent_dir / render.REVIEW_FILE).write_text(json.dumps({"status": "pass", "acceptance": [
+                {"id": "AC1", "text": "The title reads Profile", "status": "met", "captures": ["title"]}]}))
+            self.assertEqual(render.verdict(worktree)["device_report"], "written")
+            self.assertEqual(review.next_action(worktree)["next"], "draft")
+            drafted = review.draft(worktree)
+            body = read_json(agent_dir / review.DRAFT_FILE)["body"]
+        self.assertEqual(drafted["event"], "APPROVE")
+        self.assertIn("not run — PASS from JVM renders", body)
+        self.assertIn("_(in a JVM render)_", body)
+
+
 class SignalTests(unittest.TestCase):
     CHANGE = FlowTests.CHANGE
 

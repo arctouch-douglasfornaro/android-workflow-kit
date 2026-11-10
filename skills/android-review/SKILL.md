@@ -82,6 +82,8 @@ CLI gate | prebuild | device … | emulator … | log …  --target WT         (
      `aw-media`; a `run` entry with `tier: standard` uses the standard tier: the `pr-delta` review, and a
      first-round `pr` review of a small diff with no risky area), run every `commands` entry, and start `also` in the background (base build and the
      PR-head APK when the PR changes UI).
+   - `fetch_design` / `spawn` with `with_agent` / `aw-media` mode `render`: as in android-workflow
+     (*Execute*); every `then` is `CLI review next --target WT`.
    - `wait_ci`: run `command` (polls up to 9 min), then `next`. `gate`: run `command` (long timeout).
    - `wait` / `wait_device` / `wait_prebuild` / `replay_before`: as in android-workflow.
    - `ask_user` with `question` list (Planner): ask once, `CLI review answer` each, then `next`.
@@ -155,6 +157,12 @@ CLI gate | prebuild | device … | emulator … | log …  --target WT         (
   `NavHost`, deep links), the manifest, Gradle/build logic, preferences/DataStore, `GlobalScope`,
   `runBlocking`, `CancellationException`, or a payment/auth word in a path. Otherwise strong.
   `pr-context.json` → `reviewer` keeps the tier and why.
+- **JVM renders** (same rules as android-workflow, *How visible AC are proved*): an AC with
+  `evidence: render` in `review-spec.json` is static UI a render proves. All visible AC `render` and the
+  render probe passed in the module → no device, no APK builds: `aw-media` mode `render` renders the PR
+  head and judges it, and the draft says "Device: not run — PASS from JVM renders". Device AC too → the
+  device runs and the renders run alongside (`with_agent`). No device → renders instead of "not verified".
+  A Figma link in the PR or ticket → `fetch_design` first. `CLI render prefer --mode device` turns it off.
 - **Media gate**: attachments are read only when the PR changes UI, an AC has `evidence: media`, or the
   device was required; otherwise `aw-media` does not run (`review-state.json` → `media_skipped`).
 - **Media** carry-over: a delta round keeps `media-review.json` (no `aw-media`) when the spec was kept

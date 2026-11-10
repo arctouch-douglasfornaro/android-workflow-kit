@@ -129,6 +129,9 @@ CLI pr ci --target T --check NAME --as ours|unrelated|rerun --reason "…"
 CLI finish … [--keep-device "why nothing visible changed"]     CLI deliver … [--keep-body]
 CLI evidence capture|ingest|compare|list --target T [--phase before|after] [--name N] [--file F]
 CLI device replay --target T [--serial S] [--phase before|after] [--install-base]   (runs the saved Maestro flows by code: `after` installs the current build, `before` the cached base APK)
+CLI render probe --target T --module :mod        (Setup: does a JVM render work in this module, and how fast)
+CLI render run|verdict|route --target T          (render RUN/render-request.json; record RUN/render-review.json; the route)
+CLI render prefer --target T --mode auto|device|render   CLI render design --target T --skip "why"
 CLI device scaffold|build|install|release --target T [--serial S]   (flow templates from the plan's recipe; the current APK with no device held; it installed on the device; give the device back)
 CLI status|list --target T                          CLI clean --target T [--ticket ID | --stale [HOURS]]
 ```
@@ -191,6 +194,16 @@ CLI status|list --target T                          CLI clean --target T [--tick
      was never logged, so `next` would wait forever). `wait_device` starting with `booting`: an
      emulator is starting for this run (`CLI emulator --wait`); otherwise it names the run holding each
      device and `CLI emulator --wait-free` returns once this run has one.
+   - `spawn` with `with_agent` (route `both`): spawn both in the same turn: `aw-device` for the AC that
+     need a running app and the `with_agent` (`aw-media` mode `render`) for `render_ac`, the states the
+     device does not reach. Tell the Device agent those AC are the renders' and not to spend its budget on them.
+   - `spawn` of `aw-media` mode `render` (route `render`, or no device): pass `ac`, `modules`, `design`,
+     `budget_seconds`; it writes `RUN/render-request.json`, runs `CLI render run`, judges the images and
+     runs `CLI render verdict` (in the `render` route that verdict is the device report). No emulator, no APK.
+   - `fetch_design`: the ticket links a Figma frame. With the Figma tool (MCP: `create_session`, then
+     `get_design_context` for each `links` entry; `get_screenshot` too when the host can save it as a file)
+     write each `writes` file as data: size, layout and spacing, colors, typography, texts. No Figma tool →
+     `CLI render design --target TARGET --skip "<why>"`. Then `next`.
    - `replay_before`: run `command` (the saved flows on the cached base APK, no agent: the `before`
      column the run could not capture earlier), then `next`.
    - `finish`: run `command` as is. With `draft`, the PR opens as a draft listing what is open.
@@ -298,6 +311,32 @@ Implementers of a team with each other (one owner per file).
   holding the device costs an `adb install`, not a Gradle build;
 - with 3 or more runs, keep `max_parallel_builds` at 2 (or 1) and close Android Studio: a cold
   build of a large app per run, plus emulators, swaps the machine.
+
+## How visible AC are proved (JVM render or device)
+
+Decided by code in `CLI next` (`android_workflow/render.py`), zero tokens. A **render** draws a
+composable with Android's real graphics in the unit-test JVM (Robolectric `GraphicsMode.NATIVE` +
+`captureToImage`), in 1–3 minutes, with no emulator: the generated test lives in `RUN/render/` and joins
+the module's test sources through a Gradle init script for that one call, so the repository is never
+written and the source fingerprint never moves. It is never proof of behavior.
+
+- **Off** until `CLI render probe` passed in a module within `render.budget_seconds` (240): with no probe
+  on record every route is the device, exactly as before. The probe result lives in
+  `.ai/android-workflow.json` → `render.modules`; `render.base_class`, `render.rule`, `render.theme`
+  (`{"wrap": "AppTheme(darkTheme = $DARK) { $CONTENT }", "imports": [...]}`) and `render.qualifiers`
+  come from Setup.
+- The Planner's `--proofs` (one per AC: `unit | render | device | both`) decide the **route**:
+  - `render`: every visible AC is `render` and no runtime surface (navigation, deep link, permissions,
+    lifecycle, notifications, WorkManager, Room migration, audio, analytics). No device `before`, no
+    APK, no emulator; the Render analyst's verdict becomes `device-report.md` (`Proof: JVM render`) and
+    its images go to `media/after/render-*.png`, so finish, the PR table and the office read it as usual.
+  - `both`: device AC and render AC. The device runs as before; the renders run in parallel (no wall
+    time added) for the states it cannot reach. A failing render is a fix round (`R1`).
+  - `device`: anything else, and whenever unsure.
+  - No device at all (none free or no SDK) and renders on: the renders prove what a screen shows
+    instead of nothing; device-only AC stay not verified (a PARTIAL the developer decides on).
+- The developer overrides with `CLI render prefer --mode device|render|auto` (`device` = never render).
+- A Figma link in the ticket → `fetch_design` once, and the Render analyst compares against it.
 
 ## Run files
 

@@ -66,6 +66,12 @@ Flows live in `RUN/media/flows/`, one per behavior in the plan's recipe (`<surfa
   before capture (a separate `_before` yaml, or `-e PHASE=before` with a `runFlow: when:`).
 - Recordings ≤15 s; at most one still per surface.
 
+## Renders alongside (`render_ac`)
+
+When the spawn names `render_ac`, those AC are proved by JVM renders running in parallel: do not try to
+reach them on the device and list them in Scenarios as `ACn …: covered by renders`. Spend the budget on
+the behavior only a running app shows.
+
 ## Inputs
 
 - `TARGET`, `RUN`, CLI, mode, `plan.md` (navigation recipe, device AC, `visual`).

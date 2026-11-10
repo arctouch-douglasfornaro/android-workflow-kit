@@ -211,6 +211,28 @@ Optional keys: `text` (your own line instead of the host's), `commit_trailer` (`
 `pull_request: false` or `review: false` (turn one side off). The host is read from its environment;
 `ANDROID_WORKFLOW_HOST=claude|codex|cursor|gemini` forces it. Today `quizlet-android` has it on.
 
+#### JVM renders: a device only when it is needed
+
+A visible change is proved on a device (5–15 min of emulator, two APK builds). For **static UI**
+(layout, colors, texts, empty/error/long-text/dark/font-scale/RTL states, or a screen not wired to any
+navigation yet) a **JVM render** proves it in 1–3 minutes with no emulator: Robolectric draws the
+composable with Android's real graphics inside the unit-test JVM. The workflow decides by code, per
+acceptance criterion, from the Planner's proof (`unit`, `render`, `device`, `both`):
+
+| Route | When | What runs |
+| --- | --- | --- |
+| `render` | every visible AC is static UI, no navigation/permission/lifecycle/event AC | renders only: no emulator, no APK; the PR table shows `render-*.png` |
+| `both` | some AC need a running app, some states the device cannot reach | the device as before, the renders in parallel (no time added) |
+| `device` | anything else, or unsure | the device, exactly as before |
+| no device | none free or no SDK | renders prove what a screen shows instead of "not verified" |
+
+It stays **off** until Setup runs `CLI render probe --module :feature:x` and the render works there
+within `render.budget_seconds` (240) — a slow or failing module keeps the device. The generated test
+lives in `RUN/render/` and joins the module's test sources only for that Gradle call (an init script),
+so nothing is ever written to or committed from the repository. With a Figma link in the ticket, the
+renders are compared with the frame. `CLI render prefer --mode device` turns it off for a run. The
+same rules apply in `/android-review` (`evidence: render`).
+
 ### 5. After the PR: the PR Watcher
 
 Once the PR is open the workflow keeps following it, so you only add the reviewers you want:

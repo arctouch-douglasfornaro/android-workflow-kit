@@ -19,6 +19,12 @@ Sources: [Compose tooling / Preview](https://developer.android.com/develop/ui/co
 2. If the profile **Preview screenshots** / **Screenshot** row names a task (`compose preview screenshot`, Roborazzi, Paparazzi, …): run **that** task. Do not add another screenshot library.
 3. If the row is empty / `none`: Preview is enough for the still. The Device stage may grab a frame. Do not introduce Compose screenshot testing, Roborazzi, or Paparazzi "while here".
 
+## JVM renders (android-workflow `CLI render`)
+
+When `.ai/android-workflow.json` → `render.modules` has a passing probe, a still of a composable comes
+from `CLI render run` (Robolectric native graphics, no emulator, nothing written to the repository),
+not from a hand-written test. Render the stateless composable with sample data; one state per AC state.
+
 ## Motion / interaction
 
 The Device stage + `device-driving` (Maestro). A Preview is not proof of a swipe or IME.

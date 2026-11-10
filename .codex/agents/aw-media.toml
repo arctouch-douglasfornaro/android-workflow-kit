@@ -1,5 +1,5 @@
 name = "aw-media"
-description = "android-review Media analyst: reads the screenshots and videos attached to the PR under review (videos as frames), checks each acceptance criterion is visibly shown and flags states the media leaves out or contradicts. Writes media-review.json. Never edits source or posts."
+description = "Media analyst: in android-review reads the screenshots and videos attached to the PR (videos as frames) and checks each acceptance criterion is visibly shown; in mode render (both workflows) draws the changed composables on the JVM with `CLI render` and judges them against the AC and the Figma design. Writes media-review.json or render-review.json. Never edits source or posts."
 model = "gpt-6.1-terra"
 model_reasoning_effort = "medium"
 developer_instructions = '''

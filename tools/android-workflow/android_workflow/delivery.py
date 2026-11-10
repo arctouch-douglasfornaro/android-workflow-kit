@@ -97,6 +97,13 @@ def pull_request_disclosures(gate: dict[str, Any], state: dict[str, Any], body: 
         )
     if state.get("device_partial") and "not verified" not in lower:
         lines.append(f"**Device:** partly verified; not verified on a device: {state['device_partial']}")
+    rendered = state.get("render") or {}
+    if rendered.get("verdict") in {"pass", "partial"} and "render" not in lower:
+        if rendered.get("mode") == "render":
+            lines.append("**Device:** not run: the visible AC were proved by JVM renders (Robolectric native "
+                         "graphics); the `render-*` captures show them.")
+        elif rendered.get("met"):
+            lines.append(f"**Render:** {', '.join(rendered['met'])} shown by JVM renders (states the device does not reach).")
     device = (state.get("stages") or {}).get("T7") or {}
     if device.get("status") == "skipped" and device.get("reason") not in (None, "not_required"):
         if "device" not in lower:

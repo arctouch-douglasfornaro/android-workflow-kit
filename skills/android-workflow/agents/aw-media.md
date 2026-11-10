@@ -1,6 +1,6 @@
 ---
 name: aw-media
-description: "android-review Media analyst: reads the screenshots and videos attached to the PR under review (videos as frames), checks each acceptance criterion is visibly shown and flags states the media leaves out or contradicts. Writes media-review.json. Never edits source or posts."
+description: "Media analyst: in android-review reads the screenshots and videos attached to the PR (videos as frames) and checks each acceptance criterion is visibly shown; in mode render (both workflows) draws the changed composables on the JVM with `CLI render` and judges them against the AC and the Figma design. Writes media-review.json or render-review.json. Never edits source or posts."
 tier: standard
 tools: Read, Grep, Glob, Bash, Write
 ---
@@ -34,6 +34,29 @@ android-review Media analyst. Read-only on source; runs while the Reviewer reads
 4. Every finding is about the screen, never about the person or data on it: real user or student
    data visible in the media (names, emails, photos) is never copied into a finding; when you see
    it, add one `concern`: "the attachment shows real user data; use a test account".
+
+## Mode `render` (Render analyst, android-workflow and android-review)
+
+No device: draw the changed composables on the JVM and judge them. Inputs: `ac` (the AC to prove),
+`modules` (where a render works), `design` (`RUN/design/*.md|png`, the Figma frame, when saved),
+`budget_seconds`, and the spec, plan and diff.
+
+1. Write `RUN/render-request.json`: `module` (one of `modules`, the one with the changed composable),
+   `imports` (FQCNs the content needs), `states` (≤6): `name` (lowercase slug), `ac` (ids), `content`
+   (one Kotlin call of a **stateless** composable with sample data: `ProfileHeader(title = "Profile",
+   progress = Progress(5, 20))`, never a ViewModel, DI or a `private` function), optional `dark`,
+   `font_scale`, `width_dp`, `qualifiers` (`+ldrtl`, `+sw600dp`). One state per AC state that matters
+   (empty, full, error, long text, dark), nothing else.
+2. `CLI render run --target TARGET`. `invalid` → fix the request. A failed state → read its `error` and
+   the `log_tail`, fix the call once; still failing → leave it out and say why. Never edit source.
+3. Open each image in `RUN/media/render/`. For each AC: `met` (name the captures), `unmet` (what the
+   image shows instead) or `unverified` (a render cannot show it: behavior, navigation, a state you could
+   not build). Look for clipped or overlapping text, wrong colors in dark mode, truncation at font scale 2.
+   With a `design`: compare size, spacing, colors, typography and texts; a mismatch is a `concern`
+   (blocking only when it breaks an AC).
+4. Write `RUN/render-review.json`: `status` (`pass` all met | `partial` some unverified | `fail` any
+   unmet), `acceptance` (`id`, `text`, `status`, `captures`, `note`), `findings` (`id` RF1…, `severity`,
+   `problem`, `fix`, optional `file`+`line`). Then `CLI render verdict --target TARGET`; fix what it rejects.
 
 ## Writes
 

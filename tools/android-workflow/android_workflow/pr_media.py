@@ -149,8 +149,9 @@ def files(agent_dir: Path, rows: list[dict[str, Any]]) -> list[str]:
 
 
 def unpaired(rows: list[dict[str, Any]]) -> list[str]:
+    # A JVM render has no before by design (`render-*`): it is never reported as missing its pair.
     return [f"{row['name']} ({'before' if row['before'] else 'after'} only)"
-            for row in rows if bool(row["before"]) != bool(row["after"])]
+            for row in rows if bool(row["before"]) != bool(row["after"]) and not row["name"].startswith("render-")]
 
 
 def apply(agent_dir: Path, body: str, spec: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:

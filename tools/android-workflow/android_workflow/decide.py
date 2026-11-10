@@ -275,7 +275,13 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
             return _answer("watch", "the PR is open", command="CLI pr wait --target TARGET", also=stop)
         return _answer("done", "the run is delivered", command="CLI status --target TARGET", also=stop)
 
-    if record and not no_device and "T7" in (spec.get("route") or []):
+    from android_workflow import render
+
+    # How the visible AC are proved (device, JVM renders, or both): decided by code once the Planner
+    # set the proofs; with no render probe on record it is always the device, as before.
+    proof = render.route(target, spec, state)
+    rendered_only = proof["mode"] == "render"
+    if record and not no_device and not rendered_only and "T7" in (spec.get("route") or []):
         _want_device(agent_dir)
     level = str(spec.get("level") or "standard")
     planner = stages.get("T3") or {}
@@ -317,7 +323,7 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
                       mode="integrate", note="integrate the slices")
     working = [sid for sid, item in (implementer.get("slices") or {}).items() if (item or {}).get("status") == "started"]
     if implementer.get("status") == "started" or working:
-        device = _device_before(target, agent_dir, spec, state, no_device, record)
+        device = _device_before(target, agent_dir, spec, state, no_device or rendered_only, record)
         if device:
             return device
         done = not working and not implementation_errors(target)
@@ -340,7 +346,8 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
             return _spawn("aw-implementer", "the team plan is ready: one Implementer per slice, in the same turn",
                           stage="Implementer", slices=ids, level=level, note="build its slice")
         return _spawn("aw-implementer", "write the change and the tests that prove it", stage="Implementer", level=level,
-                      note="implement the change and its unit tests", also=_background(spec, no_device, implementer=True))
+                      note="implement the change and its unit tests",
+                      also=_background(spec, no_device or rendered_only, implementer=True))
     if errors:
         return _spawn("aw-implementer", "the Implementer reported done but " + "; ".join(errors), stage="Implementer",
                       level=level, note="finish the change")
@@ -379,7 +386,8 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
             stage="Reviewer" if "reviewer" in todo else None,
             note=("delta review of the fix" if delta else "independent review of the diff") if "reviewer" in todo else None,
             also=["CLI device build --target TARGET (background: the APK the Device installs, built before it "
-                  "takes a device)"] if "gate" in todo and "T7" in (spec.get("route") or []) and not no_device else None,
+                  "takes a device)"] if "gate" in todo and "T7" in (spec.get("route") or []) and not no_device
+            and not rendered_only else None,
         )
 
     findings: list[str] = []
@@ -403,6 +411,14 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
                           sources=[name for name, bad in (("gate-report.json", gate_failed), ("review.json", review_failed)) if bad])
 
     route = spec.get("route") or []
+    if "T7" in route and rendered_only:
+        # Static UI only: JVM renders prove it and `CLI render verdict` writes the device report.
+        texts = [str((spec.get("ticket") or {}).get("title") or ""), str((spec.get("ticket") or {}).get("description") or "")]
+        pending = render.design_step(target, texts) or render.step(target, proof, record)
+        if pending:
+            return pending
+        state = load_state(target)
+        stages = state.get("stages") or {}
     if "T7" in route:
         device_state = stages.get("T7") or {}
         device_verdict = recorded_verdict(agent_dir, "T7")
@@ -411,6 +427,10 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
             late = _late_before(target, agent_dir, spec, state, record)
             if late:
                 return late
+        if device_now and device_verdict in {"pass", "partial"} and proof["mode"] == "both":
+            waiting_render = _render_for_both(target, agent_dir, spec, proof, team, review, fingerprint, state, record)
+            if waiting_render:
+                return waiting_render
         if device_now and device_verdict == "pass":
             return _finish(spec)
         if device_now and device_verdict == "partial":
@@ -432,19 +452,51 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
         if device_state.get("status") == "started":
             return _answer("wait", "the Device agent is working", agent="aw-device")
         if no_device:
+            if proof["mode"] == "both":
+                waiting_render = _render_for_both(target, agent_dir, spec, proof, team, review, fingerprint, state, record)
+                if waiting_render:
+                    return waiting_render
             return _finish(spec, skip="the developer asked for --no-device", no_device=True)
         serial, waiting, reason = _device_for(target, agent_dir, record)
         if waiting is not None:
             return waiting
         if serial:
-            return _spawn("aw-device", "the change passed the gate and the review: verify it on the device",
-                          stage="Device", mode="after", serial=serial,
-                          replay=_replay_hint(agent_dir),
-                          scaffold=None if flows_saved(agent_dir) else "CLI device scaffold --target TARGET",
-                          budget_seconds=AFTER_BUDGET_SECONDS,
-                          note="after: verify the AC on the device")
+            spawn = _spawn("aw-device", "the change passed the gate and the review: verify it on the device",
+                           stage="Device", mode="after", serial=serial,
+                           replay=_replay_hint(agent_dir),
+                           scaffold=None if flows_saved(agent_dir) else "CLI device scaffold --target TARGET",
+                           budget_seconds=AFTER_BUDGET_SECONDS,
+                           note="after: verify the AC on the device")
+            if proof["mode"] == "both" and render.verdict_now(target) is None:
+                # The states the device cannot reach are rendered meanwhile: no wall time added.
+                together = render.step(target, proof, record)
+                if together and together.get("next") == "spawn":
+                    spawn["with_agent"] = {key: together[key] for key in together if key not in {"next", "then"}}
+                    if proof.get("render_ac"):
+                        spawn["render_ac"] = proof["render_ac"]
+            return spawn
+        fallback = render.fallback(target, spec, state, f"no device: {reason}")
+        if fallback and render.verdict_now(target) is None:
+            return render.step(target, fallback, record)  # its verdict becomes the device report
         return _finish(spec, skip=f"no device: {reason}")
     return _finish(spec)
+
+
+def _render_for_both(target: Path, agent_dir: Path, spec: dict[str, Any], proof: dict[str, Any], team: dict[str, Any],
+                     review: dict[str, Any], fingerprint: str, state: dict[str, Any], record: bool) -> dict[str, Any] | None:
+    """`both`: the device passed; the renders of what it cannot reach must be judged too. A failing render
+    is a fix round like a failing device; a partial one is disclosed in the PR, never blocking."""
+    from android_workflow import render
+
+    current = render.verdict_now(target)
+    if current is None:
+        return render.step(target, proof, record)
+    if current == "fail":
+        if _fixed_before(agent_dir, fingerprint, float(state.get("created_at") or 0)):
+            return _draft("a fix round ended without changing the code", state)
+        return _fix_round(agent_dir, team, ["R1"], review, "a JVM render shows an AC unmet", fingerprint,
+                          sources=[render.REVIEW_FILE])
+    return None
 
 
 def _want_device(agent_dir: Path) -> None:

@@ -2405,6 +2405,18 @@ def update_spec(target: Path, args: argparse.Namespace) -> dict[str, Any]:
     spec["route"] = route_for(spec["type"], spec["complexity"], spec["risk"], spec["surfaces"])
     if getattr(args, "visual", None) is not None:
         spec["visual"] = args.visual == "yes"
+    if getattr(args, "proofs", None) is not None:
+        from android_workflow.render import PROOFS
+
+        marks = [item.strip().lower() for item in args.proofs.split("|") if item.strip()]
+        wrong = [item for item in marks if item not in PROOFS]
+        if wrong or len(marks) != len(spec.get("acceptance_criteria") or []):
+            raise ValueError(f"--proofs needs one of {'|'.join(PROOFS)} per AC "
+                             f"({len(spec.get('acceptance_criteria') or [])} AC, got {len(marks)}"
+                             + (f"; unknown: {', '.join(wrong)}" if wrong else "") + ")")
+        spec["proofs"] = marks
+    elif args.acceptance is not None:
+        spec.pop("proofs", None)  # new AC: their proofs are the Planner's to restate
     if getattr(args, "parallel_parts", None) is not None:
         spec["parallel_parts"] = max(int(args.parallel_parts), 1)
         spec["parallel_files"] = max(int(args.parallel_files or 0), 0)
@@ -3110,6 +3122,10 @@ def device_pass_unproven(target: Path, agent_dir: Path) -> str | None:
                 "Anomalies) with the last replay, then log again")
     if recorded_verdict(agent_dir, "T7") not in {"pass", "partial"} or MAESTRO_UNAVAILABLE.search(text):
         return None
+    from android_workflow.render import PROOF_LINE
+
+    if PROOF_LINE in text and (load_state(target).get("render") or {}).get("fingerprint") == source_fingerprint(target):
+        return None  # written by `CLI render verdict` from this source's renders, never by an agent
     replayed = read_json(agent_dir / "replay.json") if (agent_dir / "replay.json").is_file() else {}
     proven = replayed.get("fingerprint") == source_fingerprint(target) and any(
         (item or {}).get("status") == "passed" for item in replayed.get("flows") or [])
@@ -3678,6 +3694,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     spec_parser.add_argument("--parallel-parts", type=int, help="independent parts of the Parallel work (1 = single)")
     spec_parser.add_argument("--parallel-files", type=int, help="files across those parts")
     spec_parser.add_argument("--question", help="the Planner's NEEDS_INPUT, questions separated by |: pauses the run")
+    spec_parser.add_argument("--proofs", help="one proof per AC, in --acceptance order, separated by |: "
+                                              "unit | render | device | both")
     list_parser = subparsers.add_parser("list")
     list_parser.add_argument("--target", required=True, type=Path)
     clean_parser = subparsers.add_parser("clean")
@@ -3785,6 +3803,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     evidence_parser.add_argument("--kind", choices=("screenshot", "video"), default="screenshot")
     evidence_parser.add_argument("--seconds", type=int, default=8)
     evidence_parser.add_argument("--file", type=Path)
+    render_parser = subparsers.add_parser("render", help="JVM renders of Compose UI (Robolectric native graphics)")
+    render_parser.add_argument("action", choices=("probe", "run", "verdict", "route", "prefer", "design"))
+    render_parser.add_argument("--target", required=True, type=Path)
+    render_parser.add_argument("--module", help="probe: the Gradle module, e.g. :features:profile")
+    render_parser.add_argument("--mode", choices=("auto", "device", "render"), help="prefer: how visible AC are proved")
+    render_parser.add_argument("--skip", help="design: go on without the Figma design, and why")
     return parser.parse_args(argv)
 
 
@@ -4012,6 +4036,11 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
         if args.action in {"capture", "ingest"}:
             append_stage_log(run_dir(target), "T7", "completed", "cli", f"evidence {args.action} {args.name}")
         return result, 0
+    if args.command == "render":
+        from android_workflow.render import dispatch as dispatch_render
+
+        result = dispatch_render(target, args)
+        return result, 0 if result.get("status") not in {"invalid", "refused"} else 1
     raise ValueError(f"unknown command: {args.command}")
 
 

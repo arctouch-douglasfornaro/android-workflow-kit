@@ -1097,7 +1097,8 @@ def _decide(target: Path, record: bool, no_device: bool) -> dict[str, Any]:
     if not ci_report or ci_report.get("status") == "head_moved":
         commands.append("CLI review ci --target TARGET")
     device = _device_needed(agent_dir, context, state) and not no_device
-    also = ["CLI prebuild --target TARGET", "CLI device build --target TARGET"] if device and run else []
+    rendered_only = device and render_decision(target, agent_dir)["mode"] == "render"
+    also = ["CLI prebuild --target TARGET", "CLI device build --target TARGET"] if device and run and not rendered_only else []
     if run or commands:
         return _answer("checks", "independent checks, all at once", run=run, commands=commands, also=also,
                        waiting=waiting or None)
@@ -1128,12 +1129,22 @@ def _decide(target: Path, record: bool, no_device: bool) -> dict[str, Any]:
     if waiting:
         return _answer("wait", "waiting for " + ", ".join(waiting), agents=waiting)
 
-    # 3. Device, only for a UI change (the Reviewer may require it; it never removes it).
-    if device:
-        result = _device_step(target, agent_dir, record)
+    # 3. Device, only for a UI change (the Reviewer may require it; it never removes it). Static UI the
+    # Planner proves with `evidence: render` is rendered on the JVM instead (or alongside, in parallel).
+    decision = render_decision(target, agent_dir) if _device_needed(agent_dir, context, state) else {"mode": "none"}
+    if decision["mode"] == "render":
+        result = _render_step(target, agent_dir, context, decision, record)
         if result:
             return result
-    elif no_device and _device_needed(agent_dir, context, state):
+    elif device:
+        result = _device_step(target, agent_dir, record, with_render=decision if decision["mode"] == "both" else None)
+        if result:
+            return result
+    if decision["mode"] == "both":
+        result = _render_step(target, agent_dir, context, decision, record)
+        if result:
+            return result
+    if decision["mode"] != "render" and no_device and _device_needed(agent_dir, context, state):
         state["device_skipped"] = "the developer asked for --no-device"
         if record:
             _write(agent_dir / STATE_FILE, state)
@@ -1167,7 +1178,40 @@ def _decide(target: Path, record: bool, no_device: bool) -> dict[str, Any]:
                             "stop → post nothing"])
 
 
-def _device_step(target: Path, agent_dir: Path, record: bool) -> dict[str, Any] | None:
+def render_decision(target: Path, agent_dir: Path) -> dict[str, Any]:
+    """The render route for the PR's AC: `evidence: render` in review-spec.json is what a JVM render may prove."""
+    from android_workflow import render
+    from android_workflow.cli import load_state
+
+    rows = [row for row in _read(agent_dir / SPEC_FILE).get("acceptance") or [] if isinstance(row, dict)]
+    pseudo = {"route": ["T7"], "surfaces": ["ui"], "acceptance_criteria": [row.get("text") or "" for row in rows],
+              "ac_ids": [str(row.get("id") or f"AC{i}") for i, row in enumerate(rows, start=1)],
+              "proofs": [{"render": "render", "device": "device"}.get(str(row.get("evidence")), "unit") for row in rows]}
+    return {**render.route(target, pseudo, load_state(target)), "_spec": pseudo}
+
+
+def _design_texts(agent_dir: Path, context: dict[str, Any]) -> list[str]:
+    texts = [str(context.get("title") or ""), str(context.get("body") or "")]
+    folder = agent_dir / TICKET_DIR
+    if folder.is_dir():
+        texts += [path.read_text(encoding="utf-8", errors="replace") for path in sorted(folder.glob("*.md"))]
+    return texts
+
+
+def _render_step(target: Path, agent_dir: Path, context: dict[str, Any], decision: dict[str, Any],
+                 record: bool) -> dict[str, Any] | None:
+    from android_workflow import render
+
+    pending = render.design_step(target, _design_texts(agent_dir, context)) or render.step(target, decision, record, review_mode=True)
+    if pending:
+        pending["then"] = "CLI review next --target TARGET"
+        if pending.get("if_returned"):
+            pending["if_returned"] = "CLI render verdict --target TARGET, then CLI review next --target TARGET"
+    return pending
+
+
+def _device_step(target: Path, agent_dir: Path, record: bool,
+                 with_render: dict[str, Any] | None = None) -> dict[str, Any] | None:
     from android_workflow import decide
     from android_workflow.cli import load_state, read_json, recorded_verdict
 
@@ -1188,19 +1232,32 @@ def _device_step(target: Path, agent_dir: Path, record: bool) -> dict[str, Any] 
     if waiting is not None:
         waiting["then"] = "CLI review next --target TARGET"
         return waiting
+    from android_workflow import render
+
     if not serial:
+        decision = render_decision(target, agent_dir)
+        fallback = render.fallback(target, decision["_spec"], load_state(target), f"no device: {reason}")
+        if fallback and render.verdict_now(target) is None:
+            context = _read(agent_dir / CONTEXT_FILE)
+            return _render_step(target, agent_dir, context, fallback, record)  # its verdict is the device report
         state = _read(agent_dir / STATE_FILE)
         state["device_skipped"] = f"no device: {reason}"
         if record:
             _write(agent_dir / STATE_FILE, state)
         return None
     _log_started(target, "Device", "verify the PR head on the device", record)
-    return _answer("spawn", "UI change: verify the PR head on the device", agent="aw-device", mode="after",
-                   stage="Device", serial=serial,
-                   replay=decide._replay_hint(agent_dir),
-                   scaffold=None if decide.flows_saved(agent_dir) else "CLI device scaffold --target TARGET",
-                   budget_seconds=decide.AFTER_BUDGET_SECONDS,
-                   note="after = the PR head; before = the base APK, replayed by code afterwards")
+    spawn = _answer("spawn", "UI change: verify the PR head on the device", agent="aw-device", mode="after",
+                    stage="Device", serial=serial,
+                    replay=decide._replay_hint(agent_dir),
+                    scaffold=None if decide.flows_saved(agent_dir) else "CLI device scaffold --target TARGET",
+                    budget_seconds=decide.AFTER_BUDGET_SECONDS,
+                    note="after = the PR head; before = the base APK, replayed by code afterwards")
+    if with_render and render.verdict_now(target) is None:
+        together = render.step(target, with_render, record, review_mode=True)
+        if together and together.get("next") == "spawn":
+            spawn["with_agent"] = {key: together[key] for key in together if key not in {"next", "then"}}
+            spawn["render_ac"] = with_render.get("render_ac")
+    return spawn
 
 
 # --- the draft -----------------------------------------------------------------------------------
@@ -1263,6 +1320,16 @@ def _findings(agent_dir: Path) -> list[dict[str, Any]]:
         path, line = _location(item)
         found.append({"id": str(item.get("id") or f"MF{index}"), "severity": severity, "path": path, "line": line,
                       "problem": str(item.get("problem") or ""), "fix": str(item.get("fix") or ""), "source": "media"})
+    from android_workflow.render import REVIEW_FILE as RENDER_REVIEW
+
+    rendered = _read(agent_dir / RENDER_REVIEW) if (agent_dir / RENDER_REVIEW).is_file() else {}
+    for index, item in enumerate(rendered.get("findings") or [], start=1):
+        if not isinstance(item, dict):
+            continue
+        severity = item.get("severity") if item.get("severity") in SEVERITY_ORDER else "concern"
+        path, line = _location(item)
+        found.append({"id": str(item.get("id") or f"RF{index}"), "severity": severity, "path": path, "line": line,
+                      "problem": str(item.get("problem") or ""), "fix": str(item.get("fix") or ""), "source": "render"})
     return [item for item in found if item["problem"]]
 
 
@@ -1432,6 +1499,25 @@ def headline(event: str | None, counts: dict[str, int], reasons: list[str]) -> s
 DEVICE_SCENARIO = re.compile(r"\b(AC\d+)\b[^\n]*?:\s*\**(PASS|FAIL|BLOCKED|PARTIAL)\b", re.I)
 
 
+from android_workflow.render import PROOF_LINE as RENDER_PROOF  # noqa: E402 - render imports nothing from here
+
+
+def rendered_met(target: Path | None) -> list[str]:
+    """AC the Render analyst saw met in this source's JVM renders (empty when none is recorded for it)."""
+    if target is None:
+        return []
+    from android_workflow import render
+
+    try:
+        if render.verdict_now(target) not in {"pass", "partial"}:
+            return []
+        from android_workflow.cli import load_state
+
+        return [str(item) for item in (load_state(target).get("render") or {}).get("met") or []]
+    except Exception:  # noqa: BLE001 - no run state: nothing rendered
+        return []
+
+
 def device_scenarios(report: str) -> dict[str, str]:
     """AC id → the device's verdict for it, from the Scenarios lines of `device-report.md`."""
     found: dict[str, str] = {}
@@ -1451,7 +1537,7 @@ def device_not_verified(report: str, limit: int = 3) -> list[str]:
 
 
 def _acceptance(agent_dir: Path, context: dict[str, Any] | None = None,
-                device_report: str = "") -> list[dict[str, Any]]:
+                device_report: str = "", target: Path | None = None) -> list[dict[str, Any]]:
     """One row per AC, reconciled with everything that ran after the Reviewer wrote it: a device
     scenario PASS proves an AC the code alone left unverified (FAIL makes it unmet), media shown proves
     it, and an attachment the tool could not download is our gap, not the author's (`unchecked`)."""
@@ -1461,6 +1547,8 @@ def _acceptance(agent_dir: Path, context: dict[str, Any] | None = None,
     shown = {str(item.get("id")): bool(item.get("shown")) for item in _read(agent_dir / MEDIA_FILE).get("acceptance") or []
              if isinstance(item, dict)}
     scenarios = device_scenarios(device_report) if device_report else {}
+    proved = "render" if RENDER_PROOF in device_report else "device"
+    render_met = set(rendered_met(target)) if target else set()
     media_failed = any(item.get("status") == "not_downloaded" for item in (context or {}).get("media") or [])
     rows = []
     for item in review.get("acceptance") or []:
@@ -1471,9 +1559,11 @@ def _acceptance(agent_dir: Path, context: dict[str, Any] | None = None,
         status = item.get("status") if item.get("status") in {"met", "unmet", "unverified"} else "unverified"
         by = None
         if scenarios.get(key) == "fail":
-            status, by = "unmet", "device"
+            status, by = "unmet", proved
         elif status == "unverified" and scenarios.get(key) == "pass":
-            status, by = "met", "device"
+            status, by = "met", proved
+        elif status == "unverified" and key in render_met:
+            status, by = "met", "render"
         elif status == "unverified" and shown.get(key):
             status, by = "met", "media"
         elif status == "unverified" and planned.get("evidence") == "media" and media_failed:
@@ -1551,7 +1641,7 @@ def draft(target: Path, allow_quiet: bool = True) -> dict[str, Any]:
     if carried:
         device = str((state.get("device_carry") or {}).get("verdict") or "pass")
         report = text_if_exists(agent_dir / CARRIED_DEVICE_REPORT) or ""
-    acceptance = _acceptance(agent_dir, context, report)
+    acceptance = _acceptance(agent_dir, context, report, target)
     # A PARTIAL device run whose every device-checked AC passed is not a reason to hold the approval:
     # what it left out is listed in the body. It counts only while an AC the device should prove is open.
     device_open = [a for a in acceptance if a.get("evidence") == "device" and a["status"] in {"unverified", "unmet"}]
@@ -1589,6 +1679,12 @@ def draft(target: Path, allow_quiet: bool = True) -> dict[str, Any]:
                      + (" Not covered: " + "; ".join(g.rstrip(".") for g in gaps) + "." if gaps and device != "pass" else ""))
     elif not device_needed:
         lines.append("**Device:** not verified on a device: no UI change.")
+    elif device and RENDER_PROOF in report:
+        status = device_report_status(report) or device
+        gaps = device_not_verified(report)
+        lines.append(f"**Device:** not run — {str(status).upper()} from JVM renders (Robolectric native graphics) of "
+                     f"{context['head'][:7]}: the AC show static UI."
+                     + (" Not covered: " + "; ".join(g.rstrip(".") for g in gaps) + "." if gaps and str(status).upper() != "PASS" else ""))
     elif device:
         status = device_report_status(report) if report else device
         gaps = device_not_verified(report)
@@ -1596,6 +1692,9 @@ def draft(target: Path, allow_quiet: bool = True) -> dict[str, Any]:
                      + (" Not covered: " + "; ".join(g.rstrip(".") for g in gaps) + "." if gaps and status != "PASS" else ""))
     else:
         lines.append(f"**Device:** not verified on a device: {state.get('device_skipped') or 'no device available'}.")
+    render_met = rendered_met(target)
+    if render_met and RENDER_PROOF not in report:
+        lines.append(f"**Renders:** {', '.join(render_met)} shown by JVM renders (states the device does not reach).")
     if acceptance:
         lines.append("")
         lines.append("**Acceptance criteria**")
@@ -1603,8 +1702,8 @@ def draft(target: Path, allow_quiet: bool = True) -> dict[str, Any]:
                 "unchecked": "➖ not checked (the attachment could not be downloaded):"}
         for row in acceptance:
             source = " _(PR template)_" if row.get("source") == "template" else ""
-            by = f" _(on device)_" if row.get("proved_by") == "device" else \
-                (" _(in the attached media)_" if row.get("proved_by") == "media" else "")
+            by = {"device": " _(on device)_", "render": " _(in a JVM render)_",
+                  "media": " _(in the attached media)_"}.get(str(row.get("proved_by")), "")
             lines.append(f"- {mark[row['status']]} {row['text']}{source}{by}".replace("  ", " "))
     threads = [t for t in _review_json(agent_dir).get("threads") or [] if isinstance(t, dict)]
     open_threads = [t for t in threads if not t.get("addressed")]
