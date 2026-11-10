@@ -979,7 +979,9 @@ def _decide(target: Path, record: bool, no_device: bool) -> dict[str, Any]:
                                 "post a review anyway → CLI review edit --target TARGET --event APPROVE, then show it again",
                                 "stop → resolve nothing"])
     return _answer("ask_user", "show the draft and wait for the developer's OK; nothing is posted before it",
-                   question=f"Post this review? ({draft['event']}, {len(draft.get('comments') or [])} inline comment(s))",
+                   question=f"Post this review? ({draft['event']}, {len(draft.get('comments') or [])} inline comment(s)"
+                            + (f", {suggested} with a suggested change" if (suggested := sum(
+                                1 for c in draft.get("comments") or [] if c.get("suggestion"))) else "") + ")",
                    show=f"RUN/{DRAFT_MD}", draft_id=draft["id"],
                    options=[f"post → CLI review post --target TARGET --draft-id {draft['id']}",
                             "edit → CLI review edit --target TARGET [--drop C2] [--event COMMENT] "
@@ -1074,7 +1076,8 @@ def _findings(agent_dir: Path) -> list[dict[str, Any]]:
             path, line = _location(item)
             found.append({"id": str(item.get("id") or f"{severity[0].upper()}{index}"), "severity": severity,
                           "path": path, "line": line, "problem": str(item.get("problem") or item.get("text") or ""),
-                          "fix": str(item.get("fix") or ""), "source": "review", "security": bool(item.get("security"))})
+                          "fix": str(item.get("fix") or ""), "source": "review", "security": bool(item.get("security")),
+                          "suggestion": item.get("suggestion") if isinstance(item.get("suggestion"), dict) else None})
     media = _read(agent_dir / MEDIA_FILE)
     for index, item in enumerate(media.get("findings") or [], start=1):
         severity = item.get("severity") if item.get("severity") in SEVERITY_ORDER else "concern"
@@ -1082,6 +1085,58 @@ def _findings(agent_dir: Path) -> list[dict[str, Any]]:
         found.append({"id": str(item.get("id") or f"MF{index}"), "severity": severity, "path": path, "line": line,
                       "problem": str(item.get("problem") or ""), "fix": str(item.get("fix") or ""), "source": "media"})
     return [item for item in found if item["problem"]]
+
+
+MAX_SUGGESTION_LINES = 10  # lines a suggestion may replace on the PR head
+MAX_SUGGESTION_REPLACEMENT = 20  # lines it may write in their place
+
+
+def _head_lines(target: Path, head: str, path: str, cache: dict[str, list[str] | None]) -> list[str] | None:
+    if path not in cache:
+        shown = _git(target, "show", f"{head}:{path}")
+        cache[path] = shown.stdout.splitlines() if shown.returncode == 0 else None
+    return cache[path]
+
+
+def _suggestion(item: dict[str, Any], valid: dict[str, set[int]], head_lines: list[str] | None,
+                taken: dict[str, list[tuple[int, int]]]) -> tuple[dict[str, Any] | None, str | None]:
+    """The finding's GitHub suggestion when it can be applied as is, else why not (it stays a text fix).
+
+    GitHub applies a suggestion by replacing lines start_line..line of the PR head with the block, so
+    the range must sit on the diff's lines, exist on the head, change something and not overlap another."""
+    raw = item.get("suggestion")
+    if not raw:
+        return None, None
+    path = raw.get("file") or raw.get("path") or item["path"]
+    try:
+        end = int(raw.get("line") or item["line"] or 0)
+        start = int(raw.get("start_line") or end)
+    except (TypeError, ValueError):
+        return None, "line is not a number"
+    replacement = raw.get("replacement")
+    if not isinstance(path, str) or not isinstance(replacement, str) or not end:
+        return None, "needs file, line and replacement"
+    if start > end or end - start + 1 > MAX_SUGGESTION_LINES:
+        return None, f"range {start}-{end} is empty or longer than {MAX_SUGGESTION_LINES} lines"
+    if any(n not in valid.get(path, set()) for n in range(start, end + 1)):
+        return None, f"{path}:{start}-{end} is not all on the diff's lines"
+    if head_lines is None or end > len(head_lines):
+        return None, f"{path}:{end} is not on the PR head"
+    new = replacement[:-1] if replacement.endswith("\n") else replacement
+    new_lines = new.split("\n") if new else []
+    if len(new_lines) > MAX_SUGGESTION_REPLACEMENT:
+        return None, f"replacement longer than {MAX_SUGGESTION_REPLACEMENT} lines"
+    if new_lines == head_lines[start - 1:end]:
+        return None, "replacement equals the current code"
+    if any(start <= b and a <= end for a, b in taken.get(path, [])):
+        return None, f"{path}:{start}-{end} overlaps another suggestion"
+    return {"path": path, "start_line": start, "line": end, "replacement": new}, None
+
+
+def _suggestion_block(replacement: str) -> str:
+    longest = max((len(run) for run in re.findall(r"`+", replacement)), default=0)
+    fence = "`" * max(3, longest + 1)
+    return f"{fence}suggestion\n{replacement}{chr(10) if replacement else ''}{fence}"
 
 
 def _comment_body(item: dict[str, Any]) -> str:
@@ -1095,6 +1150,8 @@ def _comment_body(item: dict[str, Any]) -> str:
         body = text
     if fix:
         body += f"\n\nSuggestion: {fix}"
+    if item.get("applied_suggestion"):
+        body += "\n\n" + _suggestion_block(item["applied_suggestion"]["replacement"])
     return body
 
 
@@ -1237,14 +1294,32 @@ def draft(target: Path, allow_quiet: bool = True) -> dict[str, Any]:
     valid = commentable_lines(target, context["base"], context["head"])
     inline: list[dict[str, Any]] = []
     overflow: list[dict[str, Any]] = []
+    head_cache: dict[str, list[str] | None] = {}
+    taken: dict[str, list[tuple[int, int]]] = {}
+    dropped_suggestions: list[dict[str, str]] = []
     for item in findings:
+        applied, why = None, None
+        if item.get("suggestion"):
+            path = item["suggestion"].get("file") or item["suggestion"].get("path") or item["path"]
+            lines_at_head = _head_lines(target, context["head"], path, head_cache) if isinstance(path, str) else None
+            applied, why = _suggestion(item, valid, lines_at_head, taken)
         fits = item["path"] and item["line"] and item["line"] in valid.get(item["path"], set())
         if item["severity"] == "nit" and not config["nits_inline"]:
-            fits = False
+            fits, applied = False, None
+        if applied:
+            fits = True
         if fits and len(inline) < config["max_inline_comments"]:
+            if applied:
+                # The comment sits on the suggestion's range, so GitHub's "Commit suggestion" replaces exactly it.
+                item = {**item, "path": applied["path"], "line": applied["line"], "applied_suggestion": applied}
+                taken.setdefault(applied["path"], []).append((applied["start_line"], applied["line"]))
             inline.append(item)
         else:
             overflow.append(item)
+            if item.get("suggestion") and not why:
+                why = "not posted inline (cap or nits in the body)"
+        if why:
+            dropped_suggestions.append({"finding": item["id"], "reason": why})
     ci_report = _read(agent_dir / CI_FILE)
     gate = _read(agent_dir / "gate-report.json")
     device_needed = _device_needed(agent_dir, context, state)
@@ -1324,9 +1399,16 @@ def draft(target: Path, allow_quiet: bool = True) -> dict[str, Any]:
     # Our own threads the delta Reviewer saw addressed on the new head: resolved after the post, with
     # the same OK (the developer keeps any open with `edit --keep-open T1`).
     resolve = threads_to_resolve(context, _review_json(agent_dir))
-    comments = [{"id": f"C{index}", "path": item["path"], "line": item["line"], "side": "RIGHT",
-                 "severity": item["severity"], "finding": item["id"], "body": _comment_body(item)}
-                for index, item in enumerate(inline, start=1)]
+    comments = []
+    for index, item in enumerate(inline, start=1):
+        comment = {"id": f"C{index}", "path": item["path"], "line": item["line"], "side": "RIGHT",
+                   "severity": item["severity"], "finding": item["id"], "body": _comment_body(item)}
+        applied = item.get("applied_suggestion")
+        if applied:
+            comment["suggestion"] = True
+            if applied["start_line"] < applied["line"]:
+                comment["start_line"] = applied["start_line"]
+        comments.append(comment)
     result = _save_draft(agent_dir, {"schema_version": 1, "pr": context["number"], "url": context.get("url"),
                                      "head": context["head"], "event": event, "reasons": reasons, "body": body,
                                      "headline": first, "counts": counts,
@@ -1334,6 +1416,8 @@ def draft(target: Path, allow_quiet: bool = True) -> dict[str, Any]:
                                      "max_inline_comments": config["max_inline_comments"]})
     security = [item["id"] for item in findings if item.get("security")]
     return {"status": "drafted", "draft_id": result["id"], "event": event, "inline": len(comments),
+            "suggestions": sum(1 for c in comments if c.get("suggestion")),
+            "suggestions_as_text": dropped_suggestions or None,
             "in_body": len(overflow), "resolve": len(resolve), "show": str(agent_dir / DRAFT_MD),
             "security": ({"findings": security, "note": "possible security issue: also raise it in #security"}
                          if security else None)}
@@ -1361,7 +1445,9 @@ def _save_draft(agent_dir: Path, value: dict[str, Any]) -> dict[str, Any]:
               f"**Commit:** {value['head'][:12]}", "", "## Body", "", value["body"], "",
               f"## Inline comments ({len(value['comments'])})", ""]
     for comment in value["comments"]:
-        md += [f"### {comment['id']} · `{comment['path']}:{comment['line']}` · {comment['severity']}", "", comment["body"], ""]
+        where = (f"{comment['start_line']}-{comment['line']}" if comment.get("start_line") else str(comment["line"]))
+        tag = " · suggestion" if comment.get("suggestion") else ""
+        md += [f"### {comment['id']} · `{comment['path']}:{where}` · {comment['severity']}{tag}", "", comment["body"], ""]
     if value.get("resolve"):
         md += [f"## Threads to resolve {'on the OK' if value.get('quiet') else 'after posting'} ({len(value['resolve'])})", "",
                "Our earlier comments the new commits addressed (keep one open: `edit --keep-open T1`).", ""]
@@ -1399,6 +1485,10 @@ def edit(target: Path, drop: list[str] | None = None, event: str | None = None,
         if not match:
             raise ValueError(f"no such comment: {key}")
         match[0]["body"] = text
+        if "suggestion\n" not in text:
+            # The developer's text has no suggested change any more: post it as a plain comment.
+            match[0].pop("suggestion", None)
+            match[0].pop("start_line", None)
     if event:
         event = event.upper()
         if event not in EVENTS:
@@ -1483,7 +1573,9 @@ def post(target: Path, draft_id: str) -> dict[str, Any]:
         _log_posted(agent_dir, f"no new review (already approved); {len(resolved)} thread(s) resolved")
         return {"status": "posted", **entry, "resolved": resolved, "resolve_failed": failed or None}
     payload = {"commit_id": value["head"], "event": value["event"], "body": value["body"],
-               "comments": [{"path": c["path"], "line": c["line"], "side": c.get("side", "RIGHT"), "body": c["body"]}
+               "comments": [{"path": c["path"], "line": c["line"], "side": c.get("side", "RIGHT"), "body": c["body"],
+                             **({"start_line": c["start_line"], "start_side": c.get("side", "RIGHT")}
+                                if c.get("start_line") else {})}
                             for c in value["comments"]]}
     result = _gh(["api", "--method", "POST", f"repos/{repo}/pulls/{value['pr']}/reviews", "--input", "-"],
                  env=env, stdin=json.dumps(payload))

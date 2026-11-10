@@ -162,7 +162,9 @@ CLI gate | prebuild | device … | emulator … | log …  --target WT         (
   acceptance, other notes.
 - **Comments**: at most `review.max_inline_comments` inline (default 10, max 15), blocking first,
   then concerns, then nits (prefixed `nit:`; `review.nits_inline: false` moves them to the body); a comment off the diff's lines or past the cap goes in
-  the body under *Other notes*.
+  the body under *Other notes*. A finding with a valid `suggestion` carries GitHub's suggested-change
+  block (the author's "Commit suggestion"); one the CLI cannot apply (off the hunk, >10 lines,
+  overlapping, no change) is posted as the text fix and listed under `suggestions_as_text` in the draft result.
 - **Post**: one review via `POST /repos/{o}/{r}/pulls/{n}/reviews` pinned to the reviewed commit;
   refused when the draft changed since the OK or the PR head moved. The PR is never merged from this mode.
 - **Resolving threads**: only threads **we opened**, only with the developer's OK, never on a thread

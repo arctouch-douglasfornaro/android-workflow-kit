@@ -352,6 +352,58 @@ class FlowTests(unittest.TestCase):
             self.assertEqual(refused["reason"], "head_moved")
             gh.assert_not_called()
 
+    def test_a_fix_with_a_suggestion_posts_githubs_suggested_change(self) -> None:
+        findings = {"status": "changes_requested", "acceptance": [], "blocking": [
+            {"id": "B1", "file": REPO, "line": 5, "problem": "cache() never expires", "fix": "return load()",
+             "suggestion": {"line": 5, "replacement": "  fun cache() = load()\n"}}],
+            "concerns": [
+                {"id": "C1", "file": REPO, "line": 4, "problem": "two members", "fix": "merge them",
+                 "suggestion": {"start_line": 4, "line": 5, "replacement": "  fun load() = 2 // ```"}},
+                {"id": "C2", "file": REPO, "line": 3, "problem": "same code", "fix": "nothing",
+                 "suggestion": {"line": 3, "replacement": "class ProfileRepository {"}},
+                {"id": "C3", "file": REPO, "line": 6, "problem": "too far", "fix": "x",
+                 "suggestion": {"start_line": 6, "line": 9, "replacement": "}"}}]}
+        with Project(self.CHANGE) as project:
+            worktree = self.run_to_draft(project, findings)
+            drafted = review.draft(worktree)
+            value = read_json(review.agent_dir_for(worktree) / review.DRAFT_FILE)
+            shown = (review.agent_dir_for(worktree) / review.DRAFT_MD).read_text()
+            ask = review.next_action(worktree)
+            with mock.patch.object(review, "fetch_pr", return_value=fake_pr(project.head)), \
+                    mock.patch("android_workflow.watch._gh") as gh:
+                gh.return_value = subprocess.CompletedProcess([], 0, json.dumps({"id": 1, "html_url": "u"}), "")
+                review.post(worktree, drafted["draft_id"])
+                payload = json.loads(gh.call_args.kwargs["stdin"])
+        by_finding = {c["finding"]: c for c in value["comments"]}
+        self.assertEqual(drafted["suggestions"], 1)
+        self.assertTrue(by_finding["B1"]["body"].endswith("```suggestion\n  fun cache() = load()\n```"))
+        self.assertNotIn("start_line", by_finding["B1"])
+        # C1 overlaps B1's line 5: stays a text fix; C2 changes nothing; C3 runs past the file
+        self.assertEqual({d["finding"] for d in drafted["suggestions_as_text"]}, {"C1", "C2", "C3"})
+        self.assertNotIn("```suggestion", by_finding["C1"]["body"])
+        self.assertIn("1 with a suggested change", ask["question"])
+        self.assertIn("· blocking · suggestion", shown)
+        self.assertEqual(payload["comments"][0]["line"], 5)
+
+    def test_a_multi_line_suggestion_spans_its_range_and_fences_backticks(self) -> None:
+        findings = {"status": "approved", "acceptance": [], "blocking": [], "suggestions": [
+            {"id": "S1", "file": REPO, "line": 4, "problem": "one member", "fix": "merge",
+             "suggestion": {"start_line": 4, "line": 5, "replacement": "  fun load() = 2 // ```"}}]}
+        with Project(self.CHANGE) as project:
+            worktree = self.run_to_draft(project, findings)
+            drafted = review.draft(worktree)
+            with mock.patch.object(review, "fetch_pr", return_value=fake_pr(project.head)), \
+                    mock.patch("android_workflow.watch._gh") as gh:
+                gh.return_value = subprocess.CompletedProcess([], 0, json.dumps({"id": 1, "html_url": "u"}), "")
+                review.post(worktree, drafted["draft_id"])
+                comment = json.loads(gh.call_args.kwargs["stdin"])["comments"][0]
+            edited = review.edit(worktree, set_text=[["C1", "nit: merge them"]])
+            value = read_json(review.agent_dir_for(worktree) / review.DRAFT_FILE)
+        self.assertEqual((comment["start_line"], comment["line"], comment["start_side"]), (4, 5, "RIGHT"))
+        self.assertTrue(comment["body"].endswith("````suggestion\n  fun load() = 2 // ```\n````"))
+        self.assertTrue(edited["draft_id"])
+        self.assertNotIn("start_line", value["comments"][0])  # the developer's text dropped the suggestion
+
     def test_a_blocking_finding_requests_changes_and_flags_security(self) -> None:
         with Project(self.CHANGE) as project:
             worktree = self.run_to_draft(project, {"status": "changes_requested", "blocking": [
