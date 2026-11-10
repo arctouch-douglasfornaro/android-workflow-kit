@@ -541,6 +541,66 @@ class AttributionTests(unittest.TestCase):
         self.assertNotIn("Claude Code", out)
 
 
+class ProjectAttributionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.root = Path(tempfile.mkdtemp(prefix="aw-attr-"))
+        (self.root / ".ai").mkdir()
+        self.env = {key: os.environ.pop(key) for key in list(os.environ)
+                    if key in {"ANDROID_WORKFLOW_HOST", "AI_AGENT", "CLAUDECODE"} or key.startswith("CODEX_")}
+
+    def tearDown(self) -> None:
+        os.environ.pop("ANDROID_WORKFLOW_HOST", None)
+        os.environ.update(self.env)
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def config(self, value: object) -> None:
+        (self.root / ".ai" / "android-workflow.json").write_text(json.dumps({"attribution": value}), encoding="utf-8")
+
+    def test_off_by_default_and_strips_agent_lines(self) -> None:
+        from android_workflow.cli import attribution, with_footer, with_trailer
+
+        os.environ["ANDROID_WORKFLOW_HOST"] = "claude"
+        credit = attribution(self.root)
+        self.assertFalse(credit["enabled"])
+        self.assertEqual("Body\n", with_footer("Body\n\n🤖 Generated with [Claude Code](https://x)\n", credit["footer"]))
+        self.assertEqual("LEARN-1: Fix\n", with_trailer("LEARN-1: Fix\n\nCo-Authored-By: Claude <a@b>\n", ""))
+
+    def test_enabled_uses_the_host_line_once(self) -> None:
+        from android_workflow.cli import attribution, with_footer, with_trailer
+
+        self.config(True)
+        os.environ["ANDROID_WORKFLOW_HOST"] = "claude"
+        credit = attribution(self.root)
+        body = with_footer("Body\n\n🤖 Generated with [Claude Code](https://old)\n", credit["footer"])
+        self.assertEqual(1, body.count("Generated with"))
+        self.assertTrue(body.rstrip().endswith("(https://claude.com/claude-code)"))
+        message = with_trailer("LEARN-1: Fix\n\nCo-Authored-By: Gemini <g@g>\n", credit["trailer"])
+        self.assertNotIn("Gemini", message)
+        self.assertTrue(message.rstrip().endswith("Co-Authored-By: Claude <noreply@anthropic.com>"))
+        os.environ["ANDROID_WORKFLOW_HOST"] = "codex"
+        self.assertIn("Codex", attribution(self.root)["footer"])
+        self.assertEqual("", attribution(self.root)["trailer"])
+
+    def test_custom_text_and_per_surface_switches(self) -> None:
+        from android_workflow.cli import attribution
+
+        self.config({"enabled": True, "text": "Made with AI assistance", "commit_trailer": "", "review": False})
+        credit = attribution(self.root)
+        self.assertEqual("Made with AI assistance", credit["footer"])
+        self.assertEqual("", credit["trailer"])
+        self.assertTrue(credit["pull_request"])
+        self.assertFalse(credit["review"])
+
+    def test_review_footer_is_posted_and_part_of_the_draft_id(self) -> None:
+        from android_workflow.review import _draft_id, _review_body
+
+        value = {"head": "abc", "event": "APPROVE", "body": "Looks good.", "comments": []}
+        plain = _draft_id(value)
+        value["footer"] = "🤖 Generated with [Claude Code](https://claude.com/claude-code)"
+        self.assertNotEqual(plain, _draft_id(value))
+        self.assertEqual("Looks good.\n\n" + value["footer"], _review_body(value))
+
+
 class EvidenceTests(unittest.TestCase):
     PNG = bytes.fromhex(
         "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"

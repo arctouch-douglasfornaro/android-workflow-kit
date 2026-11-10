@@ -1485,6 +1485,11 @@ def draft(target: Path, allow_quiet: bool = True) -> dict[str, Any]:
             text = text[4:].lstrip() if item["severity"] == "nit" and text.lower().startswith("nit:") else text
             lines.append(f"- {where}{prefix}{text}" + (f" Suggestion: {item['fix']}" if item["fix"] else ""))
     body = "\n".join(lines).strip()
+    from android_workflow.cli import attribution
+
+    credit = attribution(target)
+    # The project's attribution line (opt-in) goes under the review body only, never on inline comments.
+    footer = credit["footer"] if credit["review"] else ""
     # Our own threads the delta Reviewer saw addressed on the new head: resolved after the post, with
     # the same OK (the developer keeps any open with `edit --keep-open T1`).
     resolve = threads_to_resolve(context, _review_json(agent_dir))
@@ -1503,6 +1508,7 @@ def draft(target: Path, allow_quiet: bool = True) -> dict[str, Any]:
                                      "headline": first, "counts": counts,
                                      "comments": comments, "resolve": resolve, "overflow": len(overflow),
                                      "thread_replies": thread_replies,
+                                     **({"footer": footer} if footer else {}),
                                      "max_inline_comments": config["max_inline_comments"]})
     security = [item["id"] for item in findings if item.get("security")]
     return {"status": "drafted", "draft_id": result["id"], "event": event, "inline": len(comments),
@@ -1516,9 +1522,16 @@ def draft(target: Path, allow_quiet: bool = True) -> dict[str, Any]:
 
 def _draft_id(value: dict[str, Any]) -> str:
     keys = ("head", "event", "body", "comments") + (("resolve",) if value.get("resolve") else ()) \
-        + (("thread_replies",) if value.get("thread_replies") else ())
+        + (("thread_replies",) if value.get("thread_replies") else ()) + (("footer",) if value.get("footer") else ())
     payload = json.dumps({key: value.get(key) for key in keys}, sort_keys=True)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+
+
+def _review_body(value: dict[str, Any]) -> str:
+    """The body as posted: the draft's text, then the project's attribution footer when it has one."""
+    from android_workflow.cli import with_footer
+
+    return with_footer(value.get("body") or "", value["footer"]).strip() if value.get("footer") else value.get("body") or ""
 
 
 def _save_draft(agent_dir: Path, value: dict[str, Any]) -> dict[str, Any]:
@@ -1534,7 +1547,7 @@ def _save_draft(agent_dir: Path, value: dict[str, Any]) -> dict[str, Any]:
     else:
         md = [f"# Review draft `{value['id']}` — PR #{value['pr']}", "",
               f"**Event:** {value['event']}{reasons}",
-              f"**Commit:** {value['head'][:12]}", "", "## Body", "", value["body"], "",
+              f"**Commit:** {value['head'][:12]}", "", "## Body", "", _review_body(value), "",
               f"## Inline comments ({len(value['comments'])})", ""]
     for comment in value["comments"]:
         where = (f"{comment['start_line']}-{comment['line']}" if comment.get("start_line") else str(comment["line"]))
@@ -1677,7 +1690,7 @@ def post(target: Path, draft_id: str) -> dict[str, Any]:
         _write(agent_dir / STATE_FILE, state)
         _log_posted(agent_dir, f"no new review (already approved); {len(resolved)} thread(s) resolved")
         return {"status": "posted", **entry, "resolved": resolved, "resolve_failed": failed or None}
-    payload = {"commit_id": value["head"], "event": value["event"], "body": value["body"],
+    payload = {"commit_id": value["head"], "event": value["event"], "body": _review_body(value),
                "comments": [{"path": c["path"], "line": c["line"], "side": c.get("side", "RIGHT"), "body": c["body"],
                              **({"start_line": c["start_line"], "start_side": c.get("side", "RIGHT")}
                                 if c.get("start_line") else {})}

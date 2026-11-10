@@ -2158,6 +2158,67 @@ def strip_agent_attribution(text: str) -> str:
     return f"{cleaned}\n" if cleaned else ""
 
 
+# Opt-in per project (`attribution` in .ai/android-workflow.json); off by default. Agents never write
+# these lines: the CLI strips whatever they wrote and adds the project's own line at delivery/post time.
+HOST_ATTRIBUTION = {
+    "claude": ("🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+               "Co-Authored-By: Claude <noreply@anthropic.com>"),
+    "codex": ("🤖 Generated with [Codex](https://openai.com/codex)", ""),
+    "cursor": ("🤖 Generated with [Cursor](https://cursor.com)", ""),
+    "gemini": ("🤖 Generated with [Gemini CLI](https://github.com/google-gemini/gemini-cli)", ""),
+}
+HOST_ENV = "ANDROID_WORKFLOW_HOST"
+
+
+def agent_host() -> str | None:
+    """The agent host running the workflow, from its own environment (ANDROID_WORKFLOW_HOST wins)."""
+    forced = os.environ.get(HOST_ENV, "").strip().lower()
+    if forced:
+        return forced
+    agent = os.environ.get("AI_AGENT", "").lower()
+    if os.environ.get("CLAUDECODE") or agent.startswith("claude"):
+        return "claude"
+    if agent.startswith("codex") or any(key.startswith("CODEX_") and key != "CODEX_HOME" for key in os.environ):
+        return "codex"
+    if agent.startswith("cursor") or os.environ.get("CURSOR_AGENT") or os.environ.get("CURSOR_TRACE_ID"):
+        return "cursor"
+    if agent.startswith("gemini") or os.environ.get("GEMINI_CLI"):
+        return "gemini"
+    return None
+
+
+def attribution(target: Path) -> dict[str, Any]:
+    """`attribution` from .ai/android-workflow.json: `true`, or {enabled, text, commit_trailer,
+    pull_request, review}. Off (nothing added) unless enabled; `text`/`commit_trailer` default to the host's."""
+    raw = durable_overrides(target).get("attribution")
+    config = {"enabled": raw} if isinstance(raw, bool) else (raw if isinstance(raw, dict) else {})
+    if not config.get("enabled"):
+        return {"enabled": False, "footer": "", "trailer": "", "pull_request": False, "review": False}
+    host = agent_host()
+    footer, trailer = HOST_ATTRIBUTION.get(host or "", ("", ""))
+    footer = str(config["text"]).strip() if isinstance(config.get("text"), str) else footer
+    trailer = str(config["commit_trailer"]).strip() if isinstance(config.get("commit_trailer"), str) else trailer
+    return {"enabled": True, "host": host, "footer": footer, "trailer": trailer,
+            "pull_request": config.get("pull_request", True) is not False,
+            "review": config.get("review", True) is not False}
+
+
+def with_footer(text: str, footer: str) -> str:
+    """Text without agent attribution, plus the project's footer (when set) as its last paragraph."""
+    cleaned = strip_agent_attribution(text).rstrip()
+    if not footer:
+        return f"{cleaned}\n" if cleaned else ""
+    return f"{cleaned}\n\n{footer}\n" if cleaned else f"{footer}\n"
+
+
+def with_trailer(message: str, trailer: str) -> str:
+    """Commit message without agent attribution, plus the project's trailer (when set)."""
+    cleaned = strip_agent_attribution(message).rstrip()
+    if not trailer:
+        return f"{cleaned}\n" if cleaned else ""
+    return f"{cleaned}\n\n{trailer}\n"
+
+
 def write_pr_description(agent_dir: Path, content: str) -> None:
     (agent_dir / "pr-description.md").write_text(strip_agent_attribution(content), encoding="utf-8")
 

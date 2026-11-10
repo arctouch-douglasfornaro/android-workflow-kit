@@ -236,12 +236,14 @@ def deliver(
     keep_body: bool = False,
 ) -> dict[str, Any]:
     from android_workflow.cli import (
-        AGENT_ATTRIBUTION_PATTERN,
+        attribution,
         is_stub_pr_body,
         load_state,
         read_json,
         source_fingerprint,
         strip_agent_attribution,
+        with_footer,
+        with_trailer,
         write_json,
     )
 
@@ -303,6 +305,10 @@ def deliver(
     disclosures = pull_request_disclosures(gate, state, text)
     if disclosures:
         text = text.rstrip() + "\n\n" + "\n".join(disclosures) + "\n"
+    credit = attribution(target)
+    if credit["pull_request"] and credit["footer"]:
+        text = with_footer(text, credit["footer"])
+        result["attribution"] = credit["footer"]
     body_file.write_text(text, encoding="utf-8")
     result["disclosures_added"] = disclosures
 
@@ -324,8 +330,8 @@ def deliver(
             raise ValueError(f"unrelated files were already staged and were unstaged: {', '.join(stray[:8])}")
         message = agent_dir / "commit-message.txt"
         body_lines = [line for line in (body or "").strip().splitlines()[:3]]
-        message.write_text(strip_agent_attribution(subject + ("\n\n" + "\n".join(body_lines) if body_lines else "")),
-                           encoding="utf-8")
+        message.write_text(with_trailer(subject + ("\n\n" + "\n".join(body_lines) if body_lines else ""),
+                                        credit["trailer"] if credit["pull_request"] else ""), encoding="utf-8")
         committed = git(target, "commit", "-F", str(message), timeout=900)
         if committed.returncode != 0:
             raise ValueError(f"git commit failed (hooks run here): {tail(committed.stdout + committed.stderr, 15)}")
@@ -337,9 +343,11 @@ def deliver(
         result["committed"] = False
         warnings.append("nothing left to stage; delivering the commits already on the branch")
     message_text = git(target, "log", "-1", "--format=%B").stdout
-    if AGENT_ATTRIBUTION_PATTERN.search(message_text):
+    # Only the project's own trailer (when `attribution` is on) survives; anything else an agent or hook added goes.
+    wanted = with_trailer(message_text, credit["trailer"] if credit["pull_request"] else "")
+    if wanted.strip() != message_text.strip():
         cleaned = agent_dir / "commit-message.txt"
-        cleaned.write_text(strip_agent_attribution(message_text), encoding="utf-8")
+        cleaned.write_text(wanted, encoding="utf-8")
         git(target, "commit", "--amend", "-F", str(cleaned), "--no-edit")
         warnings.append("removed tool attribution from the commit message before pushing")
     result["sha"] = git(target, "rev-parse", "HEAD").stdout.strip()

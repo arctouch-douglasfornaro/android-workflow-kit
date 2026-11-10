@@ -178,7 +178,8 @@ stepping on each other:
 
 - **A PR, every time code was written.** Ready for review when every check passed; a **draft** that
   lists what is still open when a check kept failing (gate, review or device). The commit and PR
-  carry no tool or AI attribution and follow the repo's PR template when there is one.
+  carry no tool or AI attribution (unless the project opts in, see below) and follow the repo's PR
+  template when there is one.
 - **Before/after evidence** in `.ai/workflow/<TICKET>/media/before/` and `media/after/`, plus
   `media/compare.md`. `deliver` fills the template's Before/After table with one row per capture
   (the file each cell needs) and opens `media/` in Finder; nothing is uploaded, so drag them into
@@ -187,6 +188,28 @@ stepping on each other:
   `stage-metrics.json` to spot what was slow or expensive.
 
 Everything under `.ai/workflow/` stays on your machine; it is git-ignored and never committed.
+
+#### AI attribution (opt-in per project)
+
+Off by default: commits, PR bodies and reviews carry no `Generated with …`, `🤖` or agent
+`Co-Authored-By`, and any such line an agent writes is stripped. A project whose team agreed to credit
+the tool turns it on in its `.ai/android-workflow.json`:
+
+```json
+{"attribution": {"enabled": true}}
+```
+
+The CLI (never an agent) then adds the line of the host running the workflow, once:
+
+| Where | What is added |
+| --- | --- |
+| `/android-workflow`: PR body | `🤖 Generated with [Claude Code](https://claude.com/claude-code)` as the last paragraph (Codex, Cursor and Gemini CLI get their own name) |
+| `/android-workflow`: commit | `Co-Authored-By: Claude <noreply@anthropic.com>` (Claude Code only; other hosts add no trailer) |
+| `/android-review`: review body | the same `Generated with` line under the body, shown in `review-draft.md` before your OK. Never on inline comments, thread replies or PR Watcher answers |
+
+Optional keys: `text` (your own line instead of the host's), `commit_trailer` (`""` for none),
+`pull_request: false` or `review: false` (turn one side off). The host is read from its environment;
+`ANDROID_WORKFLOW_HOST=claude|codex|cursor|gemini` forces it. Today `quizlet-android` has it on.
 
 ### 5. After the PR: the PR Watcher
 
@@ -308,6 +331,8 @@ videos, trusts CI when it passed on the PR head (else the local gate) and, when 
 runs the device on the base APK and on the PR head. Then it shows the review it would post
 (verdict, at most 10 inline comments, `nit:` for non-blocking ones) and posts it **only after your
 OK**.
+With `attribution` on for the project (see [AI attribution](#ai-attribution-opt-in-per-project)), the
+review body ends with the host's `Generated with` line.
 
 After the post it **keeps following the PR by default** until it is merged or closed (`--no-watch`
 stops right after the post; you can also say stop at any time). It uses the same watch as

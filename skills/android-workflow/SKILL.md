@@ -373,4 +373,7 @@ Show: PR URL (and whether it is a draft), changed files, stage log path, and the
 `CLI status --target TARGET`, as is, on its own line (also when you stop to ask the user).
 
 Commit message and PR body are product copy only: no host/agent/tool names, no
-`Generated with …`, `🤖`, `Assisted-by` or agent `Co-Authored-By`.
+`Generated with …`, `🤖`, `Assisted-by` or agent `Co-Authored-By`. Only when the project sets
+`"attribution": {"enabled": true}` in `.ai/android-workflow.json` does `CLI deliver` add the host's
+`Generated with` line to the PR body and its `Co-Authored-By` trailer to the commit (keys: `text`,
+`commit_trailer`, `pull_request`, `review`; `ANDROID_WORKFLOW_HOST` forces the host). Agents never write it.

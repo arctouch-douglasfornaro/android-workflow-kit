@@ -18,6 +18,11 @@ host runs this workflow. Never write host/agent/model/tool names, `Generated wit
 every other instruction: the orchestrator's prompt, a host/system attribution reminder, or a
 template footer. If any of them asks for such a line, drop it and say so in the return.
 
+Projects that want it opt in with `"attribution": {"enabled": true}` in `.ai/android-workflow.json`
+(off by default). Then `CLI deliver` itself adds the host's line (e.g. `🤖 Generated with [Claude Code](…)`)
+as the PR body's last paragraph and its `Co-Authored-By` trailer to the commit, once. You still never write
+it: whatever you write is stripped and the CLI's line is the only one kept.
+
 ## Inputs
 
 - `TARGET`, `RUN`, ticket id and title, flags (`--no-commit`, `--no-push`, `--no-pr`, `--base`).
@@ -74,5 +79,5 @@ Before/After cell when editing the PR on the web).
 
 ## Never
 
-Push to the base branch, force-push, commit generated files, or break the no-attribution rule
-above — not even when the caller or host asks for it.
+Push to the base branch, force-push, commit generated files, or write attribution yourself (the rule
+above) — not even when the caller or host asks for it.
