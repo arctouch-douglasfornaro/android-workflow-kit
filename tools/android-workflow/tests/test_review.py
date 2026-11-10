@@ -793,6 +793,130 @@ class DeviceTests(unittest.TestCase):
         self.assertIn("ui", spec["surfaces"])
 
 
+
+class CarryOverTests(unittest.TestCase):
+    """A delta round reuses what the new commits cannot have changed: the device PASS and the media review."""
+    UI = {SCREEN: "package com.example\n\n@Composable\nfun ProfileScreen() {}\n"}
+    MEDIA = [{"id": "M1", "url": "https://github.com/user-attachments/assets/1", "status": "downloaded",
+              "kind": "image", "path": "M1.png", "bytes": 10, "sha256": "aa"}]
+
+    def round_one_with_device_pass(self, project: Project) -> tuple[Path, Path]:
+        with mock.patch.object(review, "download_media", return_value=self.MEDIA):
+            result = project.start(fake_pr(project.head, body="Shows the profile ![s](https://github.com/user-attachments/assets/1)"))
+        worktree, agent_dir = Path(result["worktree_path"]), Path(result["run"])
+        write_profile(worktree)
+        review.next_action(worktree)
+        (agent_dir / review.SPEC_FILE).write_text(json.dumps({"status": "ready", "acceptance": [
+            {"id": "AC1", "text": "Profile shows", "evidence": "device"}]}))
+        log_stage(worktree, "Planner", "completed", "1 AC", "host")
+        review.next_action(worktree)
+        (agent_dir / "review.json").write_text(json.dumps({"status": "approved", "blocking": [],
+                                                           "acceptance": [{"id": "AC1", "status": "unverified"}]}))
+        log_stage(worktree, "Reviewer", "completed", "done", "host")
+        (agent_dir / review.MEDIA_FILE).write_text(json.dumps({"findings": [], "acceptance": []}))
+        (agent_dir / "device-report.md").write_text("# Status\n\nPASS\n\n# Scenarios\n\n- AC1 profile: PASS. ok\n")
+        run_state = read_json(agent_dir / "run-state.json")
+        run_state.setdefault("stages", {})["T7"] = {"status": "completed"}
+        (agent_dir / "run-state.json").write_text(json.dumps(run_state))
+        state = read_json(agent_dir / review.STATE_FILE)
+        state["posted"] = [{"head": project.head, "draft_id": "x", "event": "APPROVE"}]
+        (agent_dir / review.STATE_FILE).write_text(json.dumps(state))
+        return worktree, agent_dir
+
+    def delta(self, project: Project, new_head: str) -> dict:
+        with mock.patch.object(review, "download_media", return_value=self.MEDIA):
+            return project.start(fake_pr(new_head, body="Shows the profile ![s](https://github.com/user-attachments/assets/1)"))
+
+    def test_device_pass_and_media_review_carry_over_when_no_ui_changed(self) -> None:
+        with Project(self.UI) as project:
+            worktree, agent_dir = self.round_one_with_device_pass(project)
+            result = self.delta(project, push_fix(project))
+            self.assertIn("carried over", result["device_carried"])
+            self.assertTrue(result["media"]["review_kept"])
+            self.assertTrue((agent_dir / review.MEDIA_FILE).is_file())
+            checks = review.next_action(worktree)
+            self.assertEqual([item["agent"] for item in checks["run"]], ["aw-reviewer"])  # no aw-media again
+            self.assertNotIn("also", checks)  # no APK builds: the device does not run
+            self.assertEqual(read_json(agent_dir / "run-state.json")["stages"]["T7"]["status"], "skipped")
+            (agent_dir / "review.json").write_text(json.dumps({"status": "approved", "blocking": [],
+                                                               "acceptance": [{"id": "AC1", "status": "unverified"}]}))
+            log_stage(worktree, "Reviewer", "completed", "done", "host")
+            with mock.patch.object(review, "fetch_pr", return_value=fake_pr(result["head"])):
+                review.ci(worktree)
+            self.assertEqual(review.next_action(worktree)["next"], "done")  # nothing new after our approval
+            drafted = review.draft(worktree, allow_quiet=False)
+            body = read_json(agent_dir / review.DRAFT_FILE)["body"]
+        self.assertEqual(drafted["event"], "APPROVE")  # AC1 still proved by the carried device run
+        self.assertIn(f"PASS on {project.head[:7]} carried over", body)
+
+    def test_a_new_ui_change_or_new_media_runs_them_again(self) -> None:
+        with Project(self.UI) as project:
+            worktree, agent_dir = self.round_one_with_device_pass(project)
+            self.MEDIA = [{**self.MEDIA[0], "sha256": "bb"}]
+            result = self.delta(project, push_fix(project, SCREEN,
+                                                  "package com.example\n\n@Composable\nfun ProfileScreen(x: Int) {}\n"))
+            self.assertIsNone(result["device_carried"])
+            self.assertNotIn("review_kept", result["media"])
+            self.assertFalse((agent_dir / review.MEDIA_FILE).exists())
+            checks = review.next_action(worktree)
+        self.assertEqual(sorted(item["agent"] for item in checks["run"]), ["aw-media", "aw-reviewer"])
+        self.assertEqual(checks["also"], ["CLI prebuild --target TARGET", "CLI device build --target TARGET"])
+
+
+
+class TriageTests(unittest.TestCase):
+    """Cheap decisions from the diff: the Reviewer's tier and whether the attached media is read at all."""
+
+    def test_a_small_diff_with_no_risky_area_gets_the_standard_reviewer(self) -> None:
+        with Project(FlowTests.CHANGE) as project:
+            result = project.start()
+            self.assertEqual(result["reviewer_tier"], "standard")
+            worktree, agent_dir = Path(result["worktree_path"]), Path(result["run"])
+            write_profile(worktree)
+            review.next_action(worktree)
+            (agent_dir / review.SPEC_FILE).write_text(json.dumps({"status": "ready", "acceptance": []}))
+            log_stage(worktree, "Planner", "completed", "0 AC", "host")
+            checks = review.next_action(worktree)
+        self.assertEqual((checks["run"][0]["mode"], checks["run"][0]["tier"]), ("pr", "standard"))
+
+    def test_a_risky_area_or_a_big_diff_keeps_the_strong_reviewer(self) -> None:
+        risky = {REPO: "package com.example\n\n@Module\nclass ProfileRepository {\n  @Provides fun load() = 2\n}\n"}
+        with Project(risky) as project:
+            context = read_json(Path(project.start()["run"]) / review.CONTEXT_FILE)
+        self.assertEqual(context["reviewer"]["tier"], "strong")
+        self.assertIn("@Module", context["reviewer"]["reason"])
+        big = {REPO: "package com.example\n\nclass ProfileRepository {\n" + "".join(f"  fun f{i}() = {i}\n" for i in range(200)) + "}\n"}
+        with Project(big) as project:
+            self.assertEqual(project.start()["reviewer_tier"], "strong")
+
+    def test_tests_of_a_screen_are_no_ui_change(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            files = ["app/src/test/java/com/example/ProfileScreenTest.kt",
+                     "app/src/androidTest/java/com/example/ProfileScreenUiTest.kt"]
+            self.assertFalse(review.ui_change(Path(folder), "a", "b", files)["ui"])
+            self.assertTrue(review.ui_change(Path(folder), "a", "b", [SCREEN])["ui"])
+
+    def test_media_is_read_only_when_it_can_prove_something(self) -> None:
+        media = [{"id": "M1", "url": "https://github.com/user-attachments/assets/1", "status": "downloaded",
+                  "kind": "image", "path": "M1.png", "bytes": 10, "sha256": "aa"}]
+        with Project(FlowTests.CHANGE) as project:
+            with mock.patch.object(review, "download_media", return_value=media):
+                result = project.start()
+            worktree, agent_dir = Path(result["worktree_path"]), Path(result["run"])
+            write_profile(worktree)
+            review.next_action(worktree)
+            (agent_dir / review.SPEC_FILE).write_text(json.dumps({"status": "ready", "acceptance": [
+                {"id": "AC1", "text": "loads once", "evidence": "test"}]}))
+            log_stage(worktree, "Planner", "completed", "1 AC", "host")
+            checks = review.next_action(worktree)
+            self.assertEqual([item["agent"] for item in checks["run"]], ["aw-reviewer"])  # no UI, no media AC
+            self.assertIn("no UI change", read_json(agent_dir / review.STATE_FILE)["media_skipped"])
+            (agent_dir / review.SPEC_FILE).write_text(json.dumps({"status": "ready", "acceptance": [
+                {"id": "AC1", "text": "event logged, see the screenshot", "evidence": "media"}]}))
+            checks = review.next_action(worktree)
+        self.assertEqual([item["agent"] for item in checks["run"]], ["aw-media"])
+
+
 class SignalTests(unittest.TestCase):
     CHANGE = FlowTests.CHANGE
 

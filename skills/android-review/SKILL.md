@@ -79,7 +79,8 @@ CLI gate | prebuild | device … | emulator … | log …  --target WT         (
      started. Start its `also` in the background in the same turn: on a UI change the Planner's spawn
      carries the base build and the PR-head APK, so they build while the Planner and the Reviewer read.
    - `checks`: in the same turn, spawn every `run` agent (`aw-reviewer` mode `pr`/`pr-delta`,
-     `aw-media`; a `run` entry with `tier: standard`, the `pr-delta` review, uses the standard tier), run every `commands` entry, and start `also` in the background (base build and the
+     `aw-media`; a `run` entry with `tier: standard` uses the standard tier: the `pr-delta` review, and a
+     first-round `pr` review of a small diff with no risky area), run every `commands` entry, and start `also` in the background (base build and the
      PR-head APK when the PR changes UI).
    - `wait_ci`: run `command` (polls up to 9 min), then `next`. `gate`: run `command` (long timeout).
    - `wait` / `wait_device` / `wait_prebuild` / `replay_before`: as in android-workflow.
@@ -136,11 +137,28 @@ CLI gate | prebuild | device … | emulator … | log …  --target WT         (
   split, a legacy fork) gets `RUN/copy-diff/<name>.diff` (original at the base vs the new file); the
   Reviewer explains every divergence (intended, or a finding).
 - **Device** only when the diff changes UI: Android resources (`res/layout|drawable|values|…`),
-  the manifest, `@Composable`/`@Preview` code, screen/view classes. The Planner may waive it for a
+  the manifest, `@Composable`/`@Preview` code, screen/view classes (never test sources: `src/test`,
+  `src/androidTest`, `sharedTest`, `testFixtures`). The Planner may waive it for a
   pure refactor pinned by tests (`device: skip` + reason in the spec), never for a resource or
   manifest change. The Reviewer can require it (`CLI review device --require`), which beats the
   waiver. `after` = PR head, `before` = the base APK replayed
   by code. No UI change → the review says "not verified on a device: no UI change".
+  **Carry-over:** in a delta round, a device PASS/PARTIAL of an earlier head is reused (T7 skipped, no
+  APK builds) while the PR's commits since that head change no UI; the review says "PASS on abc1234
+  carried over: the new commits change no UI" and the carried report still proves the device AC. A UI
+  change since then, a force-push that dropped that head, `--require` or the Reviewer's
+  `device_required` → the device runs again.
+- **Reviewer tier** (round 1, from the diff only; the PR text never lowers it): standard when the diff
+  has at most `review.small_diff_lines` (150; `0` = always strong) changed lines in at most 5 files and
+  no risky area — DI (`@Module`, `@Provides`, `@Binds`, `di/`), Room/serialization (`@Entity`, `@Database`,
+  `Migration`, `@Serializable`, `@SerializedName`, `schemas/`, ProGuard), navigation (`res/navigation`,
+  `NavHost`, deep links), the manifest, Gradle/build logic, preferences/DataStore, `GlobalScope`,
+  `runBlocking`, `CancellationException`, or a payment/auth word in a path. Otherwise strong.
+  `pr-context.json` → `reviewer` keeps the tier and why.
+- **Media gate**: attachments are read only when the PR changes UI, an AC has `evidence: media`, or the
+  device was required; otherwise `aw-media` does not run (`review-state.json` → `media_skipped`).
+- **Media** carry-over: a delta round keeps `media-review.json` (no `aw-media`) when the spec was kept
+  and every attachment is the same (link, status, SHA-256); any change runs the Media analyst again.
   The device is this run's own lease, as in android-workflow; with `device.dedicated` (default `true`) it is
   always an emulator the workflow started, never the developer's own emulator or phone.
 - **CI** is trusted when every required check (else every check) on the PR head passed. Pending →

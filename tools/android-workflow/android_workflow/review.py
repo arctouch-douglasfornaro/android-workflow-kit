@@ -45,6 +45,7 @@ CI_FILE = "ci-report.json"
 DRAFT_FILE = "review-draft.json"
 DRAFT_MD = "review-draft.md"
 DELTA_FILE = "review-delta.diff"
+CARRIED_DEVICE_REPORT = "device-report.carried.md"  # the device run an earlier head passed, reused while no UI changes
 INBOX_FILE = "review-inbox.json"
 REPLIES_FILE = "review-replies.json"
 REPLIES_DRAFT = "review-replies-draft.json"
@@ -61,7 +62,18 @@ DEFAULT_REVIEW = {
     "nits_inline": True,
     # Concerns alone approve (posted as comments): what developers did by hand on every run that had them.
     "approve_with_concerns": True,
+    # A first-round diff at most this big (changed lines, and at most SMALL_DIFF_FILES files) with no risky
+    # area is reviewed on the standard tier; 0 keeps every first round on the strong tier.
+    "small_diff_lines": 150,
 }
+SMALL_DIFF_FILES = 5
+# Areas whose side effects a small diff hides: DI, persistence and serialization, navigation, the build,
+# coroutine scopes. Any hit keeps the strong Reviewer whatever the size.
+RISK_PATH = re.compile(r"(AndroidManifest\.xml$|(^|/)res/navigation/|proguard|\.pro$|(^|/)schemas/|\.gradle(\.kts)?$"
+                       r"|libs\.versions\.toml$|(^|/)(buildSrc|build-logic)/|(^|/)di/|Module\.kt$|Migration\w*\.kt$)", re.I)
+RISK_CODE = re.compile(r"@(Module|Provides|Binds|InstallIn|Component|Subcomponent|Entity|Database|Dao|TypeConverter"
+                       r"|Serializable|SerializedName|Json|JsonClass|SerialName)\b|\bMigration\b|\bNavHost\b|\bNavGraph\b"
+                       r"|deepLink|SharedPreferences|DataStore|\bGlobalScope\b|\brunBlocking\b|CancellationException")
 MAX_INLINE_LIMIT = 15
 EVENTS = ("APPROVE", "COMMENT", "REQUEST_CHANGES")
 SEVERITY_ORDER = {"blocking": 0, "concern": 1, "nit": 2}
@@ -93,6 +105,7 @@ UI_CLASS = re.compile(
     r"\bclass\s+\w+[^{\n]*[:,]\s*(?:\w+\.)*\w*(Fragment|Activity|View|Dialog|DialogFragment|BottomSheetDialogFragment"
     r"|Layout|RecyclerView\.Adapter|ListAdapter)\b",
 )
+TEST_SOURCE = re.compile(r"(^|/)src/(test|androidTest|sharedTest|testFixtures)\w*/")
 UI_NAME = re.compile(r"(Screen|Fragment|Activity|View|Dialog|BottomSheet|Composable|Theme|Component)s?\.kt$")
 
 PR_QUERY = """
@@ -407,7 +420,7 @@ def download_media(target: Path, agent_dir: Path, urls: list[str], env: dict[str
             path = folder / f"M{index}{suffix}"
             path.write_bytes(data)
             entry.update({"status": "downloaded", "kind": "image" if kind in IMAGE_TYPES else "video",
-                          "path": str(path), "bytes": len(data)})
+                          "path": str(path), "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()})
         except Exception as error:  # noqa: BLE001 - one attachment never stops the review
             entry.update({"status": "not_downloaded", "reason": str(error)[:200]})
         items.append(entry)
@@ -422,6 +435,8 @@ def ui_change(target: Path, base: str, head: str, files: list[str]) -> dict[str,
     reasons: list[str] = []
     for path in files:
         why = None
+        if TEST_SOURCE.search(path):
+            continue  # a test (even of a screen) never changes what the app shows
         if UI_RESOURCE.search(path):
             why = "UI resource"
         elif path.endswith("AndroidManifest.xml"):
@@ -441,6 +456,27 @@ def ui_change(target: Path, base: str, head: str, files: list[str]) -> dict[str,
         if why:
             reasons.append(f"{path}: {why}")
     return {"ui": bool(reasons), "reasons": reasons[:20]}
+
+
+def reviewer_tier(target: Path, base: str, head: str, files: list[str], small_lines: int) -> dict[str, Any]:
+    """The first-round Reviewer's tier, from the diff alone (the PR text never lowers it): standard for a
+    small diff with no risky area, strong otherwise."""
+    from android_workflow.decide import FULL_WORDS, _words
+
+    numstat = _git(target, "diff", "--numstat", base, head).stdout.splitlines()
+    lines = sum(int(a) + int(d) for a, d, *_ in (row.split("\t") for row in numstat) if a.isdigit() and d.isdigit())
+    risk = [f"{path}: {why}" for path in files for why in
+            (["risky path"] if RISK_PATH.search(path) else []) +
+            ([f"touches {', '.join(sorted(_words(path) & FULL_WORDS))}"] if _words(path) & FULL_WORDS else [])]
+    if not risk:
+        diff = _git(target, "diff", "-U0", base, head).stdout
+        changed = "\n".join(line for line in diff.splitlines() if line[:1] in "+-" and not line.startswith(("+++", "---")))
+        risk = [f"diff: {hit}" for hit in sorted({m.group(0) for m in RISK_CODE.finditer(changed)})][:8]
+    small = 0 < lines <= small_lines and len(files) <= SMALL_DIFF_FILES
+    tier = "standard" if small and not risk else "strong"
+    reason = (f"{lines} changed lines in {len(files)} file(s), no risky area" if tier == "standard"
+              else ("; ".join(risk[:4]) if risk else f"{lines} changed lines in {len(files)} file(s)"))
+    return {"tier": tier, "reason": reason, "lines": lines, "risk": risk[:8]}
 
 
 SOURCE_SUFFIXES = (".kt", ".java", ".kts")
@@ -505,6 +541,52 @@ def _clean(target: Path) -> bool:
     return not _git(target, "status", "--porcelain", "--untracked-files=no").stdout.strip()
 
 
+def media_signature(media: list[dict[str, Any]]) -> list[list[Any]]:
+    """What the Media analyst saw: each attachment's link, status and content hash."""
+    return [[item.get("url"), item.get("status"), item.get("sha256") or item.get("bytes")] for item in media or []]
+
+
+def _device_to_carry(agent_dir: Path, state: dict[str, Any], previous_head: str) -> dict[str, Any] | None:
+    """The device verdict a delta round may reuse: the previous round's own PASS/PARTIAL (its report is kept
+    as CARRIED_DEVICE_REPORT), else the carry the previous round itself reused, else None (the device runs)."""
+    from android_workflow.cli import recorded_verdict
+
+    stages = _read(agent_dir / "run-state.json").get("stages") or {}
+    ran = (stages.get("T7") or {}).get("status") == "completed" and (agent_dir / "device-report.md").is_file()
+    if ran:
+        verdict = recorded_verdict(agent_dir, "T7")
+        if verdict not in {"pass", "partial"}:
+            return None
+        (agent_dir / CARRIED_DEVICE_REPORT).write_text(
+            (agent_dir / "device-report.md").read_text(encoding="utf-8"), encoding="utf-8")
+        return {"head": previous_head, "verdict": verdict}
+    carry = state.get("device_carry")
+    return carry if isinstance(carry, dict) and (agent_dir / CARRIED_DEVICE_REPORT).is_file() else None
+
+
+def ui_since_device(target: Path, carry: dict[str, Any], head: str, files: list[str]) -> dict[str, Any] | None:
+    """`ui_change` of what changed since the head the device last passed, limited to the PR's own files (a
+    merge of the base brings other people's screens, which the device never had to check). None when that
+    head is gone (force-push), so the device runs again."""
+    changed = _git(target, "diff", "--name-only", carry["head"], head)
+    if changed.returncode != 0:
+        return None
+    mine = set(files)
+    return ui_change(target, carry["head"], head, [line for line in changed.stdout.splitlines() if line.strip() in mine])
+
+
+def device_carried(agent_dir: Path, context: dict[str, Any], state: dict[str, Any]) -> str | None:
+    """Why the device does not run again this round, or None: it passed on an earlier head and the PR's
+    commits since then change no UI. Never over the Reviewer or the developer requiring the device."""
+    carry = state.get("device_carry")
+    since = context.get("ui_since_device")
+    if not isinstance(carry, dict) or not isinstance(since, dict) or since.get("ui"):
+        return None
+    if state.get("device_forced") or _review_json(agent_dir).get("device_required"):
+        return None
+    return f"{str(carry.get('verdict')).upper()} on {str(carry.get('head'))[:7]} carried over: the new commits change no UI"
+
+
 def start(main_target: Path, pr_ref: str, worktree: Path | None = None, download: bool = True) -> dict[str, Any]:
     """Worktree at the PR head plus everything the review reads. A second `start` on the same PR
     (new commits) moves the worktree to the new head and keeps what was posted, for a delta round."""
@@ -563,6 +645,15 @@ def start(main_target: Path, pr_ref: str, worktree: Path | None = None, download
         # The spec is what the PR claims: unchanged PR text and tickets → the Planner does not run again.
         keep_spec = state.get("claims") == claims and (agent_dir / SPEC_FILE).is_file()
         # A new round: the earlier round's verdicts and draft describe the old head.
+        carry = _device_to_carry(agent_dir, state, previous_head)
+        if carry:
+            state["device_carry"] = carry
+        else:
+            state.pop("device_carry", None)
+            (agent_dir / CARRIED_DEVICE_REPORT).unlink(missing_ok=True)
+        # The media review is kept aside: reused when the attachments and the spec are the same (below).
+        if (agent_dir / MEDIA_FILE).is_file() and keep_spec:
+            (agent_dir / MEDIA_FILE).replace(agent_dir / (MEDIA_FILE + ".previous"))
         stale_files = [MEDIA_FILE, CI_FILE, DRAFT_FILE, DRAFT_MD, "review.json", "device-report.md", "run-state.json"]
         if not keep_spec:
             stale_files += [SPEC_FILE, "plan.md"]
@@ -619,8 +710,21 @@ def start(main_target: Path, pr_ref: str, worktree: Path | None = None, download
     signed = signed_media(env, repo, number) if download and urls else {}
     media = download_media(path, agent_dir, urls, env, int(config["media_max_mb"]), signed) if download else []
     context["media"] = media
+    previous_media = agent_dir / (MEDIA_FILE + ".previous")
+    if previous_media.is_file():
+        old_context = _read(agent_dir / CONTEXT_FILE)
+        same = bool(media) and media_signature(media) == media_signature(old_context.get("media") or [])
+        if same:
+            previous_media.replace(agent_dir / MEDIA_FILE)
+            state["media_agent"] = "kept"
+        else:
+            previous_media.unlink()
     context["ui_change"] = ui_change(path, base, head, files)
+    if state.get("device_carry"):
+        old_files = list(_read(agent_dir / CONTEXT_FILE).get("files") or [])
+        context["ui_since_device"] = ui_since_device(path, state["device_carry"], head, files + old_files)
     context["copies"] = copied_code(path, agent_dir, base, head)
+    context["reviewer"] = reviewer_tier(path, base, head, files, int(config.get("small_diff_lines") or 0))
     _write(agent_dir / CONTEXT_FILE, context)
     state.update({"schema_version": 1, "pr": number, "head": head, "base": base, "main": str(main_target),
                   "started_at": int(time.time())})
@@ -638,7 +742,10 @@ def start(main_target: Path, pr_ref: str, worktree: Path | None = None, download
         "base": base,
         "files": len(files),
         "ui_change": context["ui_change"]["ui"],
-        "media": {"found": len(media), "downloaded": downloaded},
+        "device_carried": device_carried(agent_dir, context, state),
+        "reviewer_tier": None if state["round"] > 1 else context["reviewer"]["tier"],
+        "media": {"found": len(media), "downloaded": downloaded,
+                  **({"review_kept": True} if state.get("media_agent") == "kept" else {})},
         "bootstrap": bootstrap or None,
         "next": f"CLI setup --target {path} --source-repo {main_target}, then CLI review next --target {path}",
     }
@@ -768,6 +875,13 @@ def begin(target: Path) -> dict[str, Any]:
         cli.save_state(target, run_state)
     cli.append_stage_log(agent_dir, "T1", "completed", "cli",
                          f"review of PR #{context['number']} at {context['head'][:12]} (base {context['base'][:12]})")
+    carried = device_carried(agent_dir, context, state)
+    if carried and "T7" in route:
+        with cli.run_lock(target):
+            run_state = cli.load_state(target)
+            run_state.setdefault("stages", {})["T7"] = {"status": "skipped", "reason": carried}
+            cli.save_state(target, run_state)
+        cli.append_stage_log(agent_dir, "T7", "skipped", "cli", carried)
     if state.get("spec_kept") and (agent_dir / SPEC_FILE).is_file():
         note = f"spec kept (round {state.get('round')}): the PR text and tickets did not change"
         with cli.run_lock(target):
@@ -806,9 +920,19 @@ def device_waived(agent_dir: Path, context: dict[str, Any], state: dict[str, Any
     return str(spec["device_reason"]).strip()
 
 
+def media_not_needed(context: dict[str, Any], spec: dict[str, Any], state: dict[str, Any]) -> str | None:
+    """Why the Media analyst does not run, or None: the attachments can only prove what a screen shows, so
+    they are read when the PR changes UI, an AC relies on media, or the device was required."""
+    if (context.get("ui_change") or {}).get("ui") or state.get("device_forced"):
+        return None
+    if any(isinstance(a, dict) and a.get("evidence") == "media" for a in spec.get("acceptance") or []):
+        return None
+    return "no UI change and no acceptance criterion relies on the attached media"
+
+
 def _device_needed(agent_dir: Path, context: dict[str, Any], state: dict[str, Any]) -> bool:
     review = _review_json(agent_dir)
-    if device_waived(agent_dir, context, state):
+    if device_waived(agent_dir, context, state) or device_carried(agent_dir, context, state):
         return False
     return bool((context.get("ui_change") or {}).get("ui") or state.get("device_forced") or review.get("device_required"))
 
@@ -926,7 +1050,8 @@ def _decide(target: Path, record: bool, no_device: bool) -> dict[str, Any]:
         _log_started(target, "Planner", "review spec from the PR text", record)
         # A UI change will need both APKs: the builds take minutes, so they start with the Planner, not after
         # the Reviewer. A spec that later waives the device only leaves a build nobody installs.
-        early = bool((context.get("ui_change") or {}).get("ui") or state.get("device_forced")) and not no_device
+        early = bool(((context.get("ui_change") or {}).get("ui") and not device_carried(agent_dir, context, state))
+                     or state.get("device_forced")) and not no_device
         return _answer("spawn", "derive what the PR claims to do (AC) before judging it", agent="aw-planner",
                        mode="review", stage="Planner", jira=context.get("jira"),
                        answers=state.get("planner_answers"),
@@ -946,13 +1071,19 @@ def _decide(target: Path, record: bool, no_device: bool) -> dict[str, Any]:
             waiting.append("aw-reviewer")
         else:
             _log_started(target, "Reviewer", "PR review" + (" (delta)" if delta else ""), record)
+            # A delta, or a small first-round diff with no risky area, is reviewed on the standard tier.
+            small = (context.get("reviewer") or {}).get("tier") == "standard" and not state.get("device_forced")
             run.append({"agent": "aw-reviewer", "mode": "pr-delta" if delta else "pr", "stage": "Reviewer",
-                        **({"tier": "standard"} if delta else {}),
+                        **({"tier": "standard"} if delta or small else {}),
                         "read": [f"RUN/{CONTEXT_FILE}", f"RUN/{SPEC_FILE}", *ticket_read,
                                  *[item["diff"] for item in context.get("copies") or []]]
                                 + ([f"RUN/{DELTA_FILE}"] if delta else [])})
     media = [item for item in context.get("media") or [] if item.get("status") == "downloaded"]
-    if media and not (agent_dir / MEDIA_FILE).is_file():
+    skip_media = media_not_needed(context, spec, state) if media else None
+    if skip_media and state.get("media_skipped") != skip_media and record:
+        state["media_skipped"] = skip_media
+        _write(agent_dir / STATE_FILE, state)
+    if media and not skip_media and not (agent_dir / MEDIA_FILE).is_file():
         if state.get("media_agent") == "started":
             waiting.append("aw-media")
         else:
@@ -1413,9 +1544,13 @@ def draft(target: Path, allow_quiet: bool = True) -> dict[str, Any]:
     gate = _read(agent_dir / "gate-report.json")
     device_needed = _device_needed(agent_dir, context, state)
     waived = device_waived(agent_dir, context, state)
+    carried = device_carried(agent_dir, context, state)
     device = recorded_verdict(agent_dir, "T7") if device_needed else None
     device = device if device in {"pass", "fail", "partial", "blocked"} else None
     report = (text_if_exists(agent_dir / "device-report.md") or "") if device else ""
+    if carried:
+        device = str((state.get("device_carry") or {}).get("verdict") or "pass")
+        report = text_if_exists(agent_dir / CARRIED_DEVICE_REPORT) or ""
     acceptance = _acceptance(agent_dir, context, report)
     # A PARTIAL device run whose every device-checked AC passed is not a reason to hold the approval:
     # what it left out is listed in the body. It counts only while an AC the device should prove is open.
@@ -1448,6 +1583,10 @@ def draft(target: Path, allow_quiet: bool = True) -> dict[str, Any]:
         lines.append(f"**Checks:** CI {ci_report.get('status') or 'not read'}.")
     if waived:
         lines.append(f"**Device:** not run: {waived}.")
+    elif carried:
+        gaps = device_not_verified(report)
+        lines.append(f"**Device:** {carried} (before and after checked on a device then)."
+                     + (" Not covered: " + "; ".join(g.rstrip(".") for g in gaps) + "." if gaps and device != "pass" else ""))
     elif not device_needed:
         lines.append("**Device:** not verified on a device: no UI change.")
     elif device:
