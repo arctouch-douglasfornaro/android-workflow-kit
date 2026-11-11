@@ -65,6 +65,9 @@ DEFAULT_REVIEW = {
     # A first-round diff at most this big (changed lines, and at most SMALL_DIFF_FILES files) with no risky
     # area is reviewed on the standard tier; 0 keeps every first round on the strong tier.
     "small_diff_lines": 150,
+    # The highest event the CLI picks by itself: "COMMENT" makes REQUEST_CHANGES the developer's call
+    # (`CLI review edit --event REQUEST_CHANGES`). Unset: no cap.
+    "max_event": None,
 }
 SMALL_DIFF_FILES = 5
 # Areas whose side effects a small diff hides: DI, persistence and serialization, navigation, the build,
@@ -163,6 +166,8 @@ def review_config(target: Path) -> dict[str, Any]:
         config["max_inline_comments"] = max(1, min(MAX_INLINE_LIMIT, int(config["max_inline_comments"])))
     except (TypeError, ValueError):
         config["max_inline_comments"] = DEFAULT_REVIEW["max_inline_comments"]
+    cap = str(config.get("max_event") or "").upper()
+    config["max_event"] = cap if cap in EVENTS else None
     return config
 
 
@@ -762,19 +767,23 @@ def assess_ci(context: dict[str, Any], checks: list[dict[str, Any]], checks_comm
         return {"status": "none", "reason": "no CI check ran on the PR head: the local gate runs instead", "checks": []}
     required = [check for check in checks if check.get("required")]
     considered = required or checks
-    failed = [check for check in checks if check.get("outcome") == "failed"]
+    # Only a required check (every check when none is required) fails CI; an optional failure is info.
+    failed = [check for check in considered if check.get("outcome") == "failed"]
+    optional = [c.get("name") for c in checks if c.get("outcome") == "failed" and c not in considered]
+    info = {"optional_failed": optional} if optional else {}
     pending = [check for check in considered if check.get("outcome") == "pending"]
     passed = [check for check in considered if check.get("outcome") == "passed"]
     summary = [{"name": c.get("name"), "state": c.get("outcome"), "required": bool(c.get("required")),
                 "url": c.get("url")} for c in checks]
     if failed:
         return {"status": "failed", "failed": [c.get("name") for c in failed],
-                "failed_required": [c.get("name") for c in failed if c.get("required")], "checks": summary}
+                "failed_required": [c.get("name") for c in failed if c.get("required")], "checks": summary, **info}
     if pending:
-        return {"status": "pending", "waiting_for": [c.get("name") for c in pending], "checks": summary}
+        return {"status": "pending", "waiting_for": [c.get("name") for c in pending], "checks": summary, **info}
     if not passed:
-        return {"status": "none", "reason": "every check was skipped: the local gate runs instead", "checks": summary}
-    return {"status": "passed", "trusted": True, "passed": len(passed), "checks": summary}
+        return {"status": "none", "reason": "every check was skipped: the local gate runs instead", "checks": summary,
+                **info}
+    return {"status": "passed", "trusted": True, "passed": len(passed), "checks": summary, **info}
 
 
 def ci(target: Path, wait: bool = False, timeout: float = 540, interval: float = 30) -> dict[str, Any]:
@@ -1443,10 +1452,15 @@ def _comment_body(item: dict[str, Any]) -> str:
 
 def verdict(findings: list[dict[str, Any]], ci_report: dict[str, Any], gate: dict[str, Any], device: str | None,
             acceptance: list[dict[str, Any]], context: dict[str, Any], allow_approve: bool,
-            approve_with_concerns: bool = False, ci_waived: bool = False) -> tuple[str, list[str]]:
-    """The event, by rule: anything blocking requests changes; an unproven claim comments; concerns
-    comment unless `approve_with_concerns` (then they ride along an approval); nits never change it.
-    CI still pending holds the approval unless `ci_waived` (a documentation-only change)."""
+            approve_with_concerns: bool = False, ci_waived: bool = False,
+            max_event: str | None = None) -> tuple[str, list[str]]:
+    """The event, by rule: approve with comments unless the PR itself introduces a blocker. Changes are
+    requested only for a blocking finding, failing required CI or local gate, a device FAIL, or an unmet AC
+    the PR claims (never a PR-template item, never a failure the base has too); an AC waiting for an
+    answer, an unproven claim or CI still pending comments; concerns comment unless
+    `approve_with_concerns`; nits never change it. A BLOCKED or PARTIAL device does not hold the approval
+    when CI (or the local gate) passed and nothing blocks: the body says what it could not verify.
+    `max_event` caps what the CLI picks by itself (`edit --event` still goes higher)."""
     reasons: list[str] = []
     blocking = [f for f in findings if f["severity"] == "blocking"]
     if blocking:
@@ -1457,18 +1471,27 @@ def verdict(findings: list[dict[str, Any]], ci_report: dict[str, Any], gate: dic
         reasons.append("the local gate failed")
     if device == "fail":
         reasons.append("the device check failed")
-    unmet = [a for a in acceptance if a.get("status") == "unmet"]
+    # A checked PR-template item is a checklist, not what the PR delivers: listed, never the verdict.
+    claimed = [a for a in acceptance if a.get("source") != "template"]
+    unmet = [a for a in claimed if a.get("status") == "unmet" and not a.get("on_base")]
     if unmet:
         reasons.append(f"{len(unmet)} acceptance criterion/criteria not met")
     event = "REQUEST_CHANGES" if reasons else "APPROVE"
     if event == "APPROVE":
+        ci_ok = ci_report.get("status") == "passed" or gate.get("status") == "passed" or ci_waived
+        # Our device could not finish: CI is green and nothing blocks, so the gap is ours, not the author's.
+        device_gap = device in {"partial", "blocked"} and ci_ok
         concerns = [f for f in findings if f["severity"] == "concern"]
-        unverified = [a for a in acceptance if a.get("status") == "unverified"]
+        unverified = [a for a in claimed if a.get("status") == "unverified"
+                      and not (device_gap and a.get("evidence") == "device")]
+        waiting = [a for a in claimed if a.get("status") == "open"]
         if concerns and not approve_with_concerns:
             reasons.append(f"{len(concerns)} concern(s)")
         if unverified:
             reasons.append(f"{len(unverified)} claim(s) without evidence")
-        if device in {"partial", "blocked"}:
+        if waiting:
+            reasons.append(f"{len(waiting)} acceptance criterion/criteria waiting for an answer")
+        if device in {"partial", "blocked"} and not device_gap:
             reasons.append(f"device check {device}")
         if ci_report.get("status") == "pending" and gate.get("status") != "passed" and not ci_waived:
             reasons.append("CI still pending")
@@ -1479,6 +1502,10 @@ def verdict(findings: list[dict[str, Any]], ci_report: dict[str, Any], gate: dic
     if context.get("own_pr") and event != "COMMENT":
         reasons.append(f"own PR: GitHub only allows a comment (would be {event})")
         event = "COMMENT"
+    if max_event in EVENTS and EVENTS.index(event) > EVENTS.index(max_event):
+        reasons.append(f"capped at {max_event} by review.max_event (would be {event}: "
+                       f"`CLI review edit --event {event}` posts that)")
+        event = max_event
     return event, reasons
 
 
@@ -1501,6 +1528,9 @@ def headline(event: str | None, counts: dict[str, int], reasons: list[str]) -> s
 
 
 DEVICE_SCENARIO = re.compile(r"\b(AC\d+)\b[^\n]*?:\s*\**(PASS|FAIL|BLOCKED|PARTIAL)\b", re.I)
+# A scenario line that says the failure is already on the base build: not something this PR introduced.
+ON_BASE = re.compile(r"\b(also|same|already)\s+(fails\s+)?(on|in)\s+(the\s+)?base\b|\bpre-?existing\b"
+                     r"|\bbase\s+too\b", re.I)
 
 
 from android_workflow.render import PROOF_LINE as RENDER_PROOF  # noqa: E402 - render imports nothing from here
@@ -1531,6 +1561,16 @@ def device_scenarios(report: str) -> dict[str, str]:
     return found
 
 
+def device_on_base(report: str) -> set[str]:
+    """AC ids whose device FAIL line says the base build fails the same way."""
+    return {key.upper() for line in report.splitlines() if ON_BASE.search(line)
+            for key, verdict_text in DEVICE_SCENARIO.findall(line) if verdict_text.lower() == "fail"}
+
+
+def _norm(text: Any) -> str:
+    return re.sub(r"\W+", " ", str(text or "")).strip().lower()
+
+
 def device_not_verified(report: str, limit: int = 3) -> list[str]:
     """The first bullets of the report's `# Not verified` section."""
     match = re.search(r"^#+\s*Not verified\s*$(.*?)(?=^#|\Z)", report, re.M | re.S | re.I)
@@ -1544,7 +1584,9 @@ def _acceptance(agent_dir: Path, context: dict[str, Any] | None = None,
                 device_report: str = "", target: Path | None = None) -> list[dict[str, Any]]:
     """One row per AC, reconciled with everything that ran after the Reviewer wrote it: a device
     scenario PASS proves an AC the code alone left unverified (FAIL makes it unmet), media shown proves
-    it, and an attachment the tool could not download is our gap, not the author's (`unchecked`)."""
+    it, and an attachment the tool could not download is our gap, not the author's (`unchecked`).
+    `source` comes from the Reviewer or the spec, else `template` when the text is a checked PR-template
+    item; `on_base` marks a failure the base has too; `open` an AC waiting for an answer (`question`)."""
     review = _review_json(agent_dir)
     spec = _read(agent_dir / SPEC_FILE)
     spec_rows = {str(a.get("id")): a for a in spec.get("acceptance") or [] if isinstance(a, dict)}
@@ -1554,15 +1596,21 @@ def _acceptance(agent_dir: Path, context: dict[str, Any] | None = None,
     proved = "render" if RENDER_PROOF in device_report else "device"
     render_met = set(rendered_met(target)) if target else set()
     media_failed = any(item.get("status") == "not_downloaded" for item in (context or {}).get("media") or [])
+    base_fails = device_on_base(device_report) if device_report else set()
+    checklist = {_norm(item.get("text")) for item in (context or {}).get("template_items") or []
+                 if isinstance(item, dict) and item.get("checked")}
     rows = []
     for item in review.get("acceptance") or []:
         if not isinstance(item, dict):
             continue
         key = str(item.get("id"))
         planned = spec_rows.get(key) or {}
-        status = item.get("status") if item.get("status") in {"met", "unmet", "unverified"} else "unverified"
+        status = item.get("status") if item.get("status") in {"met", "unmet", "unverified", "open"} else "unverified"
+        question = str(item.get("question") or planned.get("question") or "").strip()
+        if question and status in {"unmet", "unverified"}:
+            status = "open"  # waiting for a product or design answer: a concern, never a blocker
         by = None
-        if scenarios.get(key) == "fail":
+        if scenarios.get(key) == "fail" and status != "open":
             status, by = "unmet", proved
         elif status == "unverified" and scenarios.get(key) == "pass":
             status, by = "met", proved
@@ -1572,9 +1620,12 @@ def _acceptance(agent_dir: Path, context: dict[str, Any] | None = None,
             status, by = "met", "media"
         elif status == "unverified" and planned.get("evidence") == "media" and media_failed:
             status = "unchecked"
-        rows.append({"id": key, "text": item.get("text") or planned.get("text") or "", "status": status,
-                     "evidence": planned.get("evidence"), "proved_by": by,
-                     "source": item.get("source") or planned.get("source")})
+        text = item.get("text") or planned.get("text") or ""
+        source = item.get("source") or planned.get("source") or ("template" if _norm(text) in checklist else None)
+        rows.append({"id": key, "text": text, "status": status,
+                     "evidence": planned.get("evidence"), "proved_by": by, "source": source,
+                     **({"on_base": True} if status == "unmet" and (item.get("on_base") or key in base_fails) else {}),
+                     **({"question": question} if status == "open" and question else {})})
     return rows
 
 
@@ -1650,9 +1701,13 @@ def draft(target: Path, allow_quiet: bool = True) -> dict[str, Any]:
     # what it left out is listed in the body. It counts only while an AC the device should prove is open.
     device_open = [a for a in acceptance if a.get("evidence") == "device" and a["status"] in {"unverified", "unmet"}]
     device_for_verdict = "pass" if device == "partial" and not device_open else device
+    failing = {key for key, value in device_scenarios(report).items() if value == "fail"}
+    if device == "fail" and failing and failing <= device_on_base(report):
+        device_for_verdict = "pass"  # every failing scenario fails on the base too: not this PR's doing
     ci_waived = ci_not_needed(context, state)
     event, reasons = verdict(findings, ci_report, gate, device_for_verdict, acceptance, context,
-                             bool(config["allow_approve"]), bool(config["approve_with_concerns"]), bool(ci_waived))
+                             bool(config["allow_approve"]), bool(config["approve_with_concerns"]), bool(ci_waived),
+                             config.get("max_event"))
 
     lines: list[str] = []
     counts = {severity: sum(1 for f in findings if f["severity"] == severity) for severity in SEVERITY_ORDER}
@@ -1664,8 +1719,11 @@ def draft(target: Path, allow_quiet: bool = True) -> dict[str, Any]:
         lines.append("**What I checked**")
         lines.extend(f"- {item}" for item in verified)
         lines.append("")
+    optional_failed = ci_report.get("optional_failed") or []
     if ci_report.get("status") == "passed":
-        lines.append(f"**Checks:** CI passed on {context['head'][:7]} ({ci_report.get('passed')} check(s)).")
+        lines.append(f"**Checks:** CI passed on {context['head'][:7]} ({ci_report.get('passed')} check(s))."
+                     + (" Optional check(s) failing (not required): " + ", ".join(optional_failed) + "."
+                        if optional_failed else ""))
     elif ci_report.get("status") == "failed":
         lines.append("**Checks:** failing on CI: " + ", ".join(ci_report.get("failed") or []) + ".")
     elif ci_waived:
@@ -1702,13 +1760,15 @@ def draft(target: Path, allow_quiet: bool = True) -> dict[str, Any]:
     if acceptance:
         lines.append("")
         lines.append("**Acceptance criteria**")
-        mark = {"met": "✅", "unmet": "❌", "unverified": "⚠️ not verified:",
+        mark = {"met": "✅", "unmet": "❌", "unverified": "⚠️ not verified:", "open": "❓ open:",
                 "unchecked": "➖ not checked (the attachment could not be downloaded):"}
         for row in acceptance:
             source = " _(PR template)_" if row.get("source") == "template" else ""
             by = {"device": " _(on device)_", "render": " _(in a JVM render)_",
                   "media": " _(in the attached media)_"}.get(str(row.get("proved_by")), "")
-            lines.append(f"- {mark[row['status']]} {row['text']}{source}{by}".replace("  ", " "))
+            base = " _(fails on the base too: not introduced by this PR)_" if row.get("on_base") else ""
+            question = f" — {row['question']}" if row.get("question") else ""
+            lines.append(f"- {mark[row['status']]} {row['text']}{source}{by}{base}{question}".replace("  ", " "))
     threads = [t for t in _review_json(agent_dir).get("threads") or [] if isinstance(t, dict)]
     open_threads = [t for t in threads if not t.get("addressed")]
     if threads:

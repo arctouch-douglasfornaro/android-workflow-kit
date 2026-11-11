@@ -173,21 +173,30 @@ CLI gate | prebuild | device … | emulator … | log …  --target WT         (
   and every attachment is the same (link, status, SHA-256); any change runs the Media analyst again.
   The device is this run's own lease, as in android-workflow; with `device.dedicated` (default `true`) it is
   always an emulator the workflow started, never the developer's own emulator or phone.
-- **CI** is trusted when every required check (else every check) on the PR head passed. Pending →
+- **CI** is trusted when every required check (else every check) on the PR head passed; only those
+  fail it, an optional check failing is listed in the body as info. Pending →
   wait up to `review.ci_wait_minutes` (30), then the local gate; no check at all, or all skipped →
   the local gate for the touched modules. **Documentation only** (every changed file `.md`/`.txt`/…,
   or CI passed on the previous head and the new commits are docs only) → CI is not waited for, the
   gate never runs, and pending CI does not hold the approval (the body says why).
 - **Acceptance** is reconciled at draft time with what ran after the Reviewer: a device scenario
   `ACn …: PASS` proves an AC (FAIL makes it unmet), media shown proves it, and an attachment the tool
-  could not download is marked "not checked", never held against the author.
-- **Verdict**: any blocking finding, failing CI, a failed local gate, a device FAIL or an unmet AC
-  → `REQUEST_CHANGES`; else unverified claims (checked template items without evidence), a BLOCKED
-  device, a PARTIAL device with a device AC still open, or CI still pending → `COMMENT`; else
-  `APPROVE`. **Concerns and nits approve** (posted with it as comments; `review.approve_with_concerns:
-  false` makes concerns `COMMENT` again). Own PR → always `COMMENT` (GitHub's rule).
-  `review.allow_approve: false` → `COMMENT` instead of approve. `edit --event` rewrites the body's
-  generated first line to match the new event.
+  could not download is marked "not checked", never held against the author. Each AC keeps its
+  `source` (`pr_body` | `jira` | `template`; an AC with none whose text is a checked PR-template item
+  is `template`). In `review.json` the Reviewer marks `on_base: true` on an unmet AC the base build
+  fails the same way (a device line `ACn …: FAIL, also fails on base` does the same), and an AC that
+  waits for a product or design answer gets `status: open` (or `question: "…"`): shown as ❓ with it.
+- **Verdict** — approve with comments unless the PR itself introduces a blocker: a blocking finding,
+  failing required CI, a failed local gate, a device FAIL, or an unmet AC the PR claims →
+  `REQUEST_CHANGES`. Never from a PR-template item (listed only), a failure the base has too, or a
+  device FAIL whose every failing scenario is on the base. An AC waiting for an answer, an unproven
+  claim, or CI still pending → `COMMENT`; else `APPROVE`. A BLOCKED or PARTIAL device does not hold
+  the approval when CI (or the local gate) passed and nothing blocks: the body says what the device
+  could not verify. **Concerns and nits approve** (posted with it as comments;
+  `review.approve_with_concerns: false` makes concerns `COMMENT` again). `review.max_event: "COMMENT"`
+  caps what the CLI picks: `REQUEST_CHANGES` is then only the developer's `edit --event`. Own PR →
+  always `COMMENT` (GitHub's rule). `review.allow_approve: false` → `COMMENT` instead of approve.
+  `edit --event` rewrites the body's generated first line to match the new event.
 - **Quiet delta round**: we already approved an earlier head and the delta Reviewer, the media and
   CI found nothing new (every earlier thread addressed, no device needed) → no CI wait and no second
   review: a draft with `Event: none` that only resolves our addressed threads after the OK, or `done`
@@ -224,7 +233,7 @@ CLI gate | prebuild | device … | emulator … | log …  --target WT         (
 
 Config, per project in `.ai/android-workflow.json`:
 `{"review": {"max_inline_comments": 10, "allow_approve": true, "media_max_mb": 100, "ci_wait_minutes": 30,
-"nits_inline": true, "approve_with_concerns": true}}`.
+"nits_inline": true, "approve_with_concerns": true, "max_event": null}}`.
 
 Attachments of a private repo download through the signed URL GitHub renders in the PR's
 `body_html` (`private-user-images…?jwt=`); the plain `user-attachments` link answers a login page.

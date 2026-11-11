@@ -132,8 +132,14 @@ class PureRuleTests(unittest.TestCase):
         self.assertEqual(review.assess_ci(context, [ok], "old")["status"], "pending")
         self.assertEqual(review.assess_ci(context, [], "abc")["status"], "none")
         self.assertEqual(review.assess_ci(context, [{**ok, "outcome": "pending"}], "abc")["status"], "pending")
-        failed = review.assess_ci(context, [ok, {"name": "lint", "outcome": "failed", "required": False}], "abc")
-        self.assertEqual((failed["status"], failed["failed"]), ("failed", ["lint"]))
+        # an optional check failing is info, never "CI failing"
+        optional = review.assess_ci(context, [ok, {"name": "lint", "outcome": "failed", "required": False}], "abc")
+        self.assertEqual((optional["status"], optional["optional_failed"]), ("passed", ["lint"]))
+        failed = review.assess_ci(context, [{**ok, "outcome": "failed"}, {"name": "lint", "outcome": "failed"}], "abc")
+        self.assertEqual((failed["status"], failed["failed"], failed["optional_failed"]), ("failed", ["build"], ["lint"]))
+        # no check marked required: every check counts
+        unmarked = review.assess_ci(context, [{"name": "lint", "outcome": "failed"}], "abc")
+        self.assertEqual((unmarked["status"], unmarked["failed"]), ("failed", ["lint"]))
         skipped = review.assess_ci(context, [{"name": "x", "outcome": "pending", "required": False},
                                              {"name": "build", "outcome": "passed", "required": False}], "abc")
         self.assertEqual(skipped["status"], "pending")
@@ -149,9 +155,25 @@ class PureRuleTests(unittest.TestCase):
         self.assertEqual(review.verdict([], {"status": "failed", "failed": ["build"]}, {}, None, [], {}, True)[0],
                          "REQUEST_CHANGES")
         self.assertEqual(review.verdict([], ci_ok, {}, "fail", [], {}, True)[0], "REQUEST_CHANGES")
-        self.assertEqual(review.verdict([], ci_ok, {}, "partial", [], {}, True)[0], "COMMENT")
+        # our device could not finish: with CI green and nothing blocking, the gap does not hold the approval
+        self.assertEqual(review.verdict([], ci_ok, {}, "partial", [], {}, True)[0], "APPROVE")
+        self.assertEqual(review.verdict([], ci_ok, {}, "blocked", [{"status": "unverified", "evidence": "device"}],
+                                        {}, True)[0], "APPROVE")
+        self.assertEqual(review.verdict([], {"status": "pending"}, {}, "blocked", [], {}, True)[0], "COMMENT")
+        self.assertEqual(review.verdict([], {"status": "none"}, {"status": "passed"}, "blocked", [], {}, True)[0], "APPROVE")
         self.assertEqual(review.verdict([], ci_ok, {}, None, [{"status": "unverified"}], {}, True)[0], "COMMENT")
         self.assertEqual(review.verdict([], ci_ok, {}, None, [{"status": "unmet"}], {}, True)[0], "REQUEST_CHANGES")
+        # only what the PR itself introduces blocks: a template item, a failure the base has too, an open question
+        template = {"status": "unmet", "source": "template"}
+        self.assertEqual(review.verdict([], ci_ok, {}, None, [template, {**template, "status": "unverified"}], {}, True),
+                         ("APPROVE", []))
+        self.assertEqual(review.verdict([], ci_ok, {}, None, [{"status": "unmet", "on_base": True}], {}, True)[0], "APPROVE")
+        self.assertEqual(review.verdict([], ci_ok, {}, None, [{"status": "open"}], {}, True)[0], "COMMENT")
+        # review.max_event caps what the CLI picks by itself
+        capped = review.verdict([blocking], ci_ok, {}, None, [], {}, True, max_event="COMMENT")
+        self.assertEqual(capped[0], "COMMENT")
+        self.assertIn("edit --event REQUEST_CHANGES", capped[1][-1])
+        self.assertEqual(review.verdict([nit], ci_ok, {}, None, [], {}, True, max_event="COMMENT")[0], "APPROVE")
         self.assertEqual(review.verdict([], ci_ok, {}, None, [], {}, False)[0], "COMMENT")
         self.assertEqual(review.verdict([blocking], ci_ok, {}, None, [], {"own_pr": True}, True)[0], "COMMENT")
         # approve_with_concerns: concerns ride along an approval; an unproven claim still comments
@@ -323,7 +345,7 @@ class FlowTests(unittest.TestCase):
             drafted = review.draft(worktree)
             agent_dir = review.agent_dir_for(worktree)
             value = read_json(agent_dir / review.DRAFT_FILE)
-            self.assertEqual(drafted["event"], "COMMENT")
+            self.assertEqual(drafted["event"], "APPROVE")  # concerns approve; a template item never holds it
             self.assertEqual(len(value["comments"]), 10)
             self.assertEqual(value["comments"][0]["body"], "cache() is never invalidated")
             self.assertTrue(value["comments"][1]["body"].startswith("nit: "))
@@ -352,7 +374,7 @@ class FlowTests(unittest.TestCase):
                 payload = json.loads(gh.call_args.kwargs["stdin"])
             self.assertEqual(posted["status"], "posted")
             self.assertEqual((payload["event"], payload["commit_id"], len(payload["comments"])),
-                             ("COMMENT", project.head, 9))
+                             ("APPROVE", project.head, 9))
             self.assertEqual(payload["comments"][1]["body"], "nit: shorter")
             self.assertIn("/pulls/7/reviews", gh.call_args.args[0][3])
             self.assertEqual(review.next_action(worktree)["next"], "done")
@@ -792,6 +814,47 @@ class DeviceTests(unittest.TestCase):
         self.assertEqual(drafted["event"], "APPROVE")
         self.assertIn("not verified on a device: no device: no SDK", body)
 
+    def drafted_with_device(self, project: Project, report: str, acceptance: list[dict], ci: dict | None = None,
+                            before: bool = True, after: bool = True) -> tuple[dict, dict]:
+        """A UI change whose device run ended with `report`; returns (draft result, draft json)."""
+        result = project.start()
+        worktree, agent_dir = Path(result["worktree_path"]), Path(result["run"])
+        write_profile(worktree)
+        review.next_action(worktree)
+        (agent_dir / review.SPEC_FILE).write_text(json.dumps({"status": "ready", "acceptance": [
+            {"id": row["id"], "text": row.get("text", row["id"]), "evidence": row.get("evidence", "device")}
+            for row in acceptance]}))
+        log_stage(worktree, "Planner", "completed", "AC", "host")
+        review.next_action(worktree)
+        (agent_dir / "review.json").write_text(json.dumps({"status": "approved", "blocking": [], "acceptance": [
+            {"id": row["id"], "status": row.get("status", "unverified")} for row in acceptance]}))
+        log_stage(worktree, "Reviewer", "completed", "done", "host")
+        (agent_dir / review.CI_FILE).write_text(json.dumps(ci or {"status": "passed", "passed": 1}))
+        (agent_dir / "device-report.md").write_text(report)
+        for phase, present in (("before", before), ("after", after)):
+            if present:
+                (agent_dir / "media" / phase).mkdir(parents=True, exist_ok=True)
+                (agent_dir / "media" / phase / "profile.png").write_bytes(b"png")
+        drafted = review.draft(worktree)
+        return drafted, read_json(agent_dir / review.DRAFT_FILE)
+
+    def test_our_device_gap_or_a_base_failure_does_not_hold_the_approval(self) -> None:
+        ui = {SCREEN: "package com.example\n\n@Composable\nfun ProfileScreen() {}\n"}
+        blocked = "# Status\n\nBLOCKED\n\n# Not verified\n\n- The login wall hides the profile.\n"
+        with Project(ui) as project:
+            drafted, value = self.drafted_with_device(project, blocked, [{"id": "AC1"}],
+                                                      ci={"status": "passed", "passed": 2, "optional_failed": ["lint"]})
+        self.assertEqual(drafted["event"], "APPROVE")
+        self.assertIn("Optional check(s) failing (not required): lint.", value["body"])
+        on_base = "# Status\n\nFAIL\n\n# Scenarios\n\n- AC1 profile: FAIL, also fails on base\n"
+        with Project(ui) as project:
+            drafted, value = self.drafted_with_device(project, on_base, [{"id": "AC1"}])
+        self.assertEqual(drafted["event"], "APPROVE")
+        self.assertIn("fails on the base too: not introduced by this PR", value["body"])
+        with Project(ui) as project:
+            drafted, _ = self.drafted_with_device(project, blocked, [{"id": "AC1"}], ci={"status": "pending"})
+        self.assertEqual(drafted["event"], "COMMENT")  # CI not green yet: the gap still holds it
+
     def test_the_reviewer_can_require_the_device_never_remove_it(self) -> None:
         with Project({REPO: "package com.example\n\nclass ProfileRepository\n"}) as project:
             result = project.start()
@@ -1040,6 +1103,40 @@ class SignalTests(unittest.TestCase):
             context = {"media": [{"id": "M1", "status": "not_downloaded"}]}
             rows = {r["id"]: r["status"] for r in review._acceptance(run, context, report)}
         self.assertEqual(rows, {"AC1": "met", "AC2": "unmet", "AC3": "unchecked", "AC4": "unverified"})
+
+    def test_acceptance_knows_template_items_base_failures_and_open_questions(self) -> None:
+        report = "# Status\n\nFAIL\n\n# Scenarios\n\n- AC2 empty state: FAIL, also fails on base\n- AC3 retry: FAIL\n"
+        self.assertEqual(review.device_on_base(report), {"AC2"})
+        with tempfile.TemporaryDirectory() as folder:
+            run = Path(folder)
+            (run / "review.json").write_text(json.dumps({"acceptance": [
+                {"id": "AC1", "status": "unmet"}, {"id": "AC2", "status": "unverified"},
+                {"id": "AC3", "status": "unverified"}, {"id": "AC4", "status": "unmet", "question": "Which copy?"},
+                {"id": "AC5", "status": "unmet", "on_base": True}]}))
+            (run / review.SPEC_FILE).write_text(json.dumps({"acceptance": [
+                {"id": "AC1", "text": "Tested on device."}, {"id": "AC2", "text": "b", "evidence": "device"},
+                {"id": "AC3", "text": "c", "evidence": "device"}, {"id": "AC4", "text": "d"}, {"id": "AC5", "text": "e"}]}))
+            context = {"template_items": [{"id": "T1", "text": "Tested on device", "checked": True},
+                                          {"id": "T2", "text": "e", "checked": False}]}
+            rows = {r["id"]: r for r in review._acceptance(run, context, report)}
+        self.assertEqual(rows["AC1"]["source"], "template")  # a checked template item, by its text
+        self.assertIsNone(rows["AC5"]["source"])              # unchecked items are no claims
+        self.assertEqual((rows["AC2"]["status"], rows["AC2"].get("on_base")), ("unmet", True))
+        self.assertEqual((rows["AC3"]["status"], rows["AC3"].get("on_base")), ("unmet", None))
+        self.assertEqual((rows["AC4"]["status"], rows["AC4"]["question"]), ("open", "Which copy?"))
+        self.assertTrue(rows["AC5"]["on_base"])
+        event, reasons = review.verdict([], {"status": "passed"}, {}, None, list(rows.values()), {}, True)
+        self.assertEqual((event, reasons), ("REQUEST_CHANGES", ["1 acceptance criterion/criteria not met"]))  # AC3 only
+
+    def test_max_event_config(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            target = Path(folder)
+            (target / ".ai").mkdir()
+            self.assertIsNone(review.review_config(target)["max_event"])
+            (target / ".ai/android-workflow.json").write_text(json.dumps({"review": {"max_event": "comment"}}))
+            self.assertEqual(review.review_config(target)["max_event"], "COMMENT")
+            (target / ".ai/android-workflow.json").write_text(json.dumps({"review": {"max_event": "nope"}}))
+            self.assertIsNone(review.review_config(target)["max_event"])
 
     def test_nits_alone_approve(self) -> None:
         nit = [{"id": "S1", "severity": "nit", "problem": "rename", "path": REPO, "line": 4}]
