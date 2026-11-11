@@ -274,7 +274,9 @@ CLI status|list --target T                          CLI clean --target T [--tick
       red after its fix rounds: push nothing, tell the developer what is open, keep watching.
     - `sync` (`behind` or `conflict`): `CLI pr sync --target TARGET`. `synced` → wait again.
       `conflict` → the Implementer resolves the listed files (keeping both intents), the gate runs,
-      then `CLI pr sync --target TARGET --continue`. Never rebase or force-push.
+      then `CLI pr sync --target TARGET --continue`. Never rebase or force-push. While the merge is open
+      the gate measures the change against the commit being merged in, so the base branch's own files
+      are never linted as ours.
     - `merge`: with `auto_merge` (the default) → `CLI pr merge --target TARGET`; it reads the PR again,
       merges with the method the repository allows (squash first) only if still ready, and never
       bypasses branch protection. `not_ready` → wait again. Without `auto_merge` → tell the developer

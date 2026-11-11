@@ -424,8 +424,11 @@ class SyncTests(unittest.TestCase):
             path.write_text("package com.example\n\nfun ProfileScreen() = 42\n", encoding="utf-8")
             done, code = watch.sync(root, resume=True)
             pushed = git(remote, "log", "-1", "--format=%P", "user/D-1-change").split()
+            message = git(remote, "log", "-1", "--format=%B", "user/D-1-change")
         self.assertEqual((code, done["status"]), (0, "synced"))
         self.assertEqual(len(pushed), 2)
+        self.assertTrue(message.startswith("Merge "), message)
+        self.assertNotIn("# Conflicts", message)  # git's commented hints never reach the commit
 
     def test_uncommitted_work_is_never_merged_over(self) -> None:
         with AndroidProject() as root:

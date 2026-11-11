@@ -483,8 +483,18 @@ def durable_overrides(root: Path) -> dict[str, Any]:
     return read_json(path) if path.is_file() else {}
 
 
+def merge_head(target: Path) -> str | None:
+    """The commit being merged in (`pr sync` stopped on a conflict, or before its commit), else None."""
+    result = subprocess.run(["git", "-C", str(target), "rev-parse", "-q", "--verify", "MERGE_HEAD"],
+                            text=True, capture_output=True, check=False)
+    return result.stdout.strip() or None if result.returncode == 0 else None
+
+
 def diff_base(target: Path) -> str | None:
     """The commit this change is measured against.
+
+    While a merge of the base branch is in progress, that is the commit being merged (MERGE_HEAD): the
+    change is what this branch adds on top of it, never the base branch's own files.
 
     The pinned `base_commit` is HEAD when the run started. Merging the default branch in afterwards
     would make every file that branch brought look changed (a whole-repo gate, waivers on files
@@ -495,6 +505,9 @@ def diff_base(target: Path) -> str | None:
     base = read_json(repo_map_path).get("base_commit") if repo_map_path.exists() else None
     if not base:
         return None
+    merging = merge_head(target)
+    if merging:
+        return merging
 
     def git_out(*args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(["git", "-C", str(target), *args], text=True, capture_output=True, check=False)
@@ -1767,9 +1780,21 @@ def git_status_paths(target: Path) -> list[str]:
     return paths
 
 
+def merged_in(target: Path, names: Any) -> list[str]:
+    """`names` without the files a merge in progress brought from the base branch: during a merge `git
+    status` lists every file the base changed as staged, though this change never wrote them."""
+    names = list(names)
+    merging = merge_head(target)
+    if not merging:
+        return names
+    ours = set(git_lines(target, "diff", "--name-only", merging) or [])
+    ours.update(git_lines(target, "ls-files", "--others", "--exclude-standard") or [])
+    return [name for name in names if name in ours]
+
+
 def touched_files(target: Path) -> set[str]:
     """Every file this change touches, whatever its type: the scope lint findings are judged against."""
-    names = set(source_changes(target)) | set(git_status_paths(target))
+    names = set(source_changes(target)) | set(merged_in(target, git_status_paths(target)))
     base = diff_base(target)
     diff = subprocess.run(
         ["git", "-C", str(target), "diff", "--name-only", *([base] if base else [])],
@@ -2346,9 +2371,8 @@ def changed_paths(target: Path) -> tuple[list[str], list[str]]:
         capture_output=True,
         check=False,
     )
-    for entry in status.stdout.splitlines():
-        if len(entry) >= 4:
-            names.append(entry[3:].strip().split(" -> ")[-1].strip('"'))
+    listed = [entry[3:].strip().split(" -> ")[-1].strip('"') for entry in status.stdout.splitlines() if len(entry) >= 4]
+    names.extend(merged_in(target, listed))
     return names, tracked
 
 

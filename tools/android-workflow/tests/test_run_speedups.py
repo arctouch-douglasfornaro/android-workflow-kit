@@ -125,6 +125,30 @@ class DiffBaseTests(unittest.TestCase):
             self.assertEqual(diff_base(root), git(root, "rev-parse", "main"))
             self.assertNotIn("core/domain/Other.kt", source_changes(root))
 
+    def test_a_merge_in_progress_leaves_the_base_branch_files_out_of_the_change(self) -> None:
+        from android_workflow.cli import touched_files
+
+        with AndroidProject() as root:
+            fake_gradle_project(root, {})
+            git(root, "branch", "-M", "main")
+            git(root, "checkout", "-qb", "feature")
+            run(root, {"id": "M-3", "title": "Change ProfileScreen", "type": "chore"})
+            implement(root)
+            git(root, "add", "-A")
+            git(root, "commit", "-qm", "feature work")
+            git(root, "checkout", "-q", "main")
+            (root / "core/domain/Other.kt").write_text("class Other\n", encoding="utf-8")
+            git(root, "add", "-A")
+            git(root, "commit", "-qm", "someone else's work")
+            git(root, "checkout", "-q", "feature")
+            git(root, "merge", "-q", "--no-commit", "--no-ff", "main")  # `pr sync` stopped before its commit
+
+            touched = touched_files(root)
+            self.assertNotIn("core/domain/Other.kt", touched)
+            self.assertIn(SCREEN, touched)
+            self.assertNotIn("core/domain/Other.kt", source_changes(root))
+            self.assertEqual(diff_base(root), git(root, "rev-parse", "MERGE_HEAD"))
+
     def test_without_a_remote_the_pinned_base_is_kept(self) -> None:
         with AndroidProject() as root:
             fake_gradle_project(root, {})

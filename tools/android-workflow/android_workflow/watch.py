@@ -795,7 +795,8 @@ def sync(target: Path, resume: bool = False) -> tuple[dict[str, Any], int]:
             return {"status": "conflict", "files": markers, "reason": "conflict markers are still in these files"}, 1
         if conflicted:
             _git(target, "add", "--", *conflicted)
-        committed = _git(target, "commit", "--no-edit")
+        # `strip`: git's `# Conflicts:` hints in MERGE_MSG never reach the commit message.
+        committed = _git(target, "commit", "--no-edit", "--cleanup=strip")
         if committed.returncode != 0:
             raise ValueError(f"git commit failed (hooks run here): {committed.stdout[-800:]}{committed.stderr[-800:]}")
     else:
