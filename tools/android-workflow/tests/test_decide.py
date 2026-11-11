@@ -570,7 +570,9 @@ class RunTests(unittest.TestCase):
             self.assertEqual(self.next()["agent"], "aw-device")
             # The agent spent its time and came back with notes, no verdict.
             (self.rundir / "device-report.md").write_text("Stuck behind a login wall.\n", encoding="utf-8")
+            # No verdict: `completed` is refused and the agent would be resumed, but the budget is spent.
             cli("log", "--target", self.target, "--stage", "Device", "--status", "completed", "--tokens", "1")
+            self.assertTrue(read_json(self.rundir / "run-state.json")["stages"]["T7"].get("missing_artifact"))
             self.spend_device(6)
             answer = self.next()
         report = (self.rundir / "device-report.md").read_text(encoding="utf-8")

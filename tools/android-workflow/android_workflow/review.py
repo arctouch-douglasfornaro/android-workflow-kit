@@ -1056,6 +1056,12 @@ def _decide(target: Path, record: bool, no_device: bool) -> dict[str, Any]:
         begin(target)
         state = _read(agent_dir / STATE_FILE)
     delta = state.get("round", 1) > 1 and (agent_dir / DELTA_FILE).is_file()
+    from android_workflow import decide
+    from android_workflow.cli import load_state
+
+    missing = decide.missing_artifact_step(target, agent_dir, load_state(target).get("stages") or {}, record, review=True)
+    if missing and missing.get("next") != "closed":  # closed: the device step below reads the new report
+        return missing
 
     # 1. Spec: the AC the PR claims, from its text, the Jira ticket and the template.
     spec = _read(agent_dir / SPEC_FILE)

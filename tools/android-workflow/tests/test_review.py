@@ -816,7 +816,11 @@ class DeviceTests(unittest.TestCase):
                     spawns.append(answer)
                     # The agent came back with notes but no verdict (the old loop: spawned again and again).
                     (agent_dir / "device-report.md").write_text("Device notes: a login wall?\n", encoding="utf-8")
-                    log_stage(worktree, "Device", "completed", "notes", "host")
+                    with self.assertRaises(ValueError):  # no verdict: refused, the agent is resumed
+                        log_stage(worktree, "Device", "completed", "notes", "host")
+                    metrics = read_json(agent_dir / "stage-metrics.json")
+                    metrics["stages"]["T7"]["attempts"] = len(spawns)  # each resume is one more device round
+                    (agent_dir / "stage-metrics.json").write_text(json.dumps(metrics), encoding="utf-8")
             report = (agent_dir / "device-report.md").read_text(encoding="utf-8")
         self.assertEqual(len(spawns), 2)
         self.assertEqual(answer["next"], "draft")
