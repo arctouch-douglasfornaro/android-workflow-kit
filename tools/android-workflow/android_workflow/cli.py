@@ -110,7 +110,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "install": "./gradlew installDebug",
     },
     "device": {"app_module": None, "application_id": None, "launch_activity": None,
-               "flow_timeout_seconds": 180, "after_budget_seconds": 300},
+               "flow_timeout_seconds": 180, "after_budget_seconds": 300,
+               "budget_minutes": 20, "boot_stall_seconds": 360},
     # Pure Kotlin/Java modules have no variants: `:data:compileKotlin`, not `compileDebugKotlin`.
     "jvm_modules": None,  # None = detect; a list recorded by Setup wins
     "jvm_module_commands": {
