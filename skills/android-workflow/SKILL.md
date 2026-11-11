@@ -455,6 +455,12 @@ Show: PR URL (and whether it is a draft), changed files, stage log path, and the
 `media/after` paths so the user can drag the evidence into the PR. End with `office_message` from
 `CLI status --target TARGET`, as is, on its own line (also when you stop to ask the user).
 
+The PR description on GitHub is the source of truth once the PR is open. Every update (`CLI deliver`,
+`CLI pr body`) reads it first. A section edited there since the workflow's last post
+(`RUN/pr-body-posted.md`) keeps that text. Only a section the workflow changed and nobody touched
+on the PR is replaced, and a new section is added. `RUN/pr-description.md` then mirrors the PR.
+Never write a description back over edits made on the PR.
+
 Commit message and PR body are product copy only: no host/agent/tool names, no
 `Generated with …`, `🤖`, `Assisted-by` or agent `Co-Authored-By`. Only when the project sets
 `"attribution": {"enabled": true}` in `.ai/android-workflow.json` does `CLI deliver` add the host's

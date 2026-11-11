@@ -107,7 +107,8 @@ those changes: `CLI pr reply --target TARGET --item <id> --body "<what changed> 
 two sentences, specific to that comment. For the reviewers in `rerequest`:
 `CLI pr rerequest --target TARGET --reviewer <login>`. Leave the thread open: resolving it is the
 reviewer's call. A change that alters what the PR description says (an event, a behavior, the
-out-of-scope line): write that section anew to `RUN/pr-section.md` and run `CLI pr body --target
+out-of-scope line): start from that section as it is in `RUN/pr-description.md` (it mirrors the PR,
+edits made there included), write it anew to `RUN/pr-section.md` and run `CLI pr body --target
 TARGET --section "<its heading>" --file RUN/pr-section.md`; it replaces only that section on GitHub
 and keeps the rest, the developer's own edits and images included. Never rewrite the whole body.
 

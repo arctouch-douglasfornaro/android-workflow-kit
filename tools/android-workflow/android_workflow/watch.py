@@ -735,6 +735,7 @@ def rerequest(target: Path, logins: list[str]) -> dict[str, Any]:
     return {"rerequested": logins}
 
 
+POSTED_BODY_FILE = "pr-body-posted.md"  # the description the workflow last published on the PR
 HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
 FENCE = re.compile(r"^\s*(```|~~~)")
 IMAGE = re.compile(r"!\[[^\]]*\]\([^)]+\)|<img\s|<video\s|github\.com/user-attachments/", re.I)
@@ -802,6 +803,66 @@ def replace_section(body: str, heading: str, section: str) -> str:
     return result + "\n"
 
 
+def _norm_body(text: str) -> str:
+    from android_workflow.cli import strip_agent_attribution
+
+    return "\n".join(line.rstrip() for line in strip_agent_attribution(text or "").replace("\r\n", "\n").strip().splitlines())
+
+
+def _top_sections(body: str) -> tuple[str, list[tuple[str, str, str]]]:
+    """(text before the first heading, [(key, heading line, section text without its heading)]) at the body's
+    top heading level; a sub-heading belongs to its section. The key is the heading's normalized text."""
+    lines = body.replace("\r\n", "\n").splitlines()
+    headings = _headings(lines)
+    if not headings:
+        return body, []
+    top = min(level for _, level, _ in headings)
+    starts = [(index, text) for index, level, text in headings if level == top]
+    sections = []
+    for number, (index, key) in enumerate(starts):
+        end = starts[number + 1][0] if number + 1 < len(starts) else len(lines)
+        sections.append((key, lines[index].strip(), "\n".join(lines[index + 1:end])))
+    return "\n".join(lines[:starts[0][0]]), sections
+
+
+def merge_body(live: str, posted: str | None, new: str) -> tuple[str, list[str], list[str]]:
+    """The PR description to publish when the workflow updates a PR that is already open: (body, applied,
+    kept). The description on the PR now always wins over the workflow's copy: a section the developer (or
+    anyone) edited after the workflow last posted keeps their text (`kept`); a section the workflow changed
+    since `posted` (what it published last time) replaces only that section when nobody touched it there
+    (`applied`), and a new one is added. With no record of what was posted, every section already on the PR
+    is kept and only sections it lacks are added. Nothing edited on the PR since the last post → `new`."""
+    if not live.strip() or (posted is not None and _norm_body(live) == _norm_body(posted)):
+        return new, [], []
+    live_pre, live_sections = _top_sections(live)
+    new_pre, new_sections = _top_sections(new)
+    base = {key: text for key, _, text in _top_sections(posted)[1]} if posted is not None else None
+    base_pre = _top_sections(posted)[0] if posted is not None else None
+    on_pr = {key: text for key, _, text in live_sections}
+    body, applied, kept = live, [], []
+    for key, heading, text in new_sections:
+        if base is not None and key in base and _norm_body(text) == _norm_body(base[key]):
+            continue  # the workflow did not change this section: what the PR has stays
+        if key not in on_pr:
+            if base is not None and key in base:
+                kept.append(heading)  # removed on the PR after the workflow posted it: stays removed
+                continue
+            body = replace_section(body, heading, text)
+            applied.append(heading)
+        elif base is not None and _norm_body(on_pr[key]) == _norm_body(base.get(key, "")) and key in base:
+            body = replace_section(body, heading, text)
+            applied.append(heading)
+        elif _norm_body(on_pr[key]) != _norm_body(text):
+            kept.append(heading)  # edited on the PR (or no record of the last post): the PR's text wins
+    if (base_pre is not None and _norm_body(new_pre) != _norm_body(base_pre)
+            and _norm_body(live_pre) == _norm_body(base_pre)):
+        current_pre = _top_sections(body)[0]
+        rest = body.replace("\r\n", "\n")[len(current_pre):].lstrip("\n")
+        body = "\n\n".join(part for part in (new_pre.strip("\n"), rest) if part)
+        applied.insert(0, "(intro)")
+    return body if body.endswith("\n") else body + "\n", applied, kept
+
+
 def pr_body(target: Path, heading: str, file: Path, number: int | None = None) -> dict[str, Any]:
     """Replace one section of the open PR's description on GitHub (and in RUN/pr-description.md), keeping the
     rest as it is there now: a fix round that changes described behavior updates its section, not the body."""
@@ -819,9 +880,9 @@ def pr_body(target: Path, heading: str, file: Path, number: int | None = None) -
     edited = _gh(["pr", "edit", str(number), "--body-file", "-"], env=env, stdin=body, cwd=target)
     if edited.returncode != 0:
         raise ValueError(f"could not edit PR #{number}: {(edited.stderr or edited.stdout).strip()[-300:]}")
-    local = agent_dir / "pr-description.md"
-    if local.is_file():
-        local.write_text(replace_section(local.read_text(encoding="utf-8"), heading, section), encoding="utf-8")
+    # The local copy follows the PR as it is now (edits made on GitHub included), never the reverse.
+    (agent_dir / "pr-description.md").write_text(body, encoding="utf-8")
+    (agent_dir / POSTED_BODY_FILE).write_text(body, encoding="utf-8")
     return {"pr": number, "section": heading, "status": "updated"}
 
 

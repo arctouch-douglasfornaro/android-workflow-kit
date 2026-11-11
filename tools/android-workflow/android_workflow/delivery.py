@@ -8,6 +8,7 @@ the base branch.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -153,18 +154,42 @@ def open_pull_request(
             raise ValueError(f"`{cli}` timed out after {timeout}s") from error
 
     if host == "github":
-        existing = run("pr", "view", branch, "--json", "url,state,isDraft", "-q",
-                       '.state + " " + (.isDraft | tostring) + " " + .url')
-        if existing.returncode == 0 and existing.stdout.startswith("OPEN "):
-            fields = existing.stdout.split()
-            was_draft, url = (fields[1] == "true", fields[-1]) if len(fields) >= 3 else (False, fields[-1])
+        from android_workflow.watch import POSTED_BODY_FILE, merge_body
+
+        posted_file = body_file.parent / POSTED_BODY_FILE
+        existing = run("pr", "view", branch, "--json", "url,state,isDraft,body")
+        try:
+            found = json.loads(existing.stdout) if existing.returncode == 0 else {}
+        except json.JSONDecodeError:
+            found = {}
+        if isinstance(found, dict) and found.get("state") == "OPEN":
+            was_draft, url = bool(found.get("isDraft")), found.get("url")
+            live = str(found.get("body") or "")
             result: dict[str, Any] = {"status": "updated", "url": url}
             if keep_body:
                 result["body"] = "kept"
+                final = live  # kept as it is on the PR, and mirrored locally below
             else:
-                edited = run("pr", "edit", branch, "--body-file", str(body_file))
-                if edited.returncode != 0:
-                    result["warning"] = tail(edited.stderr, 5)
+                # The description on the PR now wins: edits made there after the last post are kept, and only
+                # the sections the workflow itself changed (and nobody touched on the PR) are replaced.
+                posted = posted_file.read_text(encoding="utf-8") if posted_file.is_file() else None
+                final, applied, kept = merge_body(live, posted, body_file.read_text(encoding="utf-8"))
+                if kept:
+                    result["kept_from_pr"] = kept
+                if applied:
+                    result["applied"] = applied
+                if live.strip() and final.strip() == live.strip():
+                    result["body"] = "unchanged"
+                else:
+                    body_file.write_text(final, encoding="utf-8")
+                    edited = run("pr", "edit", branch, "--body-file", str(body_file))
+                    if edited.returncode != 0:
+                        result["warning"] = tail(edited.stderr, 5)
+                        final = live
+            # RUN/pr-description.md mirrors the PR: the next update starts from what is there.
+            if final.strip():
+                body_file.write_text(final, encoding="utf-8")
+                posted_file.write_text(final, encoding="utf-8")
             # A draft opened by an earlier delivery becomes ready once every check passed (never the reverse).
             if was_draft and not draft:
                 readied = run("pr", "ready", branch)
@@ -186,6 +211,9 @@ def open_pull_request(
     if created.returncode != 0:
         raise ValueError(f"`{cli}` could not open the PR: {tail(created.stderr or created.stdout, 8)}")
     urls = re.findall(r"https?://\S+", created.stdout)
+    from android_workflow.watch import POSTED_BODY_FILE
+
+    (body_file.parent / POSTED_BODY_FILE).write_text(body_file.read_text(encoding="utf-8"), encoding="utf-8")
     return {"status": "created", "url": urls[-1] if urls else None, "draft": draft}
 
 

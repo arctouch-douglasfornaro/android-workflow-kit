@@ -13,6 +13,7 @@ os.environ.setdefault("ANDROID_WORKFLOW_STATE_HOME", __import__("tempfile").mkdt
 
 import copy
 import json
+import tempfile
 import subprocess
 import time
 import unittest
@@ -504,15 +505,21 @@ class DeliverKeepBodyTests(unittest.TestCase):
 
         def fake_run(args, **kwargs):
             calls.append(args)
-            return subprocess.CompletedProcess(args, 0, "OPEN https://github.com/o/r/pull/5", "")
+            return subprocess.CompletedProcess(args, 0, json.dumps({
+                "state": "OPEN", "isDraft": False, "url": "https://github.com/o/r/pull/5", "body": "## S\nedited on GitHub\n"}), "")
 
-        with mock.patch("android_workflow.delivery.shutil.which", return_value="/bin/gh"), \
+        with tempfile.TemporaryDirectory() as folder, \
+                mock.patch("android_workflow.delivery.shutil.which", return_value="/bin/gh"), \
                 mock.patch("android_workflow.watch.github_env", return_value={}), \
                 mock.patch("android_workflow.delivery.subprocess.run", side_effect=fake_run):
+            body = Path(folder) / "pr-description.md"
+            body.write_text("## S\nthe workflow's older text\n", encoding="utf-8")
             result = delivery.open_pull_request(Path("."), "github", "git@github.com:o/r.git", "b", "main", "s",
-                                                Path("body.md"), timeout=5, keep_body=True)
+                                                body, timeout=5, keep_body=True)
+            local = body.read_text(encoding="utf-8")
         self.assertEqual(result, {"status": "updated", "url": "https://github.com/o/r/pull/5", "body": "kept"})
         self.assertFalse(any("edit" in call for call in calls))
+        self.assertEqual(local, "## S\nedited on GitHub\n")  # the local copy follows the PR
 
 
 BODY = """## Summary
@@ -576,7 +583,29 @@ class PrBodySectionTests(unittest.TestCase):
         self.assertEqual((code, result["status"]), (0, "updated"))
         self.assertEqual(calls[1][0][:4], ["pr", "edit", "5", "--body-file"])
         self.assertEqual(calls[1][1], "## Summary\n\nnew summary\n\n![shot](x.png)\n")
-        self.assertEqual(local, "## Summary\n\nnew summary\n")
+        self.assertEqual(local, "## Summary\n\nnew summary\n\n![shot](x.png)\n")  # mirrors the PR, edits there included
+
+    def test_merging_keeps_sections_edited_on_the_pr_and_applies_the_workflows_own_changes(self) -> None:
+        posted = "Intro.\n\n## Summary\nA\n\n## Testing\nT1\n\n## Notes\nN\n"
+        live = "Intro.\n\n## Summary\nA, rewritten on GitHub\n\n## Testing\nT1\n\n## Added by hand\nH\n"
+        new = "Intro v2.\n\n## Summary\nA2\n\n## Testing\nT2\n\n## Notes\nN\n\n## Follow-up\nF\n"
+        body, applied, kept = watch.merge_body(live, posted, new)
+        self.assertIn("A, rewritten on GitHub", body)  # edited on the PR: theirs wins over the workflow's A2
+        self.assertNotIn("A2", body)
+        self.assertIn("T2", body)  # only the workflow changed Testing
+        self.assertIn("## Added by hand\nH", body)
+        self.assertNotIn("## Notes", body)  # removed on the PR after the post: stays removed
+        self.assertIn("## Follow-up\n\nF", body)
+        self.assertTrue(body.startswith("Intro v2."))
+        self.assertEqual(kept, ["## Summary"])  # Notes: the workflow left it as posted, the PR removed it
+        self.assertEqual(applied, ["(intro)", "## Testing", "## Follow-up"])
+
+    def test_merging_without_edits_on_the_pr_publishes_the_new_body_and_without_a_record_keeps_the_pr(self) -> None:
+        self.assertEqual(watch.merge_body("## S\nA\n", "## S\nA\n", "## S\nB\n")[0], "## S\nB\n")
+        body, applied, kept = watch.merge_body("## S\nA on PR\n", None, "## S\nB\n\n## New\nN\n")
+        self.assertIn("A on PR", body)
+        self.assertNotIn("\nB\n", body)
+        self.assertEqual((applied, kept), (["## New"], ["## S"]))
 
 
 if __name__ == "__main__":

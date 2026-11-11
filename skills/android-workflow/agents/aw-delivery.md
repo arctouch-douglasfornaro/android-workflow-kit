@@ -31,6 +31,11 @@ it: whatever you write is stripped and the CLI's line is the only one kept.
 
 ## PR body → `RUN/pr-description.md`
 
+- PR already open (a later round): `RUN/pr-description.md` already mirrors the description on the PR
+  as it is now, edits made there included. Start from it and change only what this round changed;
+  never restore text someone edited on the PR. `CLI deliver` merges by section anyway: a section
+  edited on the PR since the workflow last posted keeps that text (`kept_from_pr` in its answer).
+
 - Template present: copy its headings, order, checkboxes and HTML comments. Fill only those
   sections. 2–3 lines of prose total. Put review concerns and "Not verified" where the template
   has room; otherwise one line. Leave every checkbox as the template has it: `CLI deliver` decides

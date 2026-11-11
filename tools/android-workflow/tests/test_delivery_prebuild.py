@@ -217,7 +217,7 @@ class DeliverTests(unittest.TestCase):
             gh.write_text(
                 "#!/bin/sh\n"
                 f"echo \"$@\" >> {calls}\n"
-                "[ \"$2\" = view ] && echo 'OPEN true https://github.com/o/r/pull/7' && exit 0\n"
+                "[ \"$2\" = view ] && echo '{\"state\": \"OPEN\", \"isDraft\": true, \"url\": \"https://github.com/o/r/pull/7\", \"body\": \"\"}' && exit 0\n"
                 "exit 0\n",
                 encoding="utf-8",
             )
@@ -235,6 +235,48 @@ class DeliverTests(unittest.TestCase):
         self.assertTrue(still_draft["draft"])
         self.assertIn("pr ready b", second)
         self.assertEqual((ready["status"], ready["url"], ready["ready"]), ("updated", "https://github.com/o/r/pull/7", True))
+
+    def test_redelivering_keeps_what_the_developer_edited_on_the_pr(self) -> None:
+        from unittest import mock
+
+        from android_workflow.delivery import open_pull_request
+
+        posted = "## Summary\nOld summary.\n\n## Testing\n- unit tests\n"
+        live = "## Summary\nSummary the developer rewrote on GitHub.\n\n![shot](x.png)\n\n## Testing\n- unit tests\n"
+        new = "## Summary\nOld summary.\n\n## Testing\n- unit tests\n- device: PASS\n"
+        with AndroidProject() as root:
+            bin_dir = root / "fakebin"
+            bin_dir.mkdir()
+            calls = root / "gh-calls.txt"
+            (root / "live.json").write_text(json.dumps({"state": "OPEN", "isDraft": False, "url": "https://github.com/o/r/pull/7",
+                                                         "body": live}), encoding="utf-8")
+            gh = bin_dir / "gh"
+            gh.write_text(
+                "#!/bin/sh\n"
+                f"echo \"$@\" >> {calls}\n"
+                f"[ \"$2\" = view ] && cat {root / 'live.json'} && exit 0\n"
+                f"[ \"$2\" = edit ] && cp \"$5\" {root / 'sent.md'}\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            gh.chmod(0o755)
+            rundir = root / "run"
+            rundir.mkdir()
+            body = rundir / "pr-description.md"
+            body.write_text(new, encoding="utf-8")
+            (rundir / "pr-body-posted.md").write_text(posted, encoding="utf-8")
+            with mock.patch.dict("os.environ", {"PATH": f"{bin_dir}:/usr/bin:/bin"}):
+                result = open_pull_request(root, "github", "git@github.com:o/r.git", "b", "main", "S", body, 30)
+            sent = (root / "sent.md").read_text(encoding="utf-8")
+            local = body.read_text(encoding="utf-8")
+            recorded = (rundir / "pr-body-posted.md").read_text(encoding="utf-8")
+        self.assertIn("Summary the developer rewrote on GitHub.", sent)  # their edit is never reverted
+        self.assertNotIn("Old summary.", sent)
+        self.assertIn("- device: PASS", sent)  # the workflow's own change still lands
+        self.assertIn("![shot](x.png)", sent)
+        self.assertNotIn("kept_from_pr", result)  # Summary: the workflow did not change it, nothing to resolve
+        self.assertEqual(result["applied"], ["## Testing"])
+        self.assertEqual((local, recorded), (sent, sent))  # the local copy mirrors the PR from now on
 
     def test_waived_lint_is_disclosed_in_the_body_that_ships(self) -> None:
         with AndroidProject() as root:
