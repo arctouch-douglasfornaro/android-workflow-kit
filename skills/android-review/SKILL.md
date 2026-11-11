@@ -6,8 +6,9 @@ description: >-
   (architecture, side effects), the attached screenshots and videos, CI, and a
   device check of base vs PR head when the PR changes UI. Posts one review
   (inline comments, verdict) only after the developer's OK. Use when the user
-  types /android-review or asks to run this review workflow on a PR.
-disable-model-invocation: true
+  types /android-review, asks to review a PR (by number, URL or branch), or
+  asks whether our review comments on a PR were addressed ("were my comments
+  addressed?", "tudo foi addressado?").
 ---
 
 # Android Review
@@ -25,8 +26,11 @@ for one exact draft id.
 ## Invocation
 
 ```text
-/android-review <PR number or URL> [--target PATH] [--no-device] [--no-media] [--no-watch]
+/android-review <PR number, URL or branch> [--target PATH] [--no-device] [--no-media] [--no-watch]
 ```
+
+A branch name is resolved to its PR by the CLI with its own `gh` account: never put
+`GH_TOKEN=$(gh auth token …)` in the shell, pass the branch to `--pr` as is.
 
 `TARGET_MAIN` = `--target`, else the current workspace if it has `settings.gradle(.kts)`.
 `CLI` = `python3 ~/.ai/bin/android-workflow`.
@@ -45,7 +49,8 @@ developer to raise it in `#security` as well.
 ## Commands
 
 ```text
-CLI review start  --target MAIN --pr N [--worktree PATH] [--no-media]   (worktree at the PR head, pr-context.json, media)
+CLI review start  --target MAIN --pr N|BRANCH [--worktree PATH] [--no-media]  (worktree at the PR head, pr-context.json, media)
+CLI review status --target MAIN --pr N|BRANCH                            (were our comments addressed? no worktree)
 CLI setup         --target WT --source-repo MAIN                          (inherits the main checkout's profile)
 CLI review next   --target WT [--no-device]                               (the one thing to do now)
 CLI review ci     --target WT [--wait]                                    (trust CI, or wait, or the local gate)
@@ -105,7 +110,8 @@ CLI gate | prebuild | device … | emulator … | log …  --target WT         (
      --draft-id <id>` (it resolves the threads and posts no review).
    - `done`: run `also` (gives the device back), then follow the PR (step 4) unless `--no-watch`. A
      `done` whose `why` says "no new review" means the round was quiet with nothing to resolve: say so
-     in one line and keep watching.
+     in one line and keep watching. Tell the developer its `tell` line: the watch ends with this
+     session; later, `/android-review N` again or `CLI review status` answers what happened.
    Agents log their own `completed` (Planner, Reviewer, Device); `aw-media` writes
    `media-review.json` and does not log.
 4. **Watch** (default; skipped with `--no-watch`): `CLI review wait --target WT` (background, `--timeout 3300` on Claude Code)
@@ -126,6 +132,18 @@ CLI gate | prebuild | device … | emulator … | log …  --target WT         (
      72 by default, the same limit as the watch of our own PRs) → tell the developer and stop.
    The polling is the one of `CLI pr wait` (`watch.poll`): every minute, slower while nothing changes
    (up to every 5 min), back to every minute after something happened.
+
+## Were my comments addressed?
+
+"Were my comments addressed?" / "tudo foi addressado?" on a PR we reviewed →
+`CLI review status --target MAIN --pr N` (number, URL or branch; read-only, no worktree, works after
+the session that posted the review is gone). It lists each thread we opened: `addressed` (the line or
+file changed since our reviewed head, or someone replied), `open`, `resolved`, and
+`resolved_without_change_or_reply` (flag it to the developer), plus the commits since our last
+reviewed head. Relay `counts`, the open and flagged threads (`file:line`, one line each) and `next`:
+new commits → offer `/android-review N` for a delta round (it re-checks every open thread on the new
+head and proposes resolving the addressed ones). A run of that PR on disk also gets
+`RUN/review-status.md`. Nothing is posted or resolved from `status`.
 
 ## What the CLI decides (change it in `android_workflow/review.py`)
 
@@ -251,7 +269,8 @@ In `RUN`: `pr-context.json` (with `copies`), `ticket/<KEY>.md`, `copy-diff/*.dif
 `plan.md` (UI only), `review.json`, `media-review.json`, `media/pr/`, `ci-report.json`,
 `gate-report.json` (local gate only), `device-report.md` and `media/{before,after}/` (UI only),
 `review-draft.json` / `review-draft.md`, `review-delta.diff` (delta rounds), `review-inbox.json`,
-`review-replies.json` (agent) / `review-replies-draft.json` / `review-replies.md` (watch), `stage-log.md`.
+`review-replies.json` (agent) / `review-replies-draft.json` / `review-replies.md` (watch),
+`review-status.md` (`review status`), `stage-log.md`.
 
 ## Done
 

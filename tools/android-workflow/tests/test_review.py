@@ -1316,15 +1316,100 @@ class ReplyWatchTests(unittest.TestCase):
         self.assertEqual((waited["status"], waited["replies_pending"]), ("new_commits", 1))
 
 
+class StatusTests(unittest.TestCase):
+    """`CLI review status`: were our comments addressed? Read from GitHub, no worktree needed."""
+
+    @staticmethod
+    def pr() -> dict:
+        def note(login: str, body: str, kind: str = "User") -> dict:
+            return {"author": {"__typename": kind, "login": login}, "body": body, "url": f"u/{body}"}
+
+        def node(tid: str, path: str, *comments: dict, resolved: bool = False, outdated: bool = False) -> dict:
+            return {"id": tid, "path": path, "line": 4, "isResolved": resolved, "isOutdated": outdated,
+                    "comments": {"nodes": list(comments)}}
+
+        return {"number": 7, "url": "https://g/pull/7", "state": "OPEN", "headRefOid": "b" * 40,
+                "reviews": {"nodes": [{"author": {"login": "bob"}, "state": "COMMENTED", "commit": {"oid": "a" * 40}}]},
+                "reviewThreads": {"nodes": [
+                    node("T_line", REPO, note("bob", "cache never expires"), outdated=True),
+                    node("T_file", SCREEN, note("bob", "name it")),
+                    node("T_reply", "B.kt", note("bob", "why?"), note("alice", "on purpose: see ticket")),
+                    node("T_open", "C.kt", note("bob", "null here"), note("ci[bot]", "coverage", "Bot")),
+                    node("T_silent", "D.kt", note("bob", "leak"), resolved=True),
+                    node("T_done", REPO, note("bob", "rename"), resolved=True, outdated=True),
+                    node("T_theirs", REPO, note("carol", "mine"))]}}
+
+    def test_each_thread_we_opened_gets_what_happened_to_it(self) -> None:
+        rows = {t["thread"]: t for t in review.comment_status(self.pr(), "bob", "a" * 40, [SCREEN])}
+        self.assertEqual({key: row["status"] for key, row in rows.items()}, {
+            "T_line": "addressed", "T_file": "addressed", "T_reply": "addressed", "T_open": "open",
+            "T_silent": "resolved_without_change_or_reply", "T_done": "resolved"})
+        self.assertIn(f"{SCREEN} changed since aaaaaaa", rows["T_file"]["evidence"])
+        self.assertEqual(rows["T_reply"]["last_reply"]["author"], "alice")
+        self.assertEqual(review.comment_status(self.pr(), "bob", None, [])[0]["status"], "open")  # open first
+
+    def test_status_reads_github_and_suggests_a_delta_round(self) -> None:
+        compare = json.dumps({"status": "ahead", "commits": [{"sha": "c" * 40, "commit": {"message": "Fix cache\n\nbody"}}],
+                              "files": [{"filename": SCREEN}]})
+        _TMP.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=_TMP) as folder:
+            main = Path(folder) / "app"
+            run = Path(folder) / "wt-review-PR-7" / ".ai" / "workflow" / "PR-7"
+            run.mkdir(parents=True)
+            main.mkdir()
+            with mock.patch("android_workflow.watch._remote", return_value=("github.com", "org/app")), \
+                    mock.patch("android_workflow.watch.github_env", return_value={"GH_TOKEN": "t"}), \
+                    mock.patch("android_workflow.watch._graphql", return_value={"viewer": {"login": "bob"},
+                                                                                 "repository": {"pullRequest": self.pr()}}), \
+                    mock.patch("android_workflow.watch._gh") as gh:
+                gh.side_effect = [subprocess.CompletedProcess([], 0, "7\n", ""),
+                                  subprocess.CompletedProcess([], 0, compare, "")]
+                result = review.status(main, "alice/APP-12-load")
+            branch_call, compare_call = gh.call_args_list
+            summary = (run / review.STATUS_FILE).read_text()
+        self.assertEqual(branch_call.args[0][:3], ["pr", "view", "alice/APP-12-load"])
+        self.assertEqual(branch_call.kwargs["env"], {"GH_TOKEN": "t"})  # the CLI's own account, no GH_TOKEN in the shell
+        self.assertIn(f"repos/org/app/compare/{'a' * 40}...{'b' * 40}", compare_call.args[0][1])
+        self.assertEqual((result["pr"], result["reviewed_head"]), (7, "a" * 40))
+        self.assertEqual(result["commits_since"], [{"sha": "ccccccc", "message": "Fix cache"}])
+        self.assertEqual(result["counts"], {"addressed": 3, "open": 1, "resolved": 1, "resolved_without_change_or_reply": 1})
+        self.assertEqual([t["thread"] for t in result["flagged"]], ["T_silent"])
+        self.assertIn("/android-review 7 for a delta round", result["next"])
+        self.assertIn("⚠️ resolved without a change or a reply", summary)
+
+    def test_start_takes_a_branch_name(self) -> None:
+        with Project({REPO: "package com.example\n\nclass ProfileRepository\n"}) as project:
+            with mock.patch("android_workflow.watch._gh",
+                            return_value=subprocess.CompletedProcess([], 0, "7\n", "")) as gh, \
+                    mock.patch.object(review, "fetch_pr", return_value=fake_pr(project.head)) as fetch, \
+                    mock.patch.object(review, "signed_media", return_value={}):
+                result = review.start(project.main, "alice/APP-12-load")
+            self.assertEqual((result["status"], result["pr"]), ("ready", 7))
+            self.assertEqual(fetch.call_args.args[2], 7)
+            self.assertEqual(gh.call_args.args[0][:3], ["pr", "view", "alice/APP-12-load"])
+        with mock.patch("android_workflow.watch._gh", return_value=subprocess.CompletedProcess([], 1, "", "no pr")):
+            with self.assertRaises(ValueError):
+                review.resolve_pr({}, "org/app", "gone-branch")
+
+    def test_done_says_the_watch_ends_with_the_session(self) -> None:
+        done = review._done({"main": "/app", "posted": []}, {"number": 7}, "posted")
+        self.assertIn("/android-review 7", done["tell"])
+        self.assertIn("CLI review status --target /app --pr 7", done["tell"])
+
+
 class SkillContractTests(unittest.TestCase):
     def test_the_skill_names_every_review_command_the_cli_has(self) -> None:
         from android_workflow.paths import KIT_ROOT
 
         text = (KIT_ROOT / "skills/android-review/SKILL.md").read_text(encoding="utf-8")
         for action in ("start", "next", "ci", "draft", "edit", "shown", "post", "answer", "device", "ticket", "wait", "replies",
-                       "reply"):
+                       "reply", "status"):
             self.assertIn(f"CLI review {action}", text)
         self.assertIn("Nothing reaches GitHub before the developer's OK", text)
+        # the model routes "were my comments addressed?" here: the skill is not slash-only
+        front = text.split("---", 2)[1]
+        self.assertNotIn("disable-model-invocation", front)
+        self.assertIn("comments on a PR were addressed", " ".join(front.split()))
 
 
 if __name__ == "__main__":

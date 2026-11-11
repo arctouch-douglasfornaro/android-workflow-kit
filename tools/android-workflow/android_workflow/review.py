@@ -180,6 +180,23 @@ def parse_pr(value: str | int) -> int:
     return int(found.group(1))
 
 
+def resolve_pr(env: dict[str, str], repo: str, ref: str | int) -> int:
+    """A PR number, `#N`, a PR URL, or a branch name (its open PR, asked with the CLI's own `gh` account)."""
+    try:
+        return parse_pr(ref)
+    except ValueError:
+        pass
+    from android_workflow.watch import _gh
+
+    branch = str(ref).strip()
+    if not branch or branch.startswith("-"):
+        raise ValueError(f"not a PR number, URL or branch: {ref!r}")
+    view = _gh(["pr", "view", branch, "--repo", repo, "--json", "number", "--jq", ".number"], env=env)
+    if view.returncode == 0 and view.stdout.strip().isdigit():
+        return int(view.stdout.strip())
+    raise ValueError(f"no PR for branch {branch!r} in {repo}: pass the PR number or URL")
+
+
 def run_id(number: int) -> str:
     return ticket_slug(f"PR-{number}")
 
@@ -598,9 +615,9 @@ def start(main_target: Path, pr_ref: str, worktree: Path | None = None, download
     from android_workflow.watch import _remote, github_env
 
     main_target = main_target.resolve()
-    number = parse_pr(pr_ref)
     _, repo = _remote(main_target)
     env = github_env(main_target)
+    number = resolve_pr(env, repo, pr_ref)
     pr = fetch_pr(env, repo, number)
     if pr.get("state") != "OPEN":
         return {"status": "not_open", "pr": number, "state": pr.get("state"),
@@ -1000,7 +1017,10 @@ def _done(state: dict[str, Any], context: dict[str, Any], why: str) -> dict[str,
                    also=["CLI emulator --target TARGET --stop"],
                    then=f"CLI review wait --target TARGET (new commits → CLI review start --target "
                         f"{state.get('main')} --pr {context['number']}; replies → aw-pr-watcher mode review, "
-                        f"then CLI review replies)")
+                        f"then CLI review replies)",
+                   tell=f"The watch ends with this session. Later: /android-review {context['number']} again "
+                        f"(a delta round on new commits) or CLI review status --target {state.get('main') or 'MAIN'} "
+                        f"--pr {context['number']} to see whether our comments were addressed.")
 
 
 def next_action(target: Path, record: bool = True, no_device: bool = False) -> dict[str, Any]:
@@ -2498,6 +2518,145 @@ def reply(target: Path, draft_id: str) -> dict[str, Any]:
             "open": list(value["ask_user"]) or None, "next": "CLI review wait --target TARGET"}
 
 
+# --- status: were our comments addressed? -----------------------------------------------------------
+
+STATUS_FILE = "review-status.md"
+STATUS_QUERY = """
+query($owner: String!, $repo: String!, $number: Int!) {
+  viewer { login }
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      number url title state headRefOid author { login }
+      reviews(last: 50) { nodes { author { login } state submittedAt url commit { oid } } }
+      reviewThreads(first: 100) { nodes { id isResolved isOutdated path line originalLine
+        comments(first: 50) { nodes { author { __typename login } body url createdAt } } } }
+    }
+  }
+}
+"""
+
+
+def comment_status(pr: dict[str, Any], viewer: str | None, reviewed_head: str | None,
+                   changed: list[str] | None) -> list[dict[str, Any]]:
+    """Each review thread we opened, by what happened since our review: `addressed` (the commented line or
+    file changed since our reviewed head, or someone answered), `open`, `resolved`, or
+    `resolved_without_change_or_reply` (closed with no code change and no answer: worth a look). Pure."""
+    from android_workflow.watch import _is_bot, _login
+
+    changed_files = set(changed or [])
+    items = []
+    for node in ((pr.get("reviewThreads") or {}).get("nodes")) or []:
+        comments = ((node.get("comments") or {}).get("nodes")) or []
+        if not viewer or not comments or _login(comments[0]) != viewer:
+            continue
+        path = node.get("path")
+        evidence = []
+        if node.get("isOutdated"):
+            evidence.append("the commented line changed")
+        elif path and path in changed_files:
+            evidence.append(f"{path} changed since {str(reviewed_head or '')[:7] or 'our review'}")
+        answers = [c for c in comments[1:] if _login(c) != viewer and not _is_bot(c)]
+        if answers:
+            evidence.append(f"@{_login(answers[-1])} replied")
+        if node.get("isResolved"):
+            status = "resolved" if evidence else "resolved_without_change_or_reply"
+        else:
+            status = "addressed" if evidence else "open"
+        items.append({"thread": node.get("id"), "status": status, "path": path,
+                      "line": node.get("line") or node.get("originalLine"), "evidence": evidence,
+                      "comment": (comments[0].get("body") or "")[:200], "url": comments[0].get("url"),
+                      **({"last_reply": {"author": _login(answers[-1]), "body": (answers[-1].get("body") or "")[:300]}}
+                         if answers else {})})
+    order = {"open": 0, "resolved_without_change_or_reply": 1, "addressed": 2, "resolved": 3}
+    items.sort(key=lambda item: order[item["status"]])
+    return items
+
+
+def _status_run_dir(target: Path, number: int) -> Path | None:
+    """The review run of this PR, in this checkout or in the default review worktree beside it."""
+    slug = run_id(number)
+    for root in (target, target.parent / f"wt-review-PR-{number}"):
+        folder = root / ".ai" / "workflow" / slug
+        if folder.is_dir():
+            return folder
+    return None
+
+
+def status(target: Path, pr_ref: str) -> dict[str, Any]:
+    """Were our comments addressed? Read-only, no worktree: our threads on the PR with what happened to
+    each, and the commits since our last reviewed head (a delta round is then `/android-review N`)."""
+    from android_workflow.watch import _gh, _graphql, _remote, github_env
+
+    target = target.resolve()
+    _, repo = _remote(target)
+    env = github_env(target)
+    number = resolve_pr(env, repo, pr_ref)
+    owner, name = repo.split("/", 1)
+    data = _graphql(env, STATUS_QUERY, owner=owner, repo=name, number=number)
+    pr = ((data.get("repository") or {}).get("pullRequest")) or None
+    if not pr:
+        raise ValueError(f"PR #{number} not found in {repo}")
+    viewer = (data.get("viewer") or {}).get("login")
+    from android_workflow.watch import _login
+
+    ours = [r for r in ((pr.get("reviews") or {}).get("nodes")) or [] if _login(r) == viewer]
+    run = _status_run_dir(target, number)
+    posted = [item for item in _read(run / STATE_FILE).get("posted") or [] if item.get("head")] if run else []
+    reviewed = ((ours[-1].get("commit") or {}).get("oid") if ours else None) or (posted[-1]["head"] if posted else None)
+    head = pr.get("headRefOid")
+    commits: list[dict[str, str]] | None = []
+    changed: list[str] = []
+    note = None
+    if reviewed and head and reviewed != head:
+        compared = _gh(["api", f"repos/{repo}/compare/{reviewed}...{head}"], env=env)
+        try:
+            diff = json.loads(compared.stdout) if compared.returncode == 0 else {}
+        except ValueError:
+            diff = {}
+        if diff:
+            commits = [{"sha": str(c.get("sha"))[:7],
+                        "message": (str((c.get("commit") or {}).get("message") or "").splitlines() or [""])[0][:120]}
+                       for c in diff.get("commits") or []]
+            changed = [str(f.get("filename")) for f in diff.get("files") or [] if f.get("filename")]
+            if diff.get("status") == "diverged":
+                note = f"the branch was rewritten since {reviewed[:7]} (force-push)"
+        else:
+            commits, note = None, f"cannot compare {reviewed[:7]}...{head[:7]} (force-pushed away?)"
+    threads = comment_status(pr, viewer, reviewed, changed)
+    counts = {key: sum(1 for t in threads if t["status"] == key)
+              for key in ("addressed", "open", "resolved", "resolved_without_change_or_reply")}
+    new_commits = commits is None or bool(commits)
+    if pr.get("state") != "OPEN":
+        nxt = f"nothing to do: the PR is {str(pr.get('state')).lower()}"
+    elif not reviewed:
+        nxt = f"we have not reviewed this PR: /android-review {number}"
+    elif new_commits:
+        nxt = (f"new commits since our review of {reviewed[:7]}: /android-review {number} for a delta round "
+               "(it re-checks each open thread on the new head)")
+    elif counts["open"]:
+        nxt = "no new commits: our open threads wait for the author"
+    else:
+        nxt = "no new commits and nothing open"
+    result = {"status": "ok" if reviewed else "not_reviewed", "pr": number, "url": pr.get("url"),
+              "state": pr.get("state"), "viewer": viewer, "head": head, "reviewed_head": reviewed,
+              "commits_since": commits, "counts": counts, "threads": threads,
+              "flagged": [t for t in threads if t["status"] == "resolved_without_change_or_reply"] or None,
+              "note": note, "next": nxt}
+    if run:
+        mark = {"addressed": "✅ addressed", "open": "⏳ open", "resolved": "☑️ resolved",
+                "resolved_without_change_or_reply": "⚠️ resolved without a change or a reply"}
+        lines = [f"# Our comments on PR #{number}", "",
+                 f"Reviewed {str(reviewed or 'never')[:7]}; head {str(head)[:7]}; "
+                 + ("commits since: unknown" if commits is None else f"{len(commits)} commit(s) since") + ".",
+                 "", " · ".join(f"{mark[key]}: {value}" for key, value in counts.items()), ""]
+        lines += [f"- {mark[t['status']]} `{t['path']}:{t['line']}`" + (f" — {'; '.join(t['evidence'])}" if t["evidence"] else "")
+                  + (f" ({t['url']})" if t.get("url") else "") for t in threads]
+        lines += ["", f"Next: {nxt}."]
+        (run / STATUS_FILE).write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+        result["summary"] = str(run / STATUS_FILE)
+    return result
+
+
 def dispatch(target: Path, args: Any) -> tuple[dict[str, Any], int]:
     action = args.review_action
     if action == "start":
@@ -2528,6 +2687,8 @@ def dispatch(target: Path, args: Any) -> tuple[dict[str, Any], int]:
         return wait(target, timeout=args.timeout), 0
     if action == "replies":
         return replies(target, drop=args.drop, set_text=args.set, keep_open=getattr(args, "keep_open", None)), 0
+    if action == "status":
+        return status(target, args.pr), 0
     if action == "reply":
         result = reply(target, args.draft_id)
         return result, 0 if result["status"] == "posted" else 1
