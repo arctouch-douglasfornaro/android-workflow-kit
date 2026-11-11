@@ -219,8 +219,9 @@ def _active(work: dict[str, list[list[float | None]]]) -> dict[str, float | None
     stretch left out). Waiting on CI, a reviewer or the developer, with nobody at work, does not count.
 
     `seconds` is the closed part; `since` is the start of the stretch still open (an agent is working now)."""
-    spans = sorted((float(start), end) for role, items in work.items() if role != "Orchestrator"
-                   for start, end in items if start is not None)
+    # By start only: two stretches starting at the same moment, one still open (None), must not compare ends.
+    spans = sorted(((float(start), end) for role, items in work.items() if role != "Orchestrator"
+                    for start, end in items if start is not None), key=lambda span: span[0])
     seconds, since = 0.0, None
     cur_start: float | None = None
     cur_end: float | None = None
