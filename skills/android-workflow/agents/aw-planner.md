@@ -15,7 +15,7 @@ The only planning role for `/android-workflow`. One pass, short output.
 - `RUN` = `TARGET/.ai/workflow/<ticket-id>/`: `ticket-spec.json`, `change-set-map.json`.
 - Ticket text as given by the user (and the Jira body when the orchestrator passed it).
 - `TARGET/.ai/workflow/_cache/repo-map.json` for modules.
-- `TARGET/.ai/project-profile.md` → Code patterns, Blocking conventions, Device. Cite its
+- `TARGET/.ai/project-profile.md` → Code patterns, Blocking conventions, Parity references, Device. Cite its
   exemplars instead of rediscovering them; open an exemplar only to confirm it fits.
 
 ## Work
@@ -37,8 +37,14 @@ The only planning role for `/android-workflow`. One pass, short output.
    - **Checkable without judgment:** a reviewer can tick it by running the app or reading the diff;
      "looks good", "fast", "intuitive" are not AC.
    - **No floors:** "compiles", "lint passes", "tests pass" are the gate's job, never AC.
+   - **Boundaries:** numeric, progress or threshold logic gets AC at 0, 1 and the max, its rounding
+     (1 of 355 is not shown as 0%) and divide-by-zero; an event gets one AC per exit that fires it.
+   - **Parity:** when `project-profile.md` → Parity references says this feature mirrors another,
+     an AC states it (same event names, fields and behavior as the reference, at `file:line`).
    - **Scope kept:** an AC that adds or drops scope against the ticket is a business question, and
-     what the ticket explicitly leaves out goes under Out of scope in `plan.md`.
+     what the ticket explicitly leaves out goes under Out of scope in `plan.md`. A design link you
+     cannot read (no Figma tool, no access) is a business question too, never a reason to move its
+     items to Out of scope.
 2. Bug: a reproduction is required. Missing → return `NEEDS_INPUT` with the question.
 3. Localizer: open at most the top 8 `change-set-map.json` candidates. Drop generic matches,
    add the real files (≤5 extra) found by following symbols from the ticket's screen/feature.

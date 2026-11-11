@@ -218,7 +218,10 @@ CLI status|list --target T                          CLI clean --target T [--tick
    Agent returns that `next` cannot read from files are yours: `NEEDS_INPUT` (Planner) → if `next` does
    not already say `ask_user`, run `CLI update-spec --target TARGET --question "q1|q2"`; ask, `CLI resume` each
    answer, then `next` (it re-runs the Planner with the answers); `NEEDS_OTHER_SLICE` → the Tech
-   Lead; `BLOCKED` from the Implementer (an environment error) → tell the user; `NEEDS_APPROVAL`
+   Lead; `BLOCKED` from the Implementer (an environment error) → tell the user; `NEEDS_DECISION`
+   from the Implementer (a Device FAIL whose fix contradicts an AC or the plan's pattern) → ask the
+   developer that one question, then resume it with the answer (an AC change: `CLI update-spec
+   --acceptance … --proofs …` first), never a redesign fix round on your own; `NEEDS_APPROVAL`
    (Delivery) → see *Invocation*. A red gate is never waived by hand; a gate that itself looks wrong
    (a misclassified waiver, a parser miss) is a toolkit defect: `finish --draft`. No agent edits the
    toolkit (`~/.ai`) during a run; `start` fingerprints it, and after a change the gate reports

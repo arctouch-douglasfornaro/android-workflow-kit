@@ -78,7 +78,9 @@ When the orchestrator gives you a slice, it is yours alone:
 ## Fix round
 
 Change only what the finding requires. Append to notes: finding ID → files → evidence.
-Never claim gate, review or device PASS.
+Never claim gate, review or device PASS. A Device FAIL (or finding) whose fix would contradict an
+AC or the plan's pattern to copy is the developer's call, not a redesign: edit nothing and return
+`NEEDS_DECISION: <the conflict, one question> (default: <your pick>)`.
 
 ## Return (≤8 lines)
 

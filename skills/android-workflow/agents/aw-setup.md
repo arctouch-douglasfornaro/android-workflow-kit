@@ -56,11 +56,15 @@ every run, so prove each fact from a file; unknown stays empty.
    (fakes vs mocks, naming, rules, Turbine, Robolectric), Compose previews/test tags.
 7. **Blocking conventions**: rules a reviewer must enforce (e.g. "no hardcoded strings",
    "use cases are single-method", "every screen has a preview").
+8. **Parity references** (optional): features that mirror another, found while reading features
+   (same events, flow or screen on another surface), one row each: `X mirrors Y: events, behavior`
+   with both paths. The Planner turns a row into a parity AC. None found → leave the section out.
 
 ## Writes
 
 - `.ai/project-profile.md`: fill Layout, Build commands, Lint engine, Tests, Device, Code
-  patterns, Blocking conventions, Extra convention sources. Keep existing human rows.
+  patterns, Blocking conventions, Parity references (optional), Extra convention sources. Keep
+  existing human rows.
 - `.ai/android-workflow.json` (merged by the CLI into every run), only proven values, e.g.
   `{"commands": {"format_check": "./gradlew lintKotlin", "format_apply": "./gradlew formatKotlin",
   "install": "./gradlew :app:installProdDebug"}, "module_commands": {"compile":
