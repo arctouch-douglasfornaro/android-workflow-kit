@@ -34,6 +34,8 @@ REVIEW_MAX_FIXES = 1    # still blocking after one fix round: draft
 DEVICE_MAX_FAILS = 2    # the second device FAIL: draft
 BEFORE_BUDGET_SECONDS = 600  # the Device `before` agent stops here: the Implementer is working meanwhile
 AFTER_BUDGET_SECONDS = 300   # the Device `after` agent: replay, judge, a few hand-driven checks
+DEVICE_BUDGET_MINUTES = 20   # device time per run (a review: per round); past it no device round starts
+REVIEW_DEVICE_MAX_ROUNDS = 2  # a review: the device round and one more, never a third
 DECISIONS_FILE = "decisions.jsonl"
 BOOTING = "booting"  # how a `wait_device` for a device starting for this run begins its `why`
 
@@ -433,18 +435,21 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
                 return waiting_render
         if device_now and device_verdict == "pass":
             return _finish(spec)
+        stop = device_stop(target, agent_dir)
         if device_now and device_verdict == "partial":
             if state.get("finished_fingerprint"):  # a PR round: the developer decides, nothing is pushed yet
                 return _answer("ask_user", "the device check is partial (PR round)", question=PARTIAL_QUESTION,
-                               options=_partial_options(), then="CLI next --target TARGET")
+                               options=_partial_options(again=not stop), then="CLI next --target TARGET")
             return _answer("ask_user", "the device check is partial: some AC were not verified on the device",
-                           question=PARTIAL_QUESTION, options=_partial_options())
+                           question=PARTIAL_QUESTION, options=_partial_options(again=not stop))
         if device_now and device_verdict == "blocked":
             return _draft("the device check is blocked: see device-report.md", state)
         fails = failed_rounds(device_state, {"fail"}, device_verdict if device_now else None, fingerprint)
         if device_now and device_verdict == "fail":
             if fails >= DEVICE_MAX_FAILS:
                 return _draft(f"the device check failed {fails} times", state)
+            if stop:
+                return _draft(f"the device check failed and {stop}", state)
             if _fixed_before(agent_dir, fingerprint, float(state.get("created_at") or 0)):
                 return _draft("a fix round ended without changing the code", state)
             return _fix_round(agent_dir, team, ["D1"], review, "the device check failed", fingerprint,
@@ -457,6 +462,13 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
                 if waiting_render:
                     return waiting_render
             return _finish(spec, skip="the developer asked for --no-device", no_device=True)
+        if stop:
+            if not record:
+                return _draft(f"no more device rounds: {stop}", state)
+            if close_device(target, agent_dir, stop) == "partial":
+                return _answer("ask_user", f"no more device rounds ({stop}): the device check is partial",
+                               question=PARTIAL_QUESTION, options=_partial_options(again=False))
+            return _draft(f"the device check is blocked: {stop}; see device-report.md", state)
         serial, waiting, reason = _device_for(target, agent_dir, record)
         if waiting is not None:
             return waiting
@@ -632,12 +644,71 @@ PARTIAL_QUESTION = ("The device check is partial: device-report.md lists AC it c
                     "open it as a draft, or run the Device again on what is open?")
 
 
-def _partial_options() -> dict[str, str]:
-    return {
+def _partial_options(again: bool = True) -> dict[str, str]:
+    options = {
         "ready": 'CLI finish --target TARGET --accept-partial "<what stays unverified, in one line>"',
         "draft": 'CLI finish --target TARGET --draft "device check partial: see device-report.md"',
         "again": "spawn aw-device mode after with the report's Not verified and Anomalies items, then CLI next",
     }
+    if not again:
+        options.pop("again")  # the device budget is spent: no more device rounds
+    return options
+
+
+def device_budget_seconds(target: Path) -> float:
+    from android_workflow.emulator import _overrides
+
+    try:
+        return max(float(_overrides(target).get("budget_minutes") or DEVICE_BUDGET_MINUTES), 1.0) * 60
+    except (TypeError, ValueError):
+        return DEVICE_BUDGET_MINUTES * 60.0
+
+
+def device_spent(agent_dir: Path) -> tuple[float, int]:
+    """(seconds, rounds) the Device agent worked in this run (a review: this round), a round still open
+    included: its `before` and `after` rounds as `stage-metrics.json` counts them."""
+    entry = (_read(agent_dir / "stage-metrics.json").get("stages") or {}).get("T7") or {}
+    seconds = float(entry.get("wall_time_seconds") or 0)
+    if isinstance(entry.get("running_since"), (int, float)):
+        seconds += max(time.time() - float(entry["running_since"]), 0)
+    return seconds, int(entry.get("attempts") or 0)
+
+
+def device_stop(target: Path, agent_dir: Path, review: bool = False) -> str | None:
+    """Why no more device round starts, or None: the run spent `device.budget_minutes` (default 20) on
+    the device, or (a review) it already had `REVIEW_DEVICE_MAX_ROUNDS` device rounds."""
+    seconds, rounds = device_spent(agent_dir)
+    budget = device_budget_seconds(target)
+    if seconds >= budget:
+        return f"the device budget is spent ({int(seconds // 60)} of {int(budget // 60)} min, device.budget_minutes)"
+    if review and rounds >= REVIEW_DEVICE_MAX_ROUNDS:
+        return f"{rounds} device rounds already ran in this review round (at most {REVIEW_DEVICE_MAX_ROUNDS})"
+    return None
+
+
+def close_device(target: Path, agent_dir: Path, why: str) -> str:
+    """No more device rounds: write device-report.md as PARTIAL (a flow of this very source passed in the
+    last replay) or BLOCKED, with what was verified, and log the Device stage completed so the run moves
+    on. Returns the verdict."""
+    from android_workflow.cli import log_stage, source_fingerprint
+
+    report = agent_dir / "device-report.md"
+    kept = agent_dir / "device-report.previous.md"
+    if report.is_file():
+        report.replace(kept)  # an earlier round's report (or one with no verdict): kept beside it
+    replayed = _read(agent_dir / "replay.json")
+    current = replayed.get("phase") == "after" and replayed.get("fingerprint") == source_fingerprint(target)
+    flows = [item for item in replayed.get("flows") or [] if isinstance(item, dict)]
+    passed = [str(item.get("flow") or "?") for item in flows if current and item.get("status") == "passed"]
+    verdict = "PARTIAL" if passed else "BLOCKED"
+    verified = [f"- flow `{name}`: passed in the last replay of this source" for name in passed] or ["- nothing on this source"]
+    lines = [f"## Status: {verdict}", "", f"No more device rounds: {why}. Written by `CLI next`, not by the "
+             "Device agent" + (f"; the earlier report is `{kept.name}`" if kept.is_file() else "") + ".", "",
+             "## Scenarios", *verified, "", "## Not verified",
+             "- every device AC no flow above proves: the device time ran out", "", "## Anomalies", "None.", ""]
+    report.write_text("\n".join(lines), encoding="utf-8")
+    log_stage(target, "Device", "completed", f"{verdict}: {why}", actor="cli")
+    return verdict.lower()
 
 
 def _device_for(target: Path, agent_dir: Path, record: bool) -> tuple[str | None, dict[str, Any] | None, str]:

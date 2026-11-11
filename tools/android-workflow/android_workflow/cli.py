@@ -2174,22 +2174,31 @@ def run_gate_rounds(
 
 
 def markdown_section_value(content: str, heading: str) -> str:
-    marker = f"# {heading}"
-    if marker not in content:
+    """The text under `# heading` (any level; `## Status: PASS` keeps `: PASS`), up to the next heading
+    of the same or a higher level."""
+    match = re.search(rf"(?m)^(#+)[ \t]*{re.escape(heading)}\b", content)
+    if not match:
         return ""
-    rest = content.split(marker, 1)[1]
-    next_pos = rest.find("\n# ")
-    body = rest if next_pos < 0 else rest[:next_pos]
-    return body.strip()
+    rest = content[match.end():]
+    end = re.search(rf"(?m)^#{{1,{len(match.group(1))}}}[ \t]", rest)
+    return (rest[:end.start()] if end else rest).strip()
 
 
 def device_report_status(device: str) -> str:
-    """The report's verdict word: `PASS`, `FAIL`, `BLOCKED` or `PARTIAL` (anything after it is a note)."""
+    """The report's verdict word: `PASS`, `FAIL`, `BLOCKED` or `PARTIAL` (anything after it is a note),
+    from its `Status` section (`## Status: BLOCKED`, or the word on the line under it), else from a
+    bare first line (`PASS`, `**BLOCKED** …`, `Status: FAIL`)."""
     first = markdown_section_value(device, "Status").splitlines()
-    if not first:
-        return ""
-    words = re.findall(r"[a-z_]+", first[0].strip().lower())
-    return words[0] if words else ""
+    if first:
+        words = re.findall(r"[a-z_]+", first[0].strip().lower())
+        return words[0] if words else ""
+    line = next((item for item in device.splitlines() if item.strip()), "")
+    words = re.findall(r"[a-z_]+", line.lower())
+    words = words[1:] if words[:1] == ["status"] else words
+    return words[0] if words and words[0] in DEVICE_VERDICT_WORDS else ""
+
+
+DEVICE_VERDICT_WORDS = frozenset({"pass", "passed", "partial", "fail", "failed", "blocked"})
 
 
 NOTHING = re.compile(r"(?i)^\s*[-*]?\s*(none|n/?a|nothing|—|-)?\s*\.?\s*$")
@@ -2198,7 +2207,8 @@ NOTHING = re.compile(r"(?i)^\s*[-*]?\s*(none|n/?a|nothing|—|-)?\s*\.?\s*$")
 def device_report_anomalies(device: str) -> list[str]:
     """What the Device saw and could not explain (`# Anomalies`): it makes a PASS a partial one."""
     body = markdown_section_value(device, "Anomalies")
-    return [line.strip() for line in body.splitlines() if line.strip() and not NOTHING.match(line)]
+    return [line.strip() for line in body.splitlines()
+            if line.strip() and not NOTHING.match(line) and not line.startswith("Timing:")]  # the closing line
 
 
 STUB_PR_MARKER = "See the diff and `implementation-notes.md`"

@@ -87,6 +87,13 @@ the behavior only a running app shows.
   sha256 in the answer). That answer is your proof of the build; no sha256 checks around every capture.
 - `BLOCKED` quotes the CLI: the `status` and `reason` of the command that stopped you (`install_failed:
   …`, `device_busy`, `no_device`), never your own guess at the cause.
+- A login or auth wall is BLOCKED only on evidence: first `adb -s <serial> shell dumpsys activity
+  activities | grep -E 'ResumedActivity|topResumedActivity'` and a fresh screenshot or hierarchy dump;
+  quote the resumed activity and the capture path in the report. A screen you assumed from a stale
+  capture is not a wall.
+- The run has a device budget (`device.budget_minutes`, default 20, all rounds together; `CLI next`
+  starts no round past it). Stuck → report BLOCKED with what you verified, within your
+  `budget_seconds`; never retry silently.
 
 ## Work
 
@@ -159,8 +166,9 @@ the behavior only a running app shows.
 
 ## Writes (`after` mode)
 
-`RUN/device-report.md` with headings exactly: Status (first line `PASS` | `PARTIAL` | `FAIL` |
-`BLOCKED`), Device (model, API, serial), Scenarios (one line per AC, starting with its id and ending with `: PASS` / `: FAIL` / `: BLOCKED`
+`RUN/device-report.md`, always, BLOCKED included (a round without it is a round wasted). Its first
+line is `## Status: <VERDICT>` (`PASS` | `PARTIAL` | `FAIL` | `BLOCKED`), then headings exactly:
+Device (model, API, serial), Scenarios (one line per AC, starting with its id and ending with `: PASS` / `: FAIL` / `: BLOCKED`
 before the detail, e.g. `- AC5 legacy flashcards: PASS. Expected … Observed …`; the review draft
 reads the verdict per AC from these lines), Evidence (media paths),
 Not verified, Anomalies. `PARTIAL`: every AC you checked passed, but a device AC stayed unverified,

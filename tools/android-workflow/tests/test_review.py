@@ -760,6 +760,36 @@ class DeviceTests(unittest.TestCase):
             self.assertEqual((spawn["agent"], spawn["mode"], spawn["serial"]), ("aw-device", "after", "emulator-5554"))
             self.assertEqual(review.next_action(worktree)["next"], "wait")
 
+    def test_a_review_runs_at_most_one_extra_device_round_then_records_blocked(self) -> None:
+        with Project({SCREEN: "package com.example\n\n@Composable\nfun ProfileScreen() {}\n"}) as project:
+            result = project.start()
+            worktree = Path(result["worktree_path"])
+            agent_dir = Path(result["run"])
+            write_profile(worktree)
+            review.next_action(worktree)
+            (agent_dir / review.SPEC_FILE).write_text(json.dumps({"status": "ready", "acceptance": []}))
+            log_stage(worktree, "Planner", "completed", "0 AC", "host")
+            review.next_action(worktree)
+            (agent_dir / "review.json").write_text(json.dumps({"status": "approved", "blocking": []}))
+            log_stage(worktree, "Reviewer", "completed", "done", "host")
+            with mock.patch.object(review, "fetch_pr", return_value=fake_pr(project.head)):
+                review.ci(worktree)
+            spawns = []
+            with mock.patch("android_workflow.decide._device_for", return_value=("emulator-5554", None, "")):
+                for _ in range(3):
+                    answer = review.next_action(worktree)
+                    if answer.get("agent") != "aw-device":
+                        break
+                    spawns.append(answer)
+                    # The agent came back with notes but no verdict (the old loop: spawned again and again).
+                    (agent_dir / "device-report.md").write_text("Device notes: a login wall?\n", encoding="utf-8")
+                    log_stage(worktree, "Device", "completed", "notes", "host")
+            report = (agent_dir / "device-report.md").read_text(encoding="utf-8")
+        self.assertEqual(len(spawns), 2)
+        self.assertEqual(answer["next"], "draft")
+        self.assertTrue(report.startswith("## Status: BLOCKED"))
+        self.assertIn("2 device rounds", report)
+
     def test_no_device_says_so_in_the_review(self) -> None:
         with Project({SCREEN: "package com.example\n\n@Composable\nfun ProfileScreen() {}\n"}) as project:
             result = project.start()

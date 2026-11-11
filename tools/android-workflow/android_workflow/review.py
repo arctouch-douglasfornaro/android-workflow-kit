@@ -1228,6 +1228,11 @@ def _device_step(target: Path, agent_dir: Path, record: bool,
         return None
     if entry.get("status") in {"started", "running"}:
         return _answer("wait", "the Device agent is working", agent="aw-device")
+    stop = decide.device_stop(target, agent_dir, review=True)
+    if stop:  # no third round, no device time past the budget: the draft says what was verified
+        if record:
+            decide.close_device(target, agent_dir, stop)
+        return None
     serial, waiting, reason = decide._device_for(target, agent_dir, record)
     if waiting is not None:
         waiting["then"] = "CLI review next --target TARGET"
