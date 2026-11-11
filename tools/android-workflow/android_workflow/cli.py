@@ -169,29 +169,50 @@ def text_if_exists(path: Path) -> str:
 
 TOOLKIT_SOURCES = (
     (Path(__file__).resolve().parent, "*.py"),
-    (Path.home() / ".ai" / "skills" / "android-workflow", "*"),
-    (Path.home() / ".ai" / "bin", "feature_setup.py"),
-    (Path.home() / ".ai" / "bin", "feature_workspace.py"),
-    (Path.home() / ".ai" / "bin", "android-workflow"),
+    (Path.home() / ".ai" / "skills" / "android-workflow", "*.json"),
 )
+# Only the code that decides a gate, a verdict or the next step: the office page, token counting,
+# emulators, caches and the scripts around the CLI never change a run's result.
+TOOLKIT_JUDGING_MODULES = frozenset({
+    "cli.py", "decide.py", "delivery.py", "evidence.py", "flows.py", "render.py", "replay.py", "review.py",
+    "team.py", "watch.py", "base.py",
+})
 
 
 def toolkit_fingerprint() -> dict[str, str]:
-    """Hash of the code and instructions that judge a run, so a run cannot quietly rewrite its own gate."""
+    """Hash of the code that judges a run, so a change to it mid-run is seen and noted."""
     files: dict[str, str] = {}
+    package = Path(__file__).resolve().parent
     for root, pattern in TOOLKIT_SOURCES:
         if not root.is_dir():
             continue
-        paths = root.rglob(pattern) if pattern == "*" else root.glob(pattern)
-        for path in paths:
-            if path.is_file() and "__pycache__" not in path.parts and not path.name.endswith("_test.py"):
-                files[str(path)] = hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in root.glob(pattern):
+            if not path.is_file() or (root == package and path.name not in TOOLKIT_JUDGING_MODULES):
+                continue
+            files[str(path)] = hashlib.sha256(path.read_bytes()).hexdigest()
     return files
 
 
 TOOLKIT_FINGERPRINT_FILE = "toolkit-fingerprint.json"
 # Prose an agent reads (role files, the skill) does not judge a run: editing it mid-run never blocks the gate.
 TOOLKIT_PROSE_SUFFIXES = (".md",)
+
+
+def refresh_toolkit_fingerprint(agent_dir: Path, stage: str, actor: str = "cli") -> list[str]:
+    """The toolkit's judging code changed since it was fingerprinted: note it in the stage log and the run
+    state and fingerprint it again, so the run goes on with it (a block made hosts re-run `start`)."""
+    changed = toolkit_changes(agent_dir)
+    if not changed:
+        return []
+    path = agent_dir / TOOLKIT_FINGERPRINT_FILE
+    recorded = read_json(path) if path.exists() else {}
+    history = list(recorded.get("changed_during_run") or [])
+    history.append({"at": int(time.time()), "files": changed})
+    write_json(path, {"files": toolkit_fingerprint(), "changed_during_run": history[-20:]})
+    names = ", ".join(Path(item).name for item in changed[:6]) + ("…" if len(changed) > 6 else "")
+    append_stage_log(agent_dir, stage, "note", actor, f"the workflow toolkit changed during this run ({names}); "
+                                                     "fingerprint refreshed, the run continues with it")
+    return changed
 
 
 def toolkit_changes(agent_dir: Path) -> list[str]:
@@ -2544,22 +2565,10 @@ def run_quality_gate(target: Path) -> dict[str, Any]:
             }
         )
     run_number = int(previous.get("run") or 0) + 1
-    changed_toolkit = toolkit_changes(agent_dir)
-    if changed_toolkit:
-        report = {
-            "schema_version": 1,
-            "status": "blocked",
-            "run": run_number,
-            "reason": "toolkit_modified_during_run",
-            "toolkit_files": changed_toolkit,
-            "fingerprint": source_fingerprint(target),
-            "steps": [],
-            "prohibitions_respected": False,
-            "prior_runs": prior_runs[-3:],
-        }
-        write_json(agent_dir / "gate-report.json", report)
-        return report
     extras: dict[str, Any] = {}
+    changed_toolkit = refresh_toolkit_fingerprint(agent_dir, "T5")
+    if changed_toolkit:
+        extras["toolkit_changed"] = changed_toolkit  # noted, never a block: the gate runs with the new code
     from android_workflow.locks import build_slot
 
     def slot_wait(holders: list[dict[str, Any]]) -> None:
@@ -3046,11 +3055,11 @@ def _log_stage(
     if status == "completed" and tokens is None and role and role.lower() in AGENT_STAGES and stage != "T5":
         warnings.append(f"{role} logged without --tokens: pass the total the agent's result reports")
     if status == "started":
-        changed_toolkit = toolkit_changes(agent_dir)
+        changed_toolkit = refresh_toolkit_fingerprint(agent_dir, stage)
         if changed_toolkit:
             warnings.append(
-                f"the workflow toolkit changed since `start` ({len(changed_toolkit)} file(s)): run `CLI start` "
-                "for this ticket again now (it keeps the plan); otherwise the gate will be blocked"
+                f"the workflow toolkit changed since `start` ({len(changed_toolkit)} file(s)): noted in the stage "
+                "log and fingerprinted again; the run continues (do not re-run `start`)"
             )
     return {**state, "warnings": warnings} if warnings else state
 
@@ -3452,12 +3461,7 @@ def finish_run(
         issues.append("quality gate is blocked: " + (gate.get("reason") or "see gate-report.json"))
     elif gate.get("status") != "passed":
         issues.append("quality gate was not run")
-    changed_toolkit = toolkit_changes(agent_dir)
-    if changed_toolkit:
-        issues.append(
-            "the workflow toolkit changed during this run (" + ", ".join(changed_toolkit)
-            + "); a human must review that change"
-        )
+    refresh_toolkit_fingerprint(agent_dir, "T9")  # noted in the stage log; never an issue of the change
     issues.extend(verification_errors(target, spec, state, gate, skip_device, accept_partial))
     if accept_partial and not issues:
         state["device_partial"] = accept_partial
@@ -3660,6 +3664,8 @@ def run(target: Path, ticket: dict[str, Any], take_over: bool = False,
     agent_dir.mkdir(parents=True, exist_ok=True)
     set_current(target, ticket_id)
     mark_moved_copies(target, ticket_id)
+    if review_files is None and resumable(agent_dir):
+        return resume_run(target, agent_dir, ticket, no_device=no_device)
     spec = keep_planner_decisions(agent_dir, spec, ticket)
     if review_files is not None:
         spec["review_files"] = list(review_files)
@@ -3711,6 +3717,75 @@ def run(target: Path, ticket: dict[str, Any], take_over: bool = False,
 
 
 PLANNER_FIELDS = ("surfaces", "acceptance_criteria", "type", "risk", "complexity", "reproduction")
+
+
+def resumable(agent_dir: Path) -> bool:
+    """A run of this ticket that is not over: `start` again continues it instead of starting over."""
+    path = agent_dir / "run-state.json"
+    if not path.is_file() or not (agent_dir / "ticket-spec.json").is_file():
+        return False
+    return read_json(path).get("status") not in (None, "completed", "moved")
+
+
+def _ac_key(text: str) -> str:
+    return re.sub(r"\W+", " ", str(text).lower()).strip()
+
+
+def resume_run(target: Path, agent_dir: Path, ticket: dict[str, Any], no_device: bool = False) -> dict[str, Any]:
+    """`start` on a run that is still going (a host re-running it after a toolkit change or a lost
+    session): nothing it has is dropped. The acceptance criteria are kept and a new one is only appended,
+    the stages, verdicts and metrics stay, and only what the new start states explicitly (type, risk,
+    complexity, reproduction, more surfaces, the level) changes the spec."""
+    from android_workflow.decide import apply_level
+
+    with run_lock(target):
+        spec_path = agent_dir / "ticket-spec.json"
+        spec = read_json(spec_path)
+        state = load_state(target)
+        notes: list[str] = []
+        known = {_ac_key(item) for item in spec.get("acceptance_criteria") or []}
+        added = []
+        for item in ticket.get("acceptance_criteria") or []:
+            if str(item).strip() and _ac_key(item) not in known:
+                known.add(_ac_key(item))
+                added.append(str(item).strip())
+        kept = len(spec.get("acceptance_criteria") or [])
+        if added:
+            spec["acceptance_criteria"] = [*(spec.get("acceptance_criteria") or []), *added]
+            if spec.get("ac_ids"):
+                spec["ac_ids"] = [*spec["ac_ids"], *[f"AC{kept + index}" for index in range(1, len(added) + 1)]]
+            notes.append(f"added {len(added)} AC")
+        old_ticket = spec.setdefault("ticket", {})
+        for key in ("title", "description"):
+            if not old_ticket.get(key) and ticket.get(key):
+                old_ticket[key] = ticket[key]
+        explicit = set(ticket.get("explicit") or [])
+        for field, default in (("type", "feature"), ("risk", "low"), ("complexity", "low")):
+            value = ticket.get(field)
+            if (field in explicit or value not in (None, "", default)) and value and value != spec.get(field):
+                spec[field] = str(value)
+                notes.append(f"{field} {value}")
+        if ticket.get("reproduction") and ticket["reproduction"] != spec.get("reproduction"):
+            spec["reproduction"] = ticket["reproduction"]
+            notes.append("reproduction")
+        more = [item for item in infer_surfaces(ticket) if item not in (spec.get("surfaces") or [])] \
+            if ticket.get("surfaces") else []
+        if more:
+            spec["surfaces"] = [*(spec.get("surfaces") or []), *more]
+            notes.append("surfaces +" + ",".join(more))
+        spec["route"] = route_for(spec["type"], spec["complexity"], spec["risk"], spec.get("surfaces") or [])
+        level = ticket.get("level") if ticket.get("level") in LEVELS else None
+        apply_level(spec, read_json(agent_dir / "change-set-map.json") if (agent_dir / "change-set-map.json").is_file()
+                    else None, level)
+        write_json(spec_path, spec)
+        if no_device and not state.get("no_device"):
+            state["no_device"] = "start --no-device"
+            notes.append("--no-device")
+        save_state(target, state)
+        refresh_toolkit_fingerprint(agent_dir, "T1")
+        append_stage_log(agent_dir, "T1", "resumed", "cli",
+                         f"start again: the run continues ({kept} AC kept" + (", " + ", ".join(notes) if notes else "") + ")")
+    return {**state, "resumed": True, "acceptance_kept": kept, "acceptance_added": added}
 
 
 def keep_planner_decisions(agent_dir: Path, spec: dict[str, Any], ticket: dict[str, Any]) -> dict[str, Any]:

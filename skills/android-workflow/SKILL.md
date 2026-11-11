@@ -225,8 +225,10 @@ CLI status|list --target T                          CLI clean --target T [--tick
    Lead; `BLOCKED` from the Implementer (an environment error) → tell the user; `NEEDS_APPROVAL`
    (Delivery) → see *Invocation*. A red gate is never waived by hand; a gate that itself looks wrong
    (a misclassified waiver, a parser miss) is a toolkit defect: `finish --draft`. No agent edits the
-   toolkit (`~/.ai`) during a run; `start` fingerprints it, and after a change the gate reports
-   `blocked` (`toolkit_modified_during_run`) and only a draft PR can ship.
+   toolkit (`~/.ai`) during a run; `start` fingerprints the code that judges a run, and a change to it
+   is noted in the stage log and fingerprinted again (the run goes on; never re-run `start` for it).
+   `start` on a run that is not finished resumes it: every AC, stage, verdict and metric stays; a new
+   AC is only appended.
 
    What the CLI decides, for reference (change it in `android_workflow/decide.py`, not here):
    level `full` for high risk or complexity, lifecycle/room_migration/workmanager surfaces or a

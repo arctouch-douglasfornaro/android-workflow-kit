@@ -117,6 +117,7 @@ class LiveClockTests(unittest.TestCase):
             (run_dir(root) / "implementation-notes.md").write_text("# Decisions\n\nDone.\n", encoding="utf-8")
             log(root, "--stage", "Implementer", "--status", "completed", "--seconds", "30")
             log(root, "--stage", "Implementer", "--status", "started")
+            (run_dir(root) / "implementation-notes.md").write_text("# Decisions\n\nDone, round 2.\n", encoding="utf-8")
             log(root, "--stage", "Implementer", "--status", "completed", "--tokens", "5")
             entry = metrics(root)["stages"]["T4"]
         self.assertGreaterEqual(entry["wall_time_seconds"], 30)

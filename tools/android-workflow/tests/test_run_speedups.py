@@ -26,6 +26,7 @@ from android_workflow.cli import (
     read_json,
     run,
     source_changes,
+    source_fingerprint,
     toolkit_changes,
     toolkit_fingerprint,
 )
@@ -202,8 +203,15 @@ class RestartKeepsVerdictsTests(unittest.TestCase):
             implement(root)
             self.assertEqual(approve_review(root), 0)
             implement(root, "fun other() = Unit\n")
-            run(root, ticket)
+            run(root, ticket)  # resumes the run: the review stays, recorded for the older source
+            state = read_json(run_dir(root) / "run-state.json")
+            current = source_fingerprint(root)
+            finished = read_json(run_dir(root) / "run-state.json")
+            path = run_dir(root) / "run-state.json"
+            path.write_text(json.dumps({**finished, "status": "completed"}), encoding="utf-8")
+            run(root, ticket)  # a finished run started again is a new run: the stale review goes
             review = read_json(run_dir(root) / "review.json")
+        self.assertNotEqual(state["stages"]["T6"]["fingerprint"], current)  # `next` asks for a delta review
         self.assertEqual(review["status"], "not_run")
 
 
@@ -218,6 +226,38 @@ class ToolkitProseTests(unittest.TestCase):
             recorded[prose[0]] = "0" * 64
             (agent_dir / TOOLKIT_FINGERPRINT_FILE).write_text(json.dumps({"files": recorded}), encoding="utf-8")
             self.assertEqual(toolkit_changes(agent_dir), [])
+
+
+class ToolkitChangeTests(unittest.TestCase):
+    def test_only_code_that_judges_a_run_is_fingerprinted(self) -> None:
+        names = {Path(path).name for path in toolkit_fingerprint()}
+        self.assertIn("cli.py", names)
+        self.assertIn("decide.py", names)
+        self.assertNotIn("office.py", names)
+        self.assertNotIn("usage.py", names)
+        self.assertFalse(any(name.endswith(".md") for name in names))
+
+    def test_a_toolkit_change_mid_run_is_noted_and_the_gate_still_runs(self) -> None:
+        with AndroidProject() as root:
+            fake_gradle_project(root, {})
+            run(root, {"id": "K-1", "title": "Change ProfileScreen", "type": "chore"})
+            implement(root)
+            path = run_dir(root) / TOOLKIT_FINGERPRINT_FILE
+            recorded = read_json(path)
+            edited = sorted(recorded["files"])[0]
+            recorded["files"][edited] = "0" * 64
+            path.write_text(json.dumps(recorded), encoding="utf-8")
+            code = main(["gate", "--target", str(root)])
+            report = read_json(run_dir(root) / "gate-report.json")
+            log = (run_dir(root) / "stage-log.md").read_text(encoding="utf-8")
+            after = toolkit_changes(run_dir(root))
+            history = read_json(path)["changed_during_run"]
+        self.assertEqual(code, 0)
+        self.assertEqual(report["status"], "passed")
+        self.assertEqual(report["toolkit_changed"], [edited])
+        self.assertIn("toolkit changed during this run", log)
+        self.assertEqual(after, [])  # fingerprinted again: the next gate is not affected
+        self.assertEqual(history[-1]["files"], [edited])
 
 
 class WatchLogKeyTests(unittest.TestCase):
