@@ -19,9 +19,18 @@ This file is the single source of truth for the workflow. Each agent's own rules
 (parallel work, scoped builds, skipped stages on simple tickets) and cost (small orchestrator
 context, the cheapest model tier that does each job).
 
-You are the **orchestrator**. The Python CLI detects, locates, gates and records. Seven agents do
+You are the **orchestrator**. The Python CLI detects, locates, gates and records. The agents do
 the work; you keep your own context small (paths and ≤10-line returns only — never read the
-diff, Gradle logs or images yourself).
+diff, Gradle logs or images yourself). You only run CLI commands and spawn or resume agents:
+- a merge or sync conflict → the Implementer, never you;
+- a screenshot or render the developer asks for → `aw-media` mode `render` (`CLI render run`), never
+  a test written into the repository's sources;
+- Figma → only `fetch_design` (frames saved as data, as its `how` says); judging a design is the
+  Planner's and `aw-media`'s;
+- never edit an agent's artifact (`plan.md`, `review.json`, `device-report.md`, `pr-feedback.json`…),
+  nor read the toolkit's source to get past the CLI;
+- never run a stage's CLI command (`deliver`, `render verdict`, `finish`…) while its agent still runs;
+- the CLI rejects an artifact → resume the agent that wrote it with the `errors`.
 
 ## Invocation
 
