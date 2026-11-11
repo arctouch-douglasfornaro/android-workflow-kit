@@ -237,6 +237,37 @@ class RunTests(unittest.TestCase):
         self.review("approved")  # written now: accepted, and `next` moves on
         self.assertNotIn("missing_artifact", read_json(self.rundir / "run-state.json")["stages"]["T6"])
 
+    def test_a_review_of_an_older_tree_is_refused(self) -> None:
+        self.checked()
+        answer = self.next()
+        self.assertTrue(answer["tree"])  # the Reviewer copies it into review.json as `reviewed_tree`
+        (self.root / SCREEN).write_text("package com.example\nclass ProfileScreen { val b = 2 }\n", encoding="utf-8")
+        (self.rundir / "review.json").write_text(json.dumps({"schema_version": 1, "status": "approved",
+                                                             "reviewed_tree": answer["tree"]}), encoding="utf-8")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            code = main(["log", "--target", self.target, "--stage", "Reviewer", "--status", "completed"])
+        self.assertNotEqual(code, 0)
+        self.assertIn("review.json is stale", out.getvalue())
+        self.assertIn(SCREEN, out.getvalue())
+        resumed = self.next()
+        self.assertEqual((resumed["agent"], resumed["resume"]), ("aw-reviewer", True))
+        # Whitespace only (the formatter) since the tree it names: accepted.
+        (self.root / SCREEN).write_text("package com.example\nclass ProfileScreen {  val a = 1  }\n", encoding="utf-8")
+        (self.rundir / "review.json").write_text(json.dumps({"schema_version": 1, "status": "approved",
+                                                             "reviewed_tree": answer["tree"]}), encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(main(["log", "--target", self.target, "--stage", "Reviewer", "--status", "completed"]), 0)
+
+    def test_without_its_own_tree_the_review_is_checked_against_the_round_start(self) -> None:
+        self.checked()
+        self.next()  # the Reviewer starts on this tree
+        self.implement("val c = 3")  # the code moves while it reads
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            self.review("approved")
+        self.assertEqual(read_json(self.rundir / "run-state.json")["stages"]["T6"]["status"], "started")
+
     def test_an_artifact_from_before_the_round_started_is_refused(self) -> None:
         self.checked()
         self.gate("failed")
@@ -290,6 +321,8 @@ class RunTests(unittest.TestCase):
         self.review("changes_requested", [{"id": "R1", "file": "app/README.md"}])
         self.assertEqual(self.next()["mode"], "fix")
         readme.write_text("# App\n\nPaging rule.\n", encoding="utf-8")
+        with (self.rundir / "implementation-notes.md").open("a", encoding="utf-8") as notes:
+            notes.write("\nR1 → app/README.md\n")
         cli("log", "--target", self.target, "--stage", "Implementer", "--status", "completed", "--tokens", "1")
         answer = self.next()
         self.assertNotIn("draft", answer)

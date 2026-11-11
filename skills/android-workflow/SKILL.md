@@ -183,7 +183,7 @@ CLI status|list --target T                          CLI clean --target T [--tick
      it to `aw-device` (`before` writes the flows while the Implementer works, `after` replays them and judges).
    - `checks`: run what `run` lists in the same turn: `CLI gate --target TARGET` (long command
      timeout, e.g. 30 min) and/or `agent` (`aw-reviewer`, `mode` `full` or `delta` with the `fixed`
-     IDs) in the background. The review only reads code, so it never waits for the gate. Start `also`
+     IDs and the `tree` it reviews) in the background. A review.json of another tree is refused at `log`. The review only reads code, so it never waits for the gate. Start `also`
      in the background too (`CLI device build`: the APK the Device installs, built before it holds a
      device).
    - `fix` (a team): resume the Implementer of each slice in `routes` with its IDs (logged with its

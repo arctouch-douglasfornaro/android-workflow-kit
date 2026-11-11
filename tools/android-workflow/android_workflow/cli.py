@@ -2790,6 +2790,37 @@ def stage_artifact_error(agent_dir: Path, stage: str, since: Any) -> str | None:
             f"{agent} to write RUN/{names[0]}, then log `completed` again")
 
 
+def review_tree_error(target: Path, agent_dir: Path, opened: bool) -> str | None:
+    """Why review.json does not describe the working tree as it is now, or None.
+
+    The tree it reviewed is its own `reviewed_tree` (the `tree` the `checks` answer handed the Reviewer),
+    else the tree when this round's `started` was logged. Whitespace-only differences and files the
+    gate's formatter rewrote do not count."""
+    review = read_json(agent_dir / "review.json") if (agent_dir / "review.json").is_file() else {}
+    entry = (read_json(agent_dir / "run-state.json").get("stages") or {}).get("T6") or {}
+    seen = str(review.get("reviewed_tree") or "") or (entry.get("started_tree") if opened else None)
+    if not seen:
+        return None
+    try:
+        current = snapshot_tree(target)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if not current or current == seen:
+        return None
+    changed = git_lines(target, "diff", "-w", "--ignore-blank-lines", "--name-only", seen, current)
+    if changed is None:
+        return None if review.get("reviewed_tree") is None else (
+            f"review.json names reviewed_tree {seen[:12]}, which is not a tree of this repository: re-run the Reviewer")
+    gate = read_json(agent_dir / "gate-report.json") if (agent_dir / "gate-report.json").is_file() else {}
+    formatted = set((gate.get("auto_format") or {}).get("formatted") or [])
+    changed = [name for name in changed if name not in formatted and ".ai" not in Path(name).parts]
+    if not changed:
+        return None
+    return (f"review.json is stale: it reviewed tree {seen[:12]}, and the working tree changed since "
+            f"({', '.join(changed[:5])}{'…' if len(changed) > 5 else ''}): resume aw-reviewer on the delta "
+            "(`CLI delta --target TARGET`), then log `completed` again")
+
+
 def log_stage(*args: Any, **kwargs: Any) -> dict[str, Any]:
     target = args[0] if args else kwargs["target"]
     stage = args[1] if len(args) > 1 else kwargs["stage"]
@@ -2839,7 +2870,8 @@ def _log_stage(
         stages_now = read_json(agent_dir / "run-state.json").get("stages") or {}
         clock = ((read_json(agent_dir / "stage-metrics.json").get("stages") or {}).get(stage) or {}).get("running_since")
         opened = (stages_now.get(stage) or {}).get("status") in OPENING_STATUSES
-        missing = stage_artifact_error(agent_dir, stage, clock if opened else None)
+        missing = stage_artifact_error(agent_dir, stage, clock if opened else None) \
+            or (review_tree_error(target, agent_dir, opened) if stage == "T6" else None)
         if missing:
             with contextlib.suppress(OSError, ValueError):
                 # `next` reads this and resumes the agent instead of waiting for it forever.
@@ -2878,6 +2910,12 @@ def _log_stage(
     previous = str(state["stages"][stage].get("status") or "")
     state["stages"][stage]["status"] = status
     state["stages"][stage].pop("missing_artifact", None)
+    if stage == "T6" and status == "started":
+        try:
+            # What the Reviewer is about to read: `completed` refuses a review.json of another tree.
+            state["stages"][stage]["started_tree"] = snapshot_tree(target)
+        except (OSError, subprocess.SubprocessError):
+            state["stages"][stage].pop("started_tree", None)
     if note:
         state["stages"][stage]["note"] = note
     entry = metrics.setdefault("stages", {}).setdefault(stage, {})

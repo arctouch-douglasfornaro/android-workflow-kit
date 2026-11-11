@@ -73,7 +73,9 @@ compiling, tests and lint are the gate's job, so never wait for it.
 
 `RUN/review.json`: `schema_version: 1`, `status` (`approved` | `changes_requested`),
 `blocking` (id, file:line, problem, fix), `concerns` (go to the PR body),
-`suggestions` (never become code automatically). Then
+`suggestions` (never become code automatically), `reviewed_tree` (the `tree` you were given; in a delta
+round `current_tree` from `CLI delta`). `log` refuses a review.json whose tree is not the working
+tree any more (whitespace aside): review the delta again. Then
 `CLI log --target TARGET --stage Reviewer --status completed --note "<status>, N blocking"`.
 
 Delta round: review only the fix hunks and anything they touch; keep prior IDs.

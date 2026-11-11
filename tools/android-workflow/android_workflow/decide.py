@@ -387,6 +387,14 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
         if not todo:
             return _answer("wait", "the gate and the Reviewer are running")
         delta = bool(review_state.get("reviewed_tree")) and review_verdict in {"approved", "changes_requested"}
+        tree = None
+        if "reviewer" in todo:
+            from android_workflow.cli import snapshot_tree
+
+            try:
+                tree = snapshot_tree(target)  # the Reviewer writes it into review.json as `reviewed_tree`
+            except Exception:  # noqa: BLE001 - no git: the round's `started` tree is checked instead
+                tree = None
         return _answer(
             "checks", "the change has no gate and review for its current source yet", run=todo,
             command="CLI gate --target TARGET" if "gate" in todo else None,
@@ -395,6 +403,7 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
             tier="standard" if delta and "reviewer" in todo else None,
             fixed=[item.get("id") for item in review_blocking(review)] if delta and "reviewer" in todo else None,
             stage="Reviewer" if "reviewer" in todo else None,
+            tree=tree,
             note=("delta review of the fix" if delta else "independent review of the diff") if "reviewer" in todo else None,
             also=["CLI device build --target TARGET (background: the APK the Device installs, built before it "
                   "takes a device)"] if "gate" in todo and "T7" in (spec.get("route") or []) and not no_device
