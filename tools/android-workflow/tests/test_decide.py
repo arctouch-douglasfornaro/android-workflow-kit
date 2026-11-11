@@ -45,6 +45,26 @@ def spec(**fields: object) -> dict:
 CHANGE_SET = {"candidate_files": [{"path": SCREEN}, {"path": "app/src/test/java/com/example/ProfileScreenTest.kt"}]}
 
 
+class DeviceReportStatusTests(unittest.TestCase):
+    def test_the_verdict_is_read_from_the_status_heading_or_a_bare_first_line(self) -> None:
+        from android_workflow.cli import device_report_status
+
+        self.assertEqual(device_report_status("## Status: BLOCKED\n\nlogin wall\n## Device\nx"), "blocked")
+        self.assertEqual(device_report_status("# Status\n\nPASS (flaky once)\n"), "pass")
+        self.assertEqual(device_report_status("PASS\n\n## Device\nemulator"), "pass")
+        self.assertEqual(device_report_status("\n**BLOCKED**: no device\n"), "blocked")
+        self.assertEqual(device_report_status("Status: FAIL\n"), "fail")
+        self.assertEqual(device_report_status("Device notes: a login wall?\n"), "")
+
+    def test_anomalies_end_at_the_next_heading_and_never_include_the_timing_line(self) -> None:
+        from android_workflow.cli import device_report_anomalies
+
+        self.assertEqual(device_report_anomalies("## Status: PASS\n## Anomalies\nNone.\n## Evidence\nx.png\n"), [])
+        self.assertEqual(device_report_anomalies("# Status\nPASS\n# Anomalies\nNone.\n\nTiming: install 3s\n"), [])
+        self.assertEqual(device_report_anomalies("## Anomalies\n- a toast flashed\n### detail\nseen once\n## Evidence\n"),
+                         ["- a toast flashed", "### detail", "seen once"])
+
+
 class LevelTests(unittest.TestCase):
     def test_a_low_risk_chore_allows_express_but_does_not_pick_it(self) -> None:
         chosen = choose_level(spec(), CHANGE_SET)
@@ -400,6 +420,39 @@ class RunTests(unittest.TestCase):
             self.assertEqual(self.next()["agent"], "aw-device")
             self.device_report("FAIL")
             self.assertIn("--draft", self.next()["command"])
+
+    def spend_device(self, minutes: float) -> None:
+        metrics = read_json(self.rundir / "stage-metrics.json")
+        metrics["stages"].setdefault("T7", {})["wall_time_seconds"] = minutes * 60
+        (self.rundir / "stage-metrics.json").write_text(json.dumps(metrics), encoding="utf-8")
+
+    def test_past_the_device_budget_a_fail_opens_a_draft_instead_of_a_fix_round(self) -> None:
+        self.visual_run()
+        with mock.patch("android_workflow.emulator.status", return_value={"status": "connected", "serial": "emu-1"}):
+            self.next()
+            self.device_report("FAIL")
+            self.spend_device(decide.DEVICE_BUDGET_MINUTES + 1)
+            answer = self.next()
+        self.assertIn("--draft", answer["command"])
+        self.assertIn("device budget is spent", answer["why"])
+
+    def test_past_the_device_budget_no_device_round_starts_and_blocked_is_recorded(self) -> None:
+        self.visual_run()
+        (self.root / ".ai").mkdir(exist_ok=True)
+        (self.root / ".ai/android-workflow.json").write_text(json.dumps({"device": {"budget_minutes": 5}}), encoding="utf-8")
+        with mock.patch("android_workflow.emulator.status", return_value={"status": "connected", "serial": "emu-1"}):
+            self.assertEqual(self.next()["agent"], "aw-device")
+            # The agent spent its time and came back with notes, no verdict.
+            (self.rundir / "device-report.md").write_text("Stuck behind a login wall.\n", encoding="utf-8")
+            cli("log", "--target", self.target, "--stage", "Device", "--status", "completed", "--tokens", "1")
+            self.spend_device(6)
+            answer = self.next()
+        report = (self.rundir / "device-report.md").read_text(encoding="utf-8")
+        self.assertIn("--draft", answer["command"])
+        self.assertTrue(report.startswith("## Status: BLOCKED"))
+        self.assertIn("5 min", report)
+        self.assertEqual(read_json(self.rundir / "run-state.json")["stages"]["T7"]["verdict"], "blocked")
+        self.assertIn("login wall", (self.rundir / "device-report.previous.md").read_text(encoding="utf-8"))
 
     def test_a_device_pass_finishes_and_delivery_follows(self) -> None:
         self.visual_run()

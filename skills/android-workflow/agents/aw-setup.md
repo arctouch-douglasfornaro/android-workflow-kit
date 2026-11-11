@@ -9,7 +9,10 @@ tools: Read, Grep, Glob, Bash, Write
 
 android-workflow Setup. Runs only when `CLI setup` returns `needs_setup_agent`; the result is
 reused by every ticket until the build configuration changes. Precision here pays back on
-every run, so prove each fact from a file; unknown stays empty.
+every run, so prove each fact from a file; unknown stays empty. A worktree whose build files
+match the main checkout's accepted setup never gets here (`setup` adopts it); when `adopted_setup`
+says why it did not (`reason`: the build files that differ), learn what those files change, not
+the whole project again.
 
 ## Inputs
 

@@ -823,17 +823,98 @@ class EmulatorTests(unittest.TestCase):
         self.assertEqual(last["stopped"], ["emulator-5554"])
         self.assertEqual(pool_left, [])
 
-    def test_the_same_avd_starts_again_read_only(self) -> None:
+    def test_the_same_avd_starts_again_read_only_only_once_its_first_copy_booted(self) -> None:
         with FakeSdk(avds="Pixel_9") as (target, state_dir):
             first, second = self.apps(target.parent, "A-1", "B-1")
             emulator.claim(first)
             self.launched(state_dir, 5554)
+            waiting = emulator.claim(second)  # two copies of one AVD booting at once kill the second
+            started_too_early = (state_dir / "launch-5556.json").exists()
+            (state_dir / "booted").touch()
             emulator.claim(second)
             args = self.launched(state_dir, 5556)
             emulator.stop(first, grace=10)
             emulator.stop(second, grace=10)
+        self.assertEqual(waiting["status"], "busy")
+        self.assertIn("still booting", waiting["reason"])
+        self.assertFalse(started_too_early)
         self.assertEqual(args[:2], ["-avd", "Pixel_9"])
         self.assertIn("-read-only", args)
+
+    def test_a_busy_configured_avd_falls_back_to_a_free_one(self) -> None:
+        with FakeSdk() as (target, state_dir):
+            first, second = self.apps(target.parent, "A-1", "B-1")
+            for app in (first, second):
+                (app / ".ai").mkdir(exist_ok=True)
+                (app / ".ai/android-workflow.json").write_text(json.dumps({"device": {"avd": "Pixel_9"}}), encoding="utf-8")
+            emulator.claim(first)
+            self.launched(state_dir, 5554)
+            (state_dir / "booted").touch()
+            other = emulator.claim(second)
+            args = self.launched(state_dir, 5556)
+            emulator.stop(first, grace=10)
+            emulator.stop(second, grace=10)
+        self.assertEqual(args[:2], ["-avd", "Small_Phone"])
+        self.assertNotIn("-read-only", args)
+        self.assertTrue(any("Pixel_9" in item and "Small_Phone" in item for item in other["warnings"]))
+
+    def test_an_emulator_stuck_booting_fails_is_closed_and_another_avd_starts(self) -> None:
+        from android_workflow import decide
+
+        with FakeSdk() as (target, state_dir):
+            (app,) = self.apps(target.parent, "A-1")
+            first = emulator.claim(app)
+            self.launched(state_dir, 5554)
+            (state_dir / "launch-5554.json").unlink()
+            time.sleep(0.6)
+            with mock.patch.object(emulator, "_stall_limit", return_value=0.5):
+                seen = emulator.status(app)  # adb lists it, its process runs, it never boots
+                serial, waiting, _ = decide._device_for(app, run_dir(app), record=True)
+            killed = (state_dir / "kill-5554").exists()
+            relaunched = self.launched(state_dir, 5554)
+            emulator.stop(app, grace=10)
+        self.assertEqual((first["status"], first["avd"]), ("booting", "Pixel_9"))
+        self.assertEqual(seen["status"], "failed")
+        self.assertIn("has not finished booting", seen["reason"])
+        self.assertTrue(killed)
+        self.assertIsNone(serial)
+        self.assertTrue(waiting["why"].startswith(decide.BOOTING))  # a new lease, not hours of "booting"
+        self.assertEqual(relaunched[:2], ["-avd", "Small_Phone"])  # the AVD that failed is avoided
+
+    def test_stop_never_closes_an_emulator_another_run_holds_or_started(self) -> None:
+        with FakeSdk() as (target, state_dir):
+            first, second, third = self.apps(target.parent, "A-1", "B-1", "C-1")
+            emulator.claim(first)
+            self.launched(state_dir, 5554)
+            emulator.claim(second)
+            self.launched(state_dir, 5556)
+            (state_dir / "booted").touch()
+            from android_workflow.locks import release, unwant
+
+            release(run_dir(second))  # B-1 gave its lease back but is not stopping
+            unwant(run_dir(second))
+            stopped_first = emulator.stop(first, grace=10)
+            stopped_third = emulator.stop(third, grace=10)  # holds nothing: closes nothing
+            alive = (state_dir / "kill-5556").exists()
+            emulator.stop(second, grace=10)
+        self.assertEqual(stopped_first["stopped"], ["emulator-5554"])
+        self.assertEqual(stopped_third["status"], "left_running")
+        self.assertIn("not this run's device", stopped_third["reason"])
+        self.assertFalse(alive)
+
+    def test_stop_refuses_an_emulator_another_run_holds(self) -> None:
+        with FakeSdk() as (target, state_dir):
+            first, second = self.apps(target.parent, "A-1", "B-1")
+            emulator.claim(first)
+            self.launched(state_dir, 5554)
+            emulator.claim(second)
+            self.launched(state_dir, 5556)
+            result = emulator.stop(first, grace=10)
+            killed_other = (state_dir / "kill-5556").exists()
+            emulator.stop(second, grace=10)
+        self.assertEqual(result["stopped"], ["emulator-5554"])
+        self.assertIn("B-1", result["refused"]["emulator-5556"])
+        self.assertFalse(killed_other)
 
     @mock.patch.dict(os.environ, {"ANDROID_WORKFLOW_DEDICATED_DEVICE": "0"})  # device.dedicated off
     def test_an_open_emulator_nobody_uses_is_reused_and_never_closed(self) -> None:

@@ -166,7 +166,9 @@ head and proposes resolving the addressed ones). A run of that PR on disk also g
   pure refactor pinned by tests (`device: skip` + reason in the spec), never for a resource or
   manifest change. The Reviewer can require it (`CLI review device --require`), which beats the
   waiver. `after` = PR head, `before` = the base APK replayed
-  by code. No UI change → the review says "not verified on a device: no UI change".
+  by code. No UI change → the review says "not verified on a device: no UI change". At most two
+  Device rounds per review round and `device.budget_minutes` (20) of device time: past either, the
+  CLI records BLOCKED (or PARTIAL) with what was verified and the draft follows.
   **Carry-over:** in a delta round, a device PASS/PARTIAL of an earlier head is reused (T7 skipped, no
   APK builds) while the PR's commits since that head change no UI; the review says "PASS on abc1234
   carried over: the new commits change no UI" and the carried report still proves the device AC. A UI
