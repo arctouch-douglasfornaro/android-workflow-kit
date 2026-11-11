@@ -340,7 +340,13 @@ class FlowTests(unittest.TestCase):
                     mock.patch("android_workflow.watch._gh") as gh:
                 refused = review.post(worktree, drafted["draft_id"])
                 self.assertEqual((refused["status"], refused["reason"]), ("refused", "draft_changed"))
+                # the edited draft was never shown to the developer: no OK can cover it yet
+                unseen = review.post(worktree, edited["draft_id"])
+                self.assertEqual((unseen["status"], unseen["reason"]), ("refused", "not_shown"))
+                self.assertIn("review-draft.md", unseen["next"])
                 gh.assert_not_called()
+                again = review.next_action(worktree)
+                self.assertEqual((again["next"], again["draft_id"]), ("ask_user", edited["draft_id"]))
                 gh.return_value = subprocess.CompletedProcess([], 0, json.dumps({"id": 99, "html_url": "u"}), "")
                 posted = review.post(worktree, edited["draft_id"])
                 payload = json.loads(gh.call_args.kwargs["stdin"])
@@ -366,6 +372,7 @@ class FlowTests(unittest.TestCase):
             worktree = self.run_to_draft(project, {"status": "approved", "blocking": [], "acceptance": []})
             drafted = review.draft(worktree)
             self.assertEqual(drafted["event"], "APPROVE")
+            review.next_action(worktree)
             with mock.patch.object(review, "fetch_pr", return_value=fake_pr("f" * 40)), \
                     mock.patch("android_workflow.watch._gh") as gh:
                 refused = review.post(worktree, drafted["draft_id"])
@@ -412,6 +419,8 @@ class FlowTests(unittest.TestCase):
         with Project(self.CHANGE) as project:
             worktree = self.run_to_draft(project, findings)
             drafted = review.draft(worktree)
+            self.assertEqual(review.shown(worktree, "0" * 12)["reason"], "draft_changed")
+            self.assertEqual(review.shown(worktree, drafted["draft_id"])["status"], "shown")
             with mock.patch.object(review, "fetch_pr", return_value=fake_pr(project.head)), \
                     mock.patch("android_workflow.watch._gh") as gh:
                 gh.return_value = subprocess.CompletedProcess([], 0, json.dumps({"id": 1, "html_url": "u"}), "")
@@ -559,6 +568,7 @@ class FlowTests(unittest.TestCase):
                 review.edit(worktree, keep_open=["T9"])
             redrafted = review.draft(worktree)
             self.assertEqual(redrafted["draft_id"], drafted["draft_id"])
+            review.next_action(worktree)  # shows it again
             with mock.patch.object(review, "fetch_pr", return_value=fake_pr(project.head)), \
                     mock.patch("android_workflow.watch._gh") as gh, \
                     mock.patch("android_workflow.watch._graphql") as graphql:
@@ -580,6 +590,7 @@ class FlowTests(unittest.TestCase):
             context["our_threads"] = [{"id": "T_a", "path": REPO, "line": 5, "resolved": False}]
             (agent_dir / review.CONTEXT_FILE).write_text(json.dumps(context))
             drafted = review.draft(worktree)
+            review.next_action(worktree)
             with mock.patch.object(review, "fetch_pr", return_value=fake_pr(project.head)), \
                     mock.patch("android_workflow.watch._gh") as gh, \
                     mock.patch("android_workflow.watch._graphql", side_effect=[RuntimeError("forbidden"), {}]):
@@ -1191,7 +1202,8 @@ class SkillContractTests(unittest.TestCase):
         from android_workflow.paths import KIT_ROOT
 
         text = (KIT_ROOT / "skills/android-review/SKILL.md").read_text(encoding="utf-8")
-        for action in ("start", "next", "ci", "draft", "edit", "post", "answer", "device", "ticket", "wait", "replies", "reply"):
+        for action in ("start", "next", "ci", "draft", "edit", "shown", "post", "answer", "device", "ticket", "wait", "replies",
+                       "reply"):
             self.assertIn(f"CLI review {action}", text)
         self.assertIn("Nothing reaches GitHub before the developer's OK", text)
 

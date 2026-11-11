@@ -51,6 +51,7 @@ CLI review next   --target WT [--no-device]                               (the o
 CLI review ci     --target WT [--wait]                                    (trust CI, or wait, or the local gate)
 CLI review draft  --target WT                                             (RUN/review-draft.md + draft id)
 CLI review edit   --target WT [--drop C2]… [--set C3 "text"]… [--keep-open T1]… [--event COMMENT] [--body "…"]
+CLI review shown  --target WT --draft-id ID                               (the developer saw this draft)
 CLI review post   --target WT --draft-id ID                               (only after the developer's OK)
 CLI review answer --target WT --question "q" --answer "a"
 CLI review device --target WT --require "why"                             (Reviewer: UI effect the rule missed)
@@ -91,9 +92,12 @@ CLI gate | prebuild | device … | emulator … | log …  --target WT         (
    - `ask_user` with `show` (the draft): print `RUN/review-draft.md` **as is** (event, body, each
      inline comment with `file:line`, and in a delta round the *Threads to resolve*) and ask the
      developer: post, edit, or stop. Edits → `CLI review edit …` (`--keep-open T1` leaves one of
-     those threads open), show the new draft, ask again. Only on an explicit OK → `CLI review post --draft-id <id>`
-     with the id of the draft they saw. `refused: head_moved` → `CLI review start` again (delta round).
-     Never post on silence, on a standing preference, or with another draft id.
+     those threads open), then `CLI review next` again: it returns the new draft with `show`; print it,
+     ask again. Only on an explicit OK → `CLI review post --draft-id <id>` with the id of the draft they
+     saw. `post` refuses an id never returned with `show` (`refused: not_shown`; `CLI review shown` marks
+     one printed some other way), so an edit is never posted unseen. `refused: head_moved` →
+     `CLI review start` again (delta round). Never post on silence, on a standing preference, or with
+     another draft id.
    - `ask_user` with `show` on a **quiet** draft (`Event: none`: we already approved an earlier head and
      the delta raised nothing new): print it as is and ask: resolve the listed threads without a new
      review, keep one open (`--keep-open T1`), post a review anyway (`CLI review edit --event APPROVE`
@@ -196,7 +200,8 @@ CLI gate | prebuild | device … | emulator … | log …  --target WT         (
   block (the author's "Commit suggestion"); one the CLI cannot apply (off the hunk, >10 lines,
   overlapping, no change) is posted as the text fix and listed under `suggestions_as_text` in the draft result.
 - **Post**: one review via `POST /repos/{o}/{r}/pulls/{n}/reviews` pinned to the reviewed commit;
-  refused when the draft changed since the OK or the PR head moved. The PR is never merged from this mode.
+  refused when the draft changed since the OK, was never shown (`next` returning it with `show`, or
+  `review shown`; every `edit` or redraft resets it) or the PR head moved. The PR is never merged from this mode.
 - **Others' comments**: `pr-context.json` carries `other_threads` (inline threads others opened, open
   first, max 40) and `discussion` (PR comments and review bodies, max 30). A finding may repeat a point
   from one of them with more detail (`thread` → the comment links it); `replies` (agree, disagree,

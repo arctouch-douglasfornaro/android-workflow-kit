@@ -1154,6 +1154,10 @@ def _decide(target: Path, record: bool, no_device: bool) -> dict[str, Any]:
     if not draft or draft.get("head") != context["head"] or draft.get("stale"):
         return _answer("draft", "every check is in: compose the review", command="CLI review draft --target TARGET",
                        then="CLI review next --target TARGET")
+    if record and draft.get("shown") != draft["id"]:
+        # Returned with `show`: the host prints this exact draft now, so it is the one an OK may post.
+        draft["shown"] = draft["id"]
+        _write(agent_dir / DRAFT_FILE, draft)
     if draft.get("quiet"):
         count = len(draft.get("resolve") or [])
         return _answer("ask_user", "already approved and the new commits raise nothing new: only our addressed "
@@ -1774,6 +1778,7 @@ def _review_body(value: dict[str, Any]) -> str:
 
 def _save_draft(agent_dir: Path, value: dict[str, Any]) -> dict[str, Any]:
     value.pop("stale", None)
+    value.pop("shown", None)  # a new or edited draft has not been shown to the developer yet
     value["id"] = _draft_id(value)
     _write(agent_dir / DRAFT_FILE, value)
     reasons = f" ({'; '.join(value.get('reasons') or [])})" if value.get("reasons") else ""
@@ -1885,7 +1890,22 @@ def edit(target: Path, drop: list[str] | None = None, event: str | None = None,
     saved = _save_draft(agent_dir, value)
     return {"status": "edited", "draft_id": saved["id"], "event": saved["event"],
             "inline": len(saved["comments"]), "resolve": len(saved.get("resolve") or []),
-            "show": str(agent_dir / DRAFT_MD)}
+            "show": str(agent_dir / DRAFT_MD),
+            "next": "CLI review next --target TARGET: it returns the new draft to show; print RUN/review-draft.md "
+                    "as is and ask again. `post` refuses this id until it was shown"}
+
+
+def shown(target: Path, draft_id: str) -> dict[str, Any]:
+    """The host printed RUN/review-draft.md with this id to the developer: an OK may now post it."""
+    agent_dir = agent_dir_for(target)
+    value = _read(agent_dir / DRAFT_FILE)
+    if not value or value.get("id") != draft_id or _draft_id(value) != draft_id:
+        return {"status": "refused", "reason": "draft_changed",
+                "next": f"the current draft is {value.get('id')}: print RUN/{DRAFT_MD} as is, then mark that id"}
+    value["shown"] = draft_id
+    _write(agent_dir / DRAFT_FILE, value)
+    return {"status": "shown", "draft_id": draft_id,
+            "next": f"on the developer's explicit OK: CLI review post --target TARGET --draft-id {draft_id}"}
 
 
 # --- post ----------------------------------------------------------------------------------------
@@ -1903,6 +1923,11 @@ def post(target: Path, draft_id: str) -> dict[str, Any]:
     if value.get("id") != draft_id or _draft_id(value) != draft_id:
         return {"status": "refused", "reason": "draft_changed",
                 "next": "the draft is not the one the developer approved: show RUN/review-draft.md again"}
+    if value.get("shown") != draft_id:
+        return {"status": "refused", "reason": "not_shown",
+                "next": f"the developer never saw draft {draft_id}: print RUN/{DRAFT_MD} as is "
+                        "(CLI review next --target TARGET returns it with `show`), get an explicit OK for this id, "
+                        "then post"}
     _, repo = _remote(target)
     env = github_env(target)
     if any(item.get("draft_id") == draft_id for item in state.get("posted") or []):
@@ -2393,6 +2418,9 @@ def dispatch(target: Path, args: Any) -> tuple[dict[str, Any], int]:
     if action == "edit":
         return edit(target, drop=args.drop, event=args.event, set_text=args.set, body=args.body,
                     keep_open=getattr(args, "keep_open", None)), 0
+    if action == "shown":
+        result = shown(target, args.draft_id)
+        return result, 0 if result["status"] == "shown" else 1
     if action == "post":
         result = post(target, args.draft_id)
         return result, 0 if result["status"] in {"posted", "already_posted"} else 1
