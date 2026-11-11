@@ -29,7 +29,7 @@ for one exact draft id.
 ```
 
 `TARGET_MAIN` = `--target`, else the current workspace if it has `settings.gradle(.kts)`.
-`CLI` = `python3 ~/.ai/bin/android-workflow`.
+`CLI` is shorthand for `python3 ~/.ai/bin/android-workflow`: write the full command in Bash, never a shell variable (`$CLI` exits 127 in zsh).
 
 **Watch is on by default**: after the post the run follows the PR (step 4) until it is merged or
 closed. `--no-watch` stops right after the post (or the developer says stop at any time).

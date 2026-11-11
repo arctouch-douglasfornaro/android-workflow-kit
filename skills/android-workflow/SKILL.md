@@ -55,7 +55,10 @@ Keep log notes neutral (`--note "writing the PR description"`), never a list of 
 
 1. `TARGET` = `--target`, else the current workspace if it has `settings.gradle(.kts)`.
 2. If this repo is the toolkit (has `android_workflow/cli.py`) and TARGET was omitted, STOP.
-3. `CLI` = `python3 ~/.ai/bin/android-workflow`. `RUN` = `TARGET/.ai/workflow/<ticket-id>/`.
+3. `RUN` = `TARGET/.ai/workflow/<ticket-id>/`. `CLI` is shorthand in these docs for
+   `python3 ~/.ai/bin/android-workflow`: in Bash always write the full command
+   (`python3 ~/.ai/bin/android-workflow next --target …`), never through a shell variable
+   (`CLI=…; $CLI next` exits 127 in zsh, and the permission allowlist matches only the full form).
 
 Record `TARGET`, `RUN` and `CLI` in the first chat message, and end that message with the office
 the user opens to watch the agents: `office_message` from the `start` output, copied as is, on its
