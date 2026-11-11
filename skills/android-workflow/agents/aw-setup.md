@@ -79,6 +79,8 @@ every run, so prove each fact from a file; unknown stays empty.
 - Then `CLI setup --target TARGET --accept`. It refuses while a reason is unresolved; fix the
   row or ask.
 
+**Finish by writing `.ai/project-profile.md` and `.ai/android-workflow.json`**: the file is your result, the return only sums it up. The host logs completion; returning without the file gets you resumed to write it.
+
 ## Return (≤10 lines)
 
 `READY` or the unresolved facts as one batched question, formatter, variant, app id, number of

@@ -2123,9 +2123,35 @@ def device_report_anomalies(device: str) -> list[str]:
 STUB_PR_MARKER = "See the diff and `implementation-notes.md`"
 
 
-def is_stub_pr_body(content: str) -> bool:
+def _body_lines(text: str) -> list[str]:
+    """The lines of a PR body that say something: no headings, HTML comments, checklist items, table
+    rules or blank lines, whitespace and case folded."""
+    text = re.sub(r"<!--.*?-->", "", text, flags=re.S)
+    kept = []
+    for line in text.splitlines():
+        line = " ".join(line.split()).lower()
+        if not line or line.startswith("#") or re.match(r"^[-*]\s+\[[ xX]\]", line) or re.fullmatch(r"[|:\- ]+", line):
+            continue
+        kept.append(line)
+    return kept
+
+
+def is_stub_pr_body(content: str, spec: dict[str, Any] | None = None, template: str | None = None) -> bool:
+    """Nothing written by the Delivery agent: empty, the marker, the ticket title/description `finish`
+    wrote as a placeholder, only headings and checklist, or the repo's PR template left as it is."""
     text = content.strip()
-    return (not text) or STUB_PR_MARKER in text
+    if not text or STUB_PR_MARKER in text:
+        return True
+    said = _body_lines(text)
+    if not said:
+        return True
+    if spec is not None and said == _body_lines(short_pr_body(spec)):
+        return True
+    if template:
+        from_template = set(_body_lines(template))
+        if all(line in from_template for line in said):
+            return True
+    return False
 
 
 def short_pr_body(spec: dict[str, Any]) -> str:
@@ -2698,6 +2724,72 @@ def attach_pending_setup(target: Path, agent_dir: Path, state: dict[str, Any], m
         state["stages"]["T0"] = {"status": "started"}
 
 
+# What each agent's `completed` stands on: the file it must have written in this round. An agent that
+# returns without it is resumed, never logged as done (a stub once shipped as the PR description).
+STAGE_ARTIFACTS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "T3": ("aw-planner", ("plan.md", "review-spec.json", "ticket-spec.json")),  # or its `update-spec`
+    "T4": ("aw-implementer", ("implementation-notes.md",)),
+    "T4L": ("aw-tech-lead", ("implementation-notes.md", "team-plan.json")),
+    "T6": ("aw-reviewer", ("review.json",)),
+    "T7": ("aw-device", ("device-report.md",)),
+    "T8": ("aw-delivery", ("pr-description.md",)),
+}
+ARTIFACT_CLOCK_SLACK_SECONDS = 2  # file mtimes and the logged clock may disagree by this much
+
+
+def artifact_stub(name: str, text: str, spec: dict[str, Any] | None = None, template: str | None = None) -> bool:
+    """The file still holds what the CLI wrote before the agent ran (or nothing at all)."""
+    if not text.strip():
+        return True
+    if name == "implementation-notes.md":
+        return "Host has not implemented yet." in text
+    if name == "plan.md":
+        return "Not required for this route." in text
+    if name == "ticket-spec.json":
+        try:
+            return not json.loads(text).get("planner_updated")
+        except (ValueError, AttributeError):
+            return True
+    if name == "device-report.md":
+        return device_report_status(text) in {"", "not_run"}
+    if name == "review.json":
+        try:
+            return json.loads(text).get("status") in (None, "", "not_run")
+        except (ValueError, AttributeError):
+            return True
+    if name == "pr-description.md":
+        return is_stub_pr_body(text, spec, template)
+    return False
+
+
+def stage_artifact_error(agent_dir: Path, stage: str, since: Any) -> str | None:
+    """Why `stage` cannot be logged `completed`: its artifact is missing, empty, still the stub, or
+    older than this round's `started` (`since`). None when one of its files is fresh."""
+    if stage not in STAGE_ARTIFACTS:
+        return None
+    agent, names = STAGE_ARTIFACTS[stage]
+    spec = read_json(agent_dir / "ticket-spec.json") if (agent_dir / "ticket-spec.json").is_file() else {}
+    template = None
+    if stage == "T8" and spec.get("pr_template"):
+        # RUN is TARGET/.ai/workflow/<ticket>
+        template = text_if_exists(agent_dir.parents[2] / str(spec["pr_template"])) or None
+    problems = []
+    for name in names:
+        path = agent_dir / name
+        if not path.is_file():
+            problems.append(f"{name} is missing")
+            continue
+        if artifact_stub(name, path.read_text(encoding="utf-8", errors="replace"), spec, template):
+            problems.append(f"{name} is empty or still the stub")
+            continue
+        if isinstance(since, (int, float)) and path.stat().st_mtime + ARTIFACT_CLOCK_SLACK_SECONDS < float(since):
+            problems.append(f"{name} was not written in this round (older than its `started`)")
+            continue
+        return None
+    return (f"{STAGE_ROLES.get(stage, stage)} returned without its artifact ({'; '.join(problems)}): resume "
+            f"{agent} to write RUN/{names[0]}, then log `completed` again")
+
+
 def log_stage(*args: Any, **kwargs: Any) -> dict[str, Any]:
     target = args[0] if args else kwargs["target"]
     stage = args[1] if len(args) > 1 else kwargs["stage"]
@@ -2743,6 +2835,18 @@ def _log_stage(
         unproven = device_pass_unproven(target, agent_dir)
         if unproven:
             raise ValueError(unproven)
+    if status == "completed" and not slice_id and read_json(agent_dir / "run-state.json").get("status") != "paused":
+        stages_now = read_json(agent_dir / "run-state.json").get("stages") or {}
+        clock = ((read_json(agent_dir / "stage-metrics.json").get("stages") or {}).get(stage) or {}).get("running_since")
+        opened = (stages_now.get(stage) or {}).get("status") in OPENING_STATUSES
+        missing = stage_artifact_error(agent_dir, stage, clock if opened else None)
+        if missing:
+            with contextlib.suppress(OSError, ValueError):
+                # `next` reads this and resumes the agent instead of waiting for it forever.
+                state_now = load_state(target)
+                state_now.setdefault("stages", {}).setdefault(stage, {})["missing_artifact"] = missing
+                save_state(target, state_now)
+            raise ValueError(missing)
     if stage == "T3" and status == "completed" and read_json(agent_dir / "run-state.json").get("status") != "paused":
         spec_path = agent_dir / "ticket-spec.json"
         spec = read_json(spec_path) if spec_path.is_file() else {}
@@ -2773,6 +2877,7 @@ def _log_stage(
     state.setdefault("stages", {}).setdefault(stage, {})
     previous = str(state["stages"][stage].get("status") or "")
     state["stages"][stage]["status"] = status
+    state["stages"][stage].pop("missing_artifact", None)
     if note:
         state["stages"][stage]["note"] = note
     entry = metrics.setdefault("stages", {}).setdefault(stage, {})

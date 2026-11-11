@@ -280,8 +280,12 @@ def deliver(
         raise ValueError("source changed after `finish`; re-run the gate, review and `finish`")
     body_file = agent_dir / "pr-description.md"
     text = body_file.read_text(encoding="utf-8") if body_file.is_file() else ""
-    if is_stub_pr_body(text):
-        raise ValueError("pr-description.md is missing or still the stub; write the PR body first")
+    template_path = spec.get("pr_template")
+    template_text = (target / template_path).read_text(encoding="utf-8") \
+        if template_path and (target / template_path).is_file() else None
+    if is_stub_pr_body(text, spec, template_text):
+        raise ValueError("pr-description.md is missing, still the stub or the PR template left unfilled; "
+                         "Read it, then Write the PR body")
 
     ticket = spec.get("ticket") or {}
     subject = strip_agent_attribution(subject or f"{ticket.get('id')}: {ticket.get('title')}").strip()
@@ -313,13 +317,12 @@ def deliver(
         if media["unpaired"]:
             warnings.append("captures without a pair (use the same --name in before and after): "
                             + ", ".join(media["unpaired"]))
-    template_path = spec.get("pr_template")
-    if template_path and (target / template_path).is_file():
+    if template_text is not None:
         from android_workflow.cli import source_changes
         from android_workflow.decide import visual
 
         text, checklist = normalize_checklist(
-            text, (target / template_path).read_text(encoding="utf-8"), (spec.get("ticket") or {}).get("id"),
+            text, template_text, (spec.get("ticket") or {}).get("id"),
             visual(spec), source_changes(target))
         if checklist:
             result["checklist"] = checklist

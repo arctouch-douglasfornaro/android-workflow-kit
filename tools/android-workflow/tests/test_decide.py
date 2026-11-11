@@ -224,11 +224,56 @@ class RunTests(unittest.TestCase):
         self.assertEqual((answer["next"], answer["agent"], answer["ids"]), ("spawn", "aw-implementer", ["G1", "R1"]))
         self.assertEqual(sorted(answer["read"]), ["gate-report.json", "review.json"])
 
+    def test_a_reviewer_that_returns_without_review_json_is_resumed(self) -> None:
+        self.checked()
+        self.assertIn("reviewer", self.next()["run"])  # logs the Reviewer started
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            code = main(["log", "--target", self.target, "--stage", "Reviewer", "--status", "completed", "--note", "ok"])
+        self.assertNotEqual(code, 0)
+        self.assertIn("resume aw-reviewer", out.getvalue())
+        answer = self.next()
+        self.assertEqual((answer["next"], answer["agent"], answer["resume"]), ("spawn", "aw-reviewer", True))
+        self.review("approved")  # written now: accepted, and `next` moves on
+        self.assertNotIn("missing_artifact", read_json(self.rundir / "run-state.json")["stages"]["T6"])
+
+    def test_an_artifact_from_before_the_round_started_is_refused(self) -> None:
+        self.checked()
+        self.gate("failed")
+        self.review("approved")
+        self.assertEqual(self.next()["mode"], "fix")
+        notes = self.rundir / "implementation-notes.md"
+        os.utime(notes, (notes.stat().st_mtime - 60,) * 2)  # written by the first round, not this one
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            code = main(["log", "--target", self.target, "--stage", "Implementer", "--status", "completed"])
+        self.assertNotEqual(code, 0)
+        self.assertIn("not written in this round", out.getvalue())
+
+    def test_a_stub_or_template_only_pr_description_cannot_complete_delivery(self) -> None:
+        from android_workflow.cli import is_stub_pr_body, short_pr_body
+
+        ticket = {"ticket": {"title": "Change ProfileScreen title", "description": "Bigger."}}
+        template = "## What\n\n<!-- describe the change -->\n\n## Checklist\n\n- [ ] Tests\n"
+        self.assertTrue(is_stub_pr_body(short_pr_body(ticket), ticket))
+        self.assertTrue(is_stub_pr_body("## What\n\n## Checklist\n\n- [x] Tests\n", ticket, template))
+        self.assertFalse(is_stub_pr_body("## What\n\nThe title is 24sp now.\n\n- [ ] Tests\n", ticket, template))
+        self.checked()
+        (self.rundir / "pr-description.md").write_text(short_pr_body(read_json(self.rundir / "ticket-spec.json")),
+                                                     encoding="utf-8")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            code = main(["log", "--target", self.target, "--stage", "Delivery", "--status", "completed"])
+        self.assertNotEqual(code, 0)
+        self.assertIn("resume aw-delivery", out.getvalue())
+
     def test_a_fix_round_that_changes_nothing_opens_a_draft_instead_of_looping(self) -> None:
         self.checked()
         self.gate("failed")
         self.review("approved")
         self.assertEqual(self.next()["mode"], "fix")
+        with (self.rundir / "implementation-notes.md").open("a", encoding="utf-8") as notes:
+            notes.write("\nG1 → nothing changed\n")  # the round's notes, but no code change
         cli("log", "--target", self.target, "--stage", "Implementer", "--status", "completed", "--tokens", "1")
         answer = self.next()
         self.assertIn("without changing the code", answer.get("draft", ""))

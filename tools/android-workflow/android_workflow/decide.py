@@ -265,6 +265,15 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
     if state.get("status") == "escalated" and state.get("current_stage") == "T3":
         return _answer("ask_user", "a bug needs a reproduction before planning",
                        then='CLI update-spec --target TARGET --reproduction "…", then next')
+    from android_workflow.cli import STAGE_ARTIFACTS, STAGE_ROLES
+
+    for stage_id, (agent, names) in STAGE_ARTIFACTS.items():
+        entry = stages.get(stage_id) or {}
+        if entry.get("status") == "started" and entry.get("missing_artifact"):
+            # The agent returned without writing its file and `log … completed` refused: resume it, never wait.
+            return _spawn(agent, entry["missing_artifact"], stage=STAGE_ROLES[stage_id], resume=True,
+                          writes=[f"RUN/{names[0]}"], then=f'CLI log --target TARGET --stage "{STAGE_ROLES[stage_id]}" '
+                                                           '--status completed --note "<summary>"')
     if state.get("status") == "completed":
         delivery = _read(agent_dir / "delivery.json")
         if not delivery and (stages.get("T8") or {}).get("status") == "started":

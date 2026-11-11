@@ -231,6 +231,8 @@ class StageLogTests(unittest.TestCase):
     def test_an_agent_stage_logged_without_tokens_warns(self) -> None:
         with Project() as root:
             run(root, {"id": "APP-3", "title": "Change Steps", "type": "feature", "acceptance_criteria": ["a"]})
+            (run_dir(root) / "plan.md").write_text("# Objective\n\nThe plan.\n", encoding="utf-8")
+            (run_dir(root) / "review.json").write_text('{"schema_version": 1, "status": "approved"}', encoding="utf-8")
             without = log_stage(root, "Planner", "completed", "plan ready")
             with_tokens = log_stage(root, "Reviewer", "completed", "approved", tokens=1200)
 

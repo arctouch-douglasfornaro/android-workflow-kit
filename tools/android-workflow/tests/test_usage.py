@@ -138,6 +138,7 @@ class ClaudeCodeTests(HostTests):
 
     def test_a_round_adds_to_the_rounds_already_logged_and_ignores_older_requests(self) -> None:
         log(self.root, "--stage", "Reviewer", "--status", "started")
+        (self.run / "review.json").write_text('{"schema_version": 1, "status": "approved"}', encoding="utf-8")
         log(self.root, "--stage", "Reviewer", "--status", "completed", "--tokens", "60000")
         time.sleep(0.01)
         log(self.root, "--stage", "Reviewer", "--status", "started", "--note", "delta review")
@@ -183,6 +184,7 @@ class ClaudeCodeTests(HostTests):
     def test_without_a_transcript_nothing_is_invented(self) -> None:
         log(self.root, "--stage", "Planner", "--status", "started")
         planner = self.desk("Planner")
+        (self.run / "plan.md").write_text("# Objective\n\nThe plan.\n", encoding="utf-8")
         result = log(self.root, "--stage", "Planner", "--status", "completed")
         self.assertIsNone(planner["tokens"])
         self.assertIsNone(office.collect(self.root)["totals"]["tokens"])

@@ -817,6 +817,7 @@ class VerificationTests(unittest.TestCase):
             domain = root / "core/domain/src/main/java/Rule.kt"
             domain.parent.mkdir(parents=True)
             domain.write_text("class Rule\n", encoding="utf-8")
+            (run_dir(root) / "implementation-notes.md").write_text("# Decisions\n\nRule.\n", encoding="utf-8")
             main(["log", "--target", str(root), "--stage", "T4", "--status", "completed",
                   "--file", "core/domain/src/main/java/Rule.kt"])
             change_set = read_json(run_dir(root) / "change-set-map.json")
@@ -1370,6 +1371,7 @@ class RunStateTests(unittest.TestCase):
             self.assertEqual(read_json(run_dir(root) / "run-state.json")["status"], "escalated")
             main(["log", "--target", str(root), "--stage", "Quality gate", "--status", "completed", "--note", "waived"])
             after_gate = read_json(run_dir(root) / "run-state.json")
+            (run_dir(root) / "pr-description.md").write_text("### What changed\n\nThe empty state.\n", encoding="utf-8")
             main(["log", "--target", str(root), "--stage", "Delivery", "--status", "completed", "--note", "PR"])
             after_delivery = read_json(run_dir(root) / "run-state.json")
         self.assertEqual(after_gate["status"], "running")
@@ -1380,6 +1382,7 @@ class RunStateTests(unittest.TestCase):
     def test_wait_seconds_are_kept_apart_from_work_time(self) -> None:
         with AndroidProject() as root:
             run(root, {"id": "S-2", "title": "Change ProfileScreen", "type": "chore"})
+            (run_dir(root) / "review.json").write_text('{"schema_version": 1, "status": "approved"}', encoding="utf-8")
             main(["log", "--target", str(root), "--stage", "Reviewer", "--status", "completed",
                   "--seconds", "100", "--wait-seconds", "70"])
             entry = read_json(run_dir(root) / "stage-metrics.json")["stages"]["T6"]

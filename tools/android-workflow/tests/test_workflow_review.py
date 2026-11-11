@@ -175,6 +175,7 @@ class LogTests(unittest.TestCase):
     def test_the_same_round_logged_twice_counts_once(self) -> None:
         with GitProject() as root:
             run(root, {"id": "L-9", "title": "Change ProfileScreen", "type": "chore"})
+            (run_dir(root) / "review.json").write_text(json.dumps({"schema_version": 1, "status": "approved"}), encoding="utf-8")
             for args in (["--status", "started"], ["--status", "completed", "--note", "approved"],
                          ["--status", "completed", "--note", "approved, 0 blocking", "--tokens", "500"]):
                 main(["log", "--target", str(root), "--stage", "Reviewer", *args])
@@ -191,6 +192,7 @@ class LogTests(unittest.TestCase):
     def test_a_second_round_after_other_work_is_not_merged(self) -> None:
         with GitProject() as root:
             run(root, {"id": "L-8", "title": "Change ProfileScreen", "type": "chore"})
+            (run_dir(root) / "implementation-notes.md").write_text("# Decisions\n\nDone.\n", encoding="utf-8")
             main(["log", "--target", str(root), "--stage", "Implementer", "--status", "completed", "--tokens", "10"])
             main(["log", "--target", str(root), "--stage", "Quality gate", "--status", "completed", "--note", "failed"])
             main(["log", "--target", str(root), "--stage", "Implementer", "--status", "completed", "--tokens", "7"])
@@ -213,6 +215,7 @@ class LogTests(unittest.TestCase):
             main(["update-spec", "--target", str(root), "--surfaces", "ui,navigation", "--acceptance", "shows a|hides b",
                   "--complexity", "medium"])
             planned = read_json(run_dir(root) / "ticket-spec.json")
+            (run_dir(root) / "implementation-notes.md").write_text("# Decisions\n\nDone.\n", encoding="utf-8")
             main(["log", "--target", str(root), "--stage", "Implementer", "--status", "completed", "--tokens", "42"])
             run(root, {"id": "R-1", "title": "Change ProfileScreen", "type": "feature"})
             again = read_json(run_dir(root) / "ticket-spec.json")

@@ -191,7 +191,10 @@ CLI status|list --target T                          CLI clean --target T [--tick
    - `wait`, `wait_prebuild`, `wait_device`: an agent, a build or a device is still busy; run
      `command` if given (long timeout or in the background), else wait for the agent's return, then
      `next`. A `wait` with `if_returned`: when that agent already returned, run it (its `completed`
-     was never logged, so `next` would wait forever). `wait_device` starting with `booting`: an
+     was never logged, so `next` would wait forever). `log … --status completed` refuses a stage whose
+     file (plan.md, implementation-notes.md, review.json, device-report.md, pr-description.md) is
+     missing, empty, the stub or older than the round's `started`; `next` then answers `spawn` with
+     `resume` for that agent: resume it to write the file, never write it yourself. `wait_device` starting with `booting`: an
      emulator is starting for this run (`CLI emulator --wait`); otherwise it names the run holding each
      device and `CLI emulator --wait-free` returns once this run has one. Past `device.wait_max_seconds`
      (900) of waiting it answers `ask_user` instead (keep waiting / JVM renders / skip the device).

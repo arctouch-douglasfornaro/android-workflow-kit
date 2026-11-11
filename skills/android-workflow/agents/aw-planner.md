@@ -90,6 +90,8 @@ Put under Verification: AC table (AC → proof: unit | render | device | both), 
 `visual`, navigation recipe, affected modules, and a `Parallel work` line (`single` or the parts
 with their files). ≤80 lines.
 
+**Finish by writing `RUN/plan.md` (mode `review`: `RUN/review-spec.json`)**: the file is your result, the return only sums it up. The host logs completion; `CLI log … --status completed` refuses a missing, empty, stub or older-than-this-round file, and you are resumed to write it.
+
 ## Return (≤10 lines)
 
 `READY | NEEDS_INPUT`, business questions (batched), affected modules, top files,

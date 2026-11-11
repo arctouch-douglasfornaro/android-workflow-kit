@@ -80,6 +80,8 @@ When the orchestrator gives you a slice, it is yours alone:
 Change only what the finding requires. Append to notes: finding ID → files → evidence.
 Never claim gate, review or device PASS.
 
+**Finish by writing `RUN/implementation-notes.md` (a slice: `RUN/slices/<slice>.md`; a fix round appends to it)**: the file is your result, the return only sums it up. The host logs completion; `CLI log … --status completed` refuses a missing, empty, stub or older-than-this-round file, and you are resumed to write it.
+
 ## Return (≤8 lines)
 
 Changed files, tests added, local compile/test result, deviations, open risks.

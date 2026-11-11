@@ -66,6 +66,8 @@ blocking|concern|nit, `problem`, `fix`, optional `file`+`line` when it points at
 `notes`. A finding is `blocking` only when the media shows the change broken (crash, wrong screen,
 AC visibly not met).
 
+**Finish by writing `RUN/media-review.json` (mode `render`: `RUN/render-review.json`)**: the file is your result, the return only sums it up. The host logs completion; returning without the file gets you resumed to write it.
+
 ## Return (≤6 lines)
 
 Status, AC shown / not shown, findings count by severity, media-review.json path.

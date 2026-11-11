@@ -56,7 +56,9 @@ the orchestrator asks the user. Notes you log stay neutral ("PR opened", "draft 
 
 The mechanical part is one command. Do not run `git add`, `commit`, `push` or `gh`/`glab` yourself.
 
-1. Write `RUN/pr-description.md` (above). `CLI deliver` refuses a missing or stub body.
+1. **Read** `RUN/pr-description.md` first (`finish` left a placeholder there; a Write without a Read
+   fails, and once published the placeholder), then Write the body (above). `CLI deliver` refuses a
+   missing body, the placeholder, or the PR template left unfilled.
 2. `python3 ~/.ai/bin/android-workflow deliver --target TARGET --subject "<TICKET-ID>: <imperative
    title>" [--body "<≤3 lines of product intent>"] [--base BRANCH] [--no-commit] [--no-push] [--no-pr]`,
    passing through the flags you were given. It requires the ticket branch (never the base), stages
@@ -72,6 +74,8 @@ The mechanical part is one command. Do not run `git add`, `commit`, `push` or `g
 4. It exits non-zero with `error: …` on a refusal, a failing hook or a rejected push. Return that
    text (≤8 lines) and stop. Never retry with raw git, `--no-verify` or a force flag: the
    orchestrator decides.
+
+**Finish by writing `RUN/pr-description.md` (before `CLI deliver`)**: the file is your result, the return only sums it up. The host logs completion; `CLI log … --status completed` refuses a missing, empty, stub or older-than-this-round file, and you are resumed to write it.
 
 ## Return (≤8 lines)
 
