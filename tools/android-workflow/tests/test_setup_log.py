@@ -11,10 +11,14 @@ os.environ["ANDROID_WORKFLOW_NO_DEVICE_CHECK"] = "1"
 os.environ.setdefault("ANDROID_WORKFLOW_STATE_HOME", __import__("tempfile").mkdtemp(prefix="aw-state-"))
 os.environ["ANDROID_WORKFLOW_NO_USAGE"] = "1"
 
+import json
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
 from android_workflow.cli import log_stage, open_pending_setup, pending_setup_path, read_json, run_dir
-from test_live_team_emulator import GitProject, start
+from test_live_team_emulator import GitProject, git, start
 
 
 class SetupLogTests(unittest.TestCase):
@@ -56,6 +60,82 @@ class SetupLogTests(unittest.TestCase):
             start(root, "CUR-1")
             result = log_stage(root, "Setup", "started", "again")
         self.assertNotIn("recorded", result)
+
+
+PROFILE = """# Project profile
+
+## Build commands
+| Module | Plugin / variant | Compile | Unit tests | Lint | Evidence |
+|---|---|---|---|---|---|
+| :app | android app | ./gradlew :app:compileDebugKotlin | ./gradlew :app:testDebugUnitTest | ./gradlew :app:lintDebug | app/build.gradle.kts |
+
+## Lint engine
+| What | Value |
+|---|---|
+| Engine | none, checked |
+
+## Tests
+| What | Value |
+|---|---|
+| Libraries | junit4 |
+
+## Code patterns
+| Area | Pattern used here | Exemplar (path:line) |
+|---|---|---|
+| Screens | plain classes | app/src/main/java/com/example/ProfileScreen.kt |
+"""
+
+
+class SetupAdoptionTests(unittest.TestCase):
+    """A worktree of a checkout already set up adopts that setup by itself: no Setup agent per worktree."""
+
+    def setUp(self) -> None:
+        from android_workflow import cli
+
+        helper = Path(__file__).resolve().parents[3] / "bin" / "feature_setup.py"
+        patcher = mock.patch.object(cli, "SETUP_HELPER", helper)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def set_up_main(self, root: Path) -> None:
+        from android_workflow.cli import run_setup
+
+        run_setup(root)
+        (root / ".ai/project-profile.md").write_text(PROFILE, encoding="utf-8")
+        (root / ".ai/android-workflow.json").write_text(json.dumps({
+            "device": {"application_id": "com.example"}, "commands": {"format_check": "none"}}), encoding="utf-8")
+        self.assertEqual(run_setup(root, accept=True)["status"], "ready")
+
+    def test_a_worktree_with_the_same_build_files_adopts_the_main_checkouts_setup(self) -> None:
+        from android_workflow.cli import run_setup
+
+        with GitProject() as root, tempfile.TemporaryDirectory() as other:
+            self.set_up_main(root)
+            worktree = Path(other).resolve() / "wt"
+            git(root, "worktree", "add", "-q", str(worktree), "-b", "wt")
+            result = run_setup(worktree)  # no --source-repo: the main worktree is found
+            copied = (worktree / ".ai/project-profile.md").read_text(encoding="utf-8")
+            overrides = json.loads((worktree / ".ai/android-workflow.json").read_text(encoding="utf-8"))
+            again = run_setup(worktree)
+        self.assertEqual(result["status"], "ready", result["reasons"])
+        self.assertEqual(result["adopted_setup"], {"adopted": True, "from": str(root.resolve())})
+        self.assertEqual(copied, PROFILE)
+        self.assertEqual(overrides["device"]["application_id"], "com.example")
+        self.assertEqual(again["status"], "ready")
+        self.assertNotIn("adopted_setup", again)  # set up now: nothing to adopt
+
+    def test_a_worktree_whose_build_files_differ_still_needs_the_setup_agent(self) -> None:
+        from android_workflow.cli import run_setup
+
+        with GitProject() as root, tempfile.TemporaryDirectory() as other:
+            self.set_up_main(root)
+            worktree = Path(other).resolve() / "wt"
+            git(root, "worktree", "add", "-q", str(worktree), "-b", "wt")
+            (worktree / "app/build.gradle.kts").write_text('plugins { id("com.android.library") }\n', encoding="utf-8")
+            result = run_setup(worktree, source_repo=root)
+        self.assertEqual(result["status"], "needs_setup_agent")
+        self.assertFalse(result["adopted_setup"]["adopted"])
+        self.assertIn("app/build.gradle.kts", result["adopted_setup"]["reason"])
 
 
 if __name__ == "__main__":

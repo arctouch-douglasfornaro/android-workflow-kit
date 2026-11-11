@@ -625,6 +625,82 @@ def profile_gaps(target: Path) -> list[str]:
     return gaps
 
 
+SETUP_STATE_FILE = Path(".ai") / "workflow" / "_setup" / "profile-state.json"
+BUILD_ROOT_FILES = ("gradle/libs.versions.toml", "gradle.properties")
+BUILD_ROOT_DIRS = ("buildSrc", "build-logic")
+
+
+def main_worktree(target: Path) -> Path | None:
+    """The repository's main checkout when TARGET is another worktree of it (`git worktree list`); never
+    for a folder nested in some other repository."""
+    top = subprocess.run(["git", "-C", str(target), "rev-parse", "--show-toplevel"],
+                         text=True, capture_output=True, check=False)
+    if top.returncode != 0 or Path(top.stdout.strip()).resolve() != target.resolve():
+        return None
+    result = subprocess.run(["git", "-C", str(target), "worktree", "list", "--porcelain"],
+                            text=True, capture_output=True, check=False)
+    first = next((line[len("worktree "):] for line in result.stdout.splitlines() if line.startswith("worktree ")), None)
+    if result.returncode != 0 or not first:
+        return None
+    main = Path(first).resolve()
+    return None if main == target.resolve() else main
+
+
+def build_files(root: Path) -> dict[str, str]:
+    """sha256 of every file that decides the build: settings.gradle*, build.gradle* (any module),
+    gradle/libs.versions.toml, gradle.properties, buildSrc/ and build-logic/."""
+    found: dict[str, str] = {}
+    for current, dirs, files in os.walk(root):
+        dirs[:] = [name for name in dirs if name not in PRUNE_DIRS]
+        relative = Path(current).relative_to(root).as_posix()
+        in_logic = any(relative == name or relative.startswith(name + "/") for name in BUILD_ROOT_DIRS)
+        for name in files:
+            path = (Path(relative) / name).as_posix() if relative != "." else name
+            if in_logic or name.startswith(("settings.gradle", "build.gradle")) or path in BUILD_ROOT_FILES:
+                try:
+                    found[path] = hashlib.sha256((Path(current) / name).read_bytes()).hexdigest()
+                except OSError:
+                    continue
+    return found
+
+
+def _accepted_setup(root: Path) -> bool:
+    """Setup there was accepted and its profile not edited since."""
+    state = read_json(root / SETUP_STATE_FILE) if (root / SETUP_STATE_FILE).is_file() else {}
+    profile = root / PROFILE_FILE
+    return bool(state.get("complete") and profile.is_file()
+                and hashlib.sha256(profile.read_bytes()).hexdigest() == state.get("profile_digest"))
+
+
+def adopt_setup(target: Path, source: Path) -> dict[str, Any] | None:
+    """A worktree of a checkout already set up: copy and accept its profile and `.ai/android-workflow.json`
+    when that setup was accepted and no build file differs between the two trees. None when TARGET is set
+    up already; else `{adopted, from, reason}`."""
+    if _accepted_setup(target) or not SETUP_HELPER.is_file():
+        return None
+    if (target / PROFILE_FILE).is_file() and not profile_gaps(target):
+        return None  # a filled profile of its own (a Setup agent's work): never overwritten
+    if not _accepted_setup(source):
+        return {"adopted": False, "from": str(source), "reason": "the source checkout's setup is not accepted"}
+    mine, theirs = build_files(target), build_files(source)
+    differ = sorted(path for path in set(mine) | set(theirs) if mine.get(path) != theirs.get(path))
+    if differ:
+        return {"adopted": False, "from": str(source),
+                "reason": "build files differ from the source checkout: " + ", ".join(differ[:5])
+                + (f" (+{len(differ) - 5})" if len(differ) > 5 else "")}
+    (target / PROFILE_FILE).parent.mkdir(parents=True, exist_ok=True)
+    (target / PROFILE_FILE).write_bytes((source / PROFILE_FILE).read_bytes())
+    if not (target / OVERRIDES_FILE).is_file() and (source / OVERRIDES_FILE).is_file():
+        (target / OVERRIDES_FILE).write_bytes((source / OVERRIDES_FILE).read_bytes())
+    for flags in (["--ensure", "--no-probe"], ["--accept"]):
+        done = subprocess.run([sys.executable, str(SETUP_HELPER), "--repo-root", str(target), *flags],
+                              text=True, capture_output=True, check=False)
+        if done.returncode != 0:
+            return {"adopted": False, "from": str(source), "reason": "could not accept the copied profile: "
+                    + (done.stdout or done.stderr).strip()[-300:]}
+    return {"adopted": True, "from": str(source)}
+
+
 def run_setup(
     target: Path,
     force: bool = False,
@@ -633,10 +709,14 @@ def run_setup(
 ) -> dict[str, Any]:
     """Project setup, once per configuration: shared profile + fingerprint, quality tools, overrides.
 
-    Cheap when nothing changed (no probe, no agent). Returns what the Setup agent must resolve.
+    Cheap when nothing changed (no probe, no agent). A worktree of a checkout already set up (`--source-repo`,
+    else the main worktree) adopts that setup by itself when no build file differs. Returns what the Setup
+    agent must resolve.
     """
     if not any((target / name).is_file() for name in ("settings.gradle", "settings.gradle.kts")):
         raise ValueError(f"{target} has no Gradle settings file")
+    source = source_repo or main_worktree(target)
+    adopted = adopt_setup(target, source) if source and not accept and not force else None
     if source_repo and not (target / OVERRIDES_FILE).is_file() and (source_repo / OVERRIDES_FILE).is_file():
         (target / OVERRIDES_FILE).parent.mkdir(parents=True, exist_ok=True)
         (target / OVERRIDES_FILE).write_text((source_repo / OVERRIDES_FILE).read_text(encoding="utf-8"),
@@ -680,6 +760,7 @@ def run_setup(
     return {
         "status": "ready" if not reasons else "needs_setup_agent",
         "reasons": reasons,
+        **({"adopted_setup": adopted} if adopted else {}),
         "profile": str(target / PROFILE_FILE),
         "probe": helper.get("probe"),
         "overrides_file": str(target / OVERRIDES_FILE),

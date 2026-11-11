@@ -152,7 +152,9 @@ CLI status|list --target T                          CLI clean --target T [--tick
    An `other_ticket_branches:` line means this ticket already ran: name those branches and ask
    whether to continue before `start`, so a repeat run is a choice, not an accident.
 2. **Setup, once, on the final `TARGET`:** `CLI setup --target TARGET [--source-repo <main checkout>]`.
-   `ready` → reuse (the profile is inherited or refreshed when only dependency versions moved).
+   `ready` → reuse (the profile is inherited or refreshed when only dependency versions moved). A
+   worktree adopts the main checkout's accepted setup by itself (`adopted_setup`) when no build file
+   differs; never copy the profile or run `setup --accept` by hand.
    `needs_setup_agent` → spawn `aw-setup` with the JSON; its questions are batched to the user
    once; a missing formatter or app id never blocks a domain-only ticket.
 3. **Ticket:** `CLI start` (add `--type bug --reproduction "..."`, `--acceptance "a|b"`,
