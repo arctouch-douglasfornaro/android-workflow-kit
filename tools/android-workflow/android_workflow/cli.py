@@ -2124,6 +2124,42 @@ def planner_ran(target: Path) -> bool:
     return bool(((metrics.get("stages") or {}).get("T3") or {}).get("tokens"))
 
 
+# Gradle itself failing, not the change: a lock another build held too long, a daemon that died, a
+# service it could not start, a daemon out of memory. Retried once; never a fix round for the Implementer.
+GRADLE_INFRA_PATTERNS = (
+    re.compile(r"Timeout waiting to lock", re.I),
+    re.compile(r"Gradle build daemon disappeared unexpectedly", re.I),
+    re.compile(r"Could not receive a message from the daemon", re.I),
+    re.compile(r"Could not connect to the Gradle daemon", re.I),
+    re.compile(r"Could not create service of type", re.I),
+    re.compile(r"Daemon will be stopped at the end of the build after running out of JVM memory", re.I),
+    re.compile(r"Expiring Daemon because JVM heap space is exhausted", re.I),
+    re.compile(r"OutOfMemoryError: (?:GC overhead limit exceeded|Metaspace)", re.I),
+)
+
+
+def gradle_infra_failure(steps: list[dict[str, Any]]) -> str | None:
+    """The line of a failed step's log that shows Gradle's own failure, or None (a real failure)."""
+    failed = [step for step in steps if not step_passes(step)]
+    if not failed:
+        return None
+    for step in failed:
+        log = step.get("log")
+        text = text_if_exists(Path(log)) if log else ""
+        for line in text.splitlines():
+            if any(pattern.search(line) for pattern in GRADLE_INFRA_PATTERNS):
+                return line.strip()[:300]
+    return None
+
+
+def worktree_build_lock(target: Path):
+    """One Gradle build at a time in this checkout: the gate and the background device build share the
+    project's caches, and two builds at once ended in "Timeout waiting to lock file hash cache"."""
+    from android_workflow.locks import exclusive
+
+    return exclusive(cache_dir(target) / "worktree-build.lock")
+
+
 def run_gate_rounds(
     target: Path,
     config: dict[str, Any],
@@ -2132,9 +2168,20 @@ def run_gate_rounds(
     run_number: int = 1,
     extras: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str], float]:
-    """One gate attempt; a red gate goes back to the Implementer, not to a retry loop here."""
+    """One gate attempt; a red gate goes back to the Implementer, not to a retry loop here. Only a Gradle
+    infrastructure failure (`GRADLE_INFRA_PATTERNS`) is retried, once, and recorded in `extras["infra"]`."""
     started = time.monotonic()
-    steps, warnings = gate_attempt(target, config, change_set, needs_device, 1, run_number, extras)
+    with worktree_build_lock(target):
+        steps, warnings = gate_attempt(target, config, change_set, needs_device, 1, run_number, extras)
+        infra = gradle_infra_failure(steps)
+        if infra:
+            append_stage_log(run_dir(target), "T5", "retry", "cli", f"Gradle infrastructure failure, retried once: {infra}")
+            steps, warnings = gate_attempt(target, config, change_set, needs_device, 2, run_number, extras)
+            infra = gradle_infra_failure(steps)
+            if extras is not None:
+                extras["infra_retried"] = True
+                if infra:
+                    extras["infra"] = infra
     return steps, warnings, round(time.monotonic() - started, 3)
 
 
@@ -2602,7 +2649,9 @@ def run_quality_gate(target: Path) -> dict[str, Any]:
         "duration_seconds": duration,
         "secret_scan": scan,
         "prior_runs": prior_runs[-3:],
-        "red_streak": (int(previous.get("red_streak") or (1 if previous.get("status") == "failed" else 0)) + 1)
+        # Gradle failing by itself is not a red gate of the change: the streak stays where it was.
+        "red_streak": int(previous.get("red_streak") or 0) if gate_status == "failed" and extras.get("infra")
+        else (int(previous.get("red_streak") or (1 if previous.get("status") == "failed" else 0)) + 1)
         if gate_status == "failed" else 0,
         "prohibitions_respected": True,
         **extras,

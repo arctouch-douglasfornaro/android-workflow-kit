@@ -248,7 +248,10 @@ CLI status|list --target T                          CLI clean --target T [--tick
    for the touched modules in one build, plus compile and unit tests for modules that use a changed
    declaration, and a secret scan. Lint or format findings only in files the change does not touch,
    and Android lint findings on lines of a touched file that the change did not write, are
-   **waived** and disclosed in the PR; never "fix" a waived finding: it widens the diff.
+   **waived** and disclosed in the PR; never "fix" a waived finding: it widens the diff. Gradle failing
+   by itself (a lock timeout, a daemon that died or ran out of memory, "Could not create service") is
+   retried once and never a fix round; still failing, `next` asks the developer. The gate and the
+   device APK build never build in the same checkout at once.
 
 5. **Watch the PR** (unless `--no-watch` or a `--no-*` flag stopped before the PR; `--watch` starts
     here for a ticket whose run exists, and with no run: `CLI start` with the PR's title, then this).

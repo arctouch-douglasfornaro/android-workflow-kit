@@ -413,6 +413,14 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
     findings: list[str] = []
     gate_failed = gate.get("status") == "failed"
     review_failed = review_verdict == "changes_requested"
+    if gate_failed and gate.get("infra"):
+        # Gradle failed by itself, twice (the gate already retried): the code is not at fault, no fix round.
+        return _answer("ask_user", "the gate failed twice for a Gradle infrastructure reason: " + str(gate["infra"]),
+                       question="Gradle itself failed (not the change). Run the gate again, stop the Gradle daemons "
+                                "first, or open a draft PR?",
+                       options={"again": "CLI gate --target TARGET, then CLI next --target TARGET",
+                                "stop_daemons": "./gradlew --stop in TARGET, then CLI gate --target TARGET",
+                                "draft": 'CLI finish --target TARGET --draft "the gate could not run: Gradle failed"'})
     if gate_failed and gate_reds(gate) > GATE_MAX_FIXES:
         return _draft(f"the quality gate is still red after {GATE_MAX_FIXES} fix rounds", state)
     review_rounds = failed_rounds(review_state, {"changes_requested"}, review_verdict, review_state.get("fingerprint"))

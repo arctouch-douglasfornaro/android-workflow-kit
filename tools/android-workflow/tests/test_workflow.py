@@ -331,6 +331,8 @@ class RunLayoutTests(unittest.TestCase):
             path.write_text(json.dumps({**read_json(path), "status": "failed"}), encoding="utf-8")
             approve_review(root)
             implement(root)  # an approved review of the same source is kept; see test_run_speedups
+            state = run_dir(root) / "run-state.json"  # finished: starting it again is a new run
+            state.write_text(json.dumps({**read_json(state), "status": "completed"}), encoding="utf-8")
             run(root, {"id": "R-1", "title": "Change ProfileScreen", "type": "chore"})
             gate = read_json(run_dir(root) / "gate-report.json")
             review = read_json(run_dir(root) / "review.json")
@@ -1012,6 +1014,15 @@ for task in tasks:
             "  The full lint text report is located at:",
             f"    {report}",
         ]))
+    elif kind in ("infra", "infra_once"):
+        marker = cwd / "build" / "infra-failed-once"
+        if kind == "infra_once" and marker.exists():
+            print(f"> Task {task}")
+            continue
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("1")
+        blocks.append((task, ["> Timeout waiting to lock file hash cache (/x/.gradle/8.9/fileHashes). It is "
+                              "currently in use by another Gradle instance."]))
     else:
         blocks.append((task, ["> There were failing tests."]))
 if not blocks:
@@ -1077,6 +1088,32 @@ class BatchedGateTests(unittest.TestCase):
         self.assertEqual(report["status"], "failed")
         self.assertEqual(outcomes["feature docs (*/README.md)"], "failed")
         self.assertTrue(calls, "compile/test/lint must still run when only the doc is stale")
+
+    def test_a_gradle_lock_timeout_is_retried_once_and_passes(self) -> None:
+        with AndroidProject() as root:
+            report = self.gate(root, {"tasks": {":app:testDebugUnitTest": "infra_once"}})
+            calls = gradle_calls(root)
+            log = (run_dir(root) / "stage-log.md").read_text(encoding="utf-8")
+        self.assertEqual((self.code, report["status"]), (0, "passed"))
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(report["infra_retried"])
+        self.assertIn("Gradle infrastructure failure, retried once", log)
+
+    def test_a_gradle_failure_that_stays_is_never_a_fix_round(self) -> None:
+        from android_workflow.decide import next_action
+
+        with AndroidProject() as root:
+            report = self.gate(root, {"tasks": {":app:testDebugUnitTest": "infra"}})
+            approve_review(root)
+            spec_path = run_dir(root) / "ticket-spec.json"
+            spec_path.write_text(json.dumps({**read_json(spec_path), "level": "express", "level_source": "flag",
+                                             "acceptance_criteria": ["a"]}), encoding="utf-8")
+            answer = next_action(root, record=False)
+        self.assertEqual(report["status"], "failed")
+        self.assertIn("Timeout waiting to lock", report["infra"])
+        self.assertEqual(report["red_streak"], 0)
+        self.assertEqual(answer["next"], "ask_user")
+        self.assertIn("again", answer["options"])
 
     def test_gradle_tasks_share_one_continue_invocation(self) -> None:
         with AndroidProject() as root:
