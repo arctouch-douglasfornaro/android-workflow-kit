@@ -114,8 +114,10 @@ class LiveClockTests(unittest.TestCase):
     def test_a_second_round_adds_to_the_first(self) -> None:
         with GitProject() as root:
             start(root)
+            (run_dir(root) / "implementation-notes.md").write_text("# Decisions\n\nDone.\n", encoding="utf-8")
             log(root, "--stage", "Implementer", "--status", "completed", "--seconds", "30")
             log(root, "--stage", "Implementer", "--status", "started")
+            (run_dir(root) / "implementation-notes.md").write_text("# Decisions\n\nDone, round 2.\n", encoding="utf-8")
             log(root, "--stage", "Implementer", "--status", "completed", "--tokens", "5")
             entry = metrics(root)["stages"]["T4"]
         self.assertGreaterEqual(entry["wall_time_seconds"], 30)
@@ -340,6 +342,7 @@ class LiveChangesTests(unittest.TestCase):
             done = office.run_is_live(run_dir(root))
             log(root, "--stage", "Delivery", "--status", "started", "--note", "opening the PR")
             delivering = office.run_is_live(run_dir(root))
+            (run_dir(root) / "pr-description.md").write_text("### What changed\n\nThe title.\n", encoding="utf-8")
             log(root, "--stage", "Delivery", "--status", "completed", "--tokens", "3")
             delivered = office.run_is_live(run_dir(root))
         self.assertFalse(done)

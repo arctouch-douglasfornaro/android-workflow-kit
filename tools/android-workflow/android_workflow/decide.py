@@ -38,6 +38,7 @@ DEVICE_BUDGET_MINUTES = 20   # device time per run (a review: per round); past i
 REVIEW_DEVICE_MAX_ROUNDS = 2  # a review: the device round and one more, never a third
 DECISIONS_FILE = "decisions.jsonl"
 BOOTING = "booting"  # how a `wait_device` for a device starting for this run begins its `why`
+DEVICE_WAIT_MAX_SECONDS = 900  # `device.wait_max_seconds`: past this, `wait_device` becomes `ask_user`
 
 
 # --- level -------------------------------------------------------------------------------------
@@ -258,6 +259,7 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
     state = load_state(target)
     spec = _read(agent_dir / "ticket-spec.json")
     stages = state.get("stages") or {}
+    no_device = no_device or bool(state.get("no_device"))  # `start --no-device`: the developer's flag, recorded
     if state.get("status") == "paused" and state.get("pending_question"):
         question = state["pending_question"]
         return _answer("ask_user", "a business question is open", question=question,
@@ -265,6 +267,15 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
     if state.get("status") == "escalated" and state.get("current_stage") == "T3":
         return _answer("ask_user", "a bug needs a reproduction before planning",
                        then='CLI update-spec --target TARGET --reproduction "…", then next')
+    from android_workflow.cli import STAGE_ARTIFACTS, STAGE_ROLES
+
+    for stage_id, (agent, names) in STAGE_ARTIFACTS.items():
+        entry = stages.get(stage_id) or {}
+        if entry.get("status") == "started" and entry.get("missing_artifact"):
+            # The agent returned without writing its file and `log … completed` refused: resume it, never wait.
+            return _spawn(agent, entry["missing_artifact"], stage=STAGE_ROLES[stage_id], resume=True,
+                          writes=[f"RUN/{names[0]}"], then=f'CLI log --target TARGET --stage "{STAGE_ROLES[stage_id]}" '
+                                                           '--status completed --note "<summary>"')
     if state.get("status") == "completed":
         delivery = _read(agent_dir / "delivery.json")
         if not delivery and (stages.get("T8") or {}).get("status") == "started":
@@ -378,6 +389,14 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
         if not todo:
             return _answer("wait", "the gate and the Reviewer are running")
         delta = bool(review_state.get("reviewed_tree")) and review_verdict in {"approved", "changes_requested"}
+        tree = None
+        if "reviewer" in todo:
+            from android_workflow.cli import snapshot_tree
+
+            try:
+                tree = snapshot_tree(target)  # the Reviewer writes it into review.json as `reviewed_tree`
+            except Exception:  # noqa: BLE001 - no git: the round's `started` tree is checked instead
+                tree = None
         return _answer(
             "checks", "the change has no gate and review for its current source yet", run=todo,
             command="CLI gate --target TARGET" if "gate" in todo else None,
@@ -386,6 +405,7 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
             tier="standard" if delta and "reviewer" in todo else None,
             fixed=[item.get("id") for item in review_blocking(review)] if delta and "reviewer" in todo else None,
             stage="Reviewer" if "reviewer" in todo else None,
+            tree=tree,
             note=("delta review of the fix" if delta else "independent review of the diff") if "reviewer" in todo else None,
             also=["CLI device build --target TARGET (background: the APK the Device installs, built before it "
                   "takes a device)"] if "gate" in todo and "T7" in (spec.get("route") or []) and not no_device
@@ -395,6 +415,14 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
     findings: list[str] = []
     gate_failed = gate.get("status") == "failed"
     review_failed = review_verdict == "changes_requested"
+    if gate_failed and gate.get("infra"):
+        # Gradle failed by itself, twice (the gate already retried): the code is not at fault, no fix round.
+        return _answer("ask_user", "the gate failed twice for a Gradle infrastructure reason: " + str(gate["infra"]),
+                       question="Gradle itself failed (not the change). Run the gate again, stop the Gradle daemons "
+                                "first, or open a draft PR?",
+                       options={"again": "CLI gate --target TARGET, then CLI next --target TARGET",
+                                "stop_daemons": "./gradlew --stop in TARGET, then CLI gate --target TARGET",
+                                "draft": 'CLI finish --target TARGET --draft "the gate could not run: Gradle failed"'})
     if gate_failed and gate_reds(gate) > GATE_MAX_FIXES:
         return _draft(f"the quality gate is still red after {GATE_MAX_FIXES} fix rounds", state)
     review_rounds = failed_rounds(review_state, {"changes_requested"}, review_verdict, review_state.get("fingerprint"))
@@ -461,7 +489,8 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
                 waiting_render = _render_for_both(target, agent_dir, spec, proof, team, review, fingerprint, state, record)
                 if waiting_render:
                     return waiting_render
-            return _finish(spec, skip="the developer asked for --no-device", no_device=True)
+            return _finish(spec, skip="the developer asked for --no-device", no_device=True,
+                           recorded=bool(state.get("no_device")))
         if stop:
             if not record:
                 return _draft(f"no more device rounds: {stop}", state)
@@ -471,7 +500,8 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
             return _draft(f"the device check is blocked: {stop}; see device-report.md", state)
         serial, waiting, reason = _device_for(target, agent_dir, record)
         if waiting is not None:
-            return waiting
+            renders = render.route(target, spec, {**state, "render": {**(state.get("render") or {}), "prefer": "render"}})
+            return _bounded_wait(target, agent_dir, waiting, renders["mode"] == "render")
         if serial:
             spawn = _spawn("aw-device", "the change passed the gate and the review: verify it on the device",
                            stage="Device", mode="after", serial=serial,
@@ -521,9 +551,11 @@ def _want_device(agent_dir: Path) -> None:
         pass
 
 
-def _finish(spec: dict[str, Any], skip: str | None = None, no_device: bool = False) -> dict[str, Any]:
+def _finish(spec: dict[str, Any], skip: str | None = None, no_device: bool = False, recorded: bool = True) -> dict[str, Any]:
     if no_device:
-        return _answer("finish", "every check passed", command="CLI finish --target TARGET --no-device")
+        # `finish --no-device` needs the developer's flag on record (`start --no-device`) or their own words.
+        said = "" if recorded else ' --developer-said "<the developer\'s words asking to skip the device, verbatim>"'
+        return _answer("finish", "every check passed", command="CLI finish --target TARGET --no-device" + said)
     if skip:
         return _answer("finish", "every check passed; " + skip, command=f'CLI finish --target TARGET --skip-device "{skip}"')
     return _answer("finish", "every check passed", command="CLI finish --target TARGET")
@@ -623,8 +655,10 @@ def _device_before(target: Path, agent_dir: Path, spec: dict[str, Any], state: d
         return _skip_before(target, f"no base APK (prebuild {build.get('status')})", record)
     serial, waiting, reason = _device_for(target, agent_dir, record)
     if waiting is not None:
-        # Booting for this run: wait for it. Every device busy: the late `before` (after the `after`) covers it.
-        return waiting if waiting["why"].startswith(BOOTING) else None
+        # Booting for this run: wait for it (bounded). Every device busy: the late `before` (after the `after`) covers it.
+        if not waiting["why"].startswith(BOOTING) or _waited_too_long(target, agent_dir):
+            return None
+        return waiting
     if not serial:
         return _skip_before(target, f"no device ({reason})", record)
     if record:
@@ -754,6 +788,59 @@ def _device_for(target: Path, agent_dir: Path, record: bool) -> tuple[str | None
         return None, _answer("ask_user", "a phone waits for its USB-debugging prompt",
                              question="accept USB debugging on the phone", then="CLI next --target TARGET"), ""
     return None, None, str(current.get("reason") or state or "no device")
+
+
+def device_wait_max_seconds(target: Path) -> float:
+    from android_workflow.emulator import _overrides
+
+    try:
+        return float(_overrides(target).get("wait_max_seconds") or DEVICE_WAIT_MAX_SECONDS)
+    except (TypeError, ValueError, OSError):
+        return float(DEVICE_WAIT_MAX_SECONDS)
+
+
+def device_waiting_since(agent_dir: Path) -> float | None:
+    """When the current stretch of `wait_device` answers began: the trailing decisions that are only waits
+    (`wait_device`, `wait`, `wait_prebuild`). Any other answer, an `ask_user` included, ends a stretch."""
+    try:
+        lines = (agent_dir / DECISIONS_FILE).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    since = None
+    for line in reversed(lines):
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue
+        if item.get("next") not in {"wait_device", "wait", "wait_prebuild"}:
+            break
+        if item.get("next") == "wait_device":
+            since = float(item.get("at") or 0) or since
+    return since
+
+
+def _waited_too_long(target: Path, agent_dir: Path) -> bool:
+    since = device_waiting_since(agent_dir)
+    return since is not None and time.time() - since > device_wait_max_seconds(target)
+
+
+def _bounded_wait(target: Path, agent_dir: Path, waiting: dict[str, Any], renders: bool) -> dict[str, Any]:
+    """`wait_device`, until it has lasted `device.wait_max_seconds`: then the developer decides. The
+    orchestrator never skips the device on its own (`finish --no-device` needs their words)."""
+    if not _waited_too_long(target, agent_dir):
+        return waiting
+    minutes = round(device_wait_max_seconds(target) / 60)
+    options = {"wait": "CLI emulator --target TARGET --wait, then CLI next --target TARGET (another "
+                       f"{minutes} min before asking again)"}
+    if renders:
+        options["render"] = "CLI render prefer --target TARGET --mode render, then CLI next --target TARGET " \
+                            "(JVM renders prove the static AC; the rest stays unverified on a device)"
+    options["skip"] = ('CLI finish --target TARGET --no-device --developer-said "<the developer\'s answer, verbatim>" '
+                       "(the PR says the device was not verified)")
+    return _answer("ask_user", f"waited more than {minutes} min for a device: {waiting['why']}",
+                   question="No device became ready for this run. Keep waiting, prove the visible AC with JVM renders"
+                            + ("" if renders else " (not available here: no render probe or AC proved by a render)")
+                            + ", or skip the device check?", options=options)
 
 
 def _late_before(target: Path, agent_dir: Path, spec: dict[str, Any], state: dict[str, Any],

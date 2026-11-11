@@ -153,13 +153,27 @@ def open_pull_request(
             raise ValueError(f"`{cli}` timed out after {timeout}s") from error
 
     if host == "github":
-        existing = run("pr", "view", branch, "--json", "url,state", "-q", '.state + " " + .url')
+        existing = run("pr", "view", branch, "--json", "url,state,isDraft", "-q",
+                       '.state + " " + (.isDraft | tostring) + " " + .url')
         if existing.returncode == 0 and existing.stdout.startswith("OPEN "):
-            url = existing.stdout.split(" ", 1)[1].strip()
+            fields = existing.stdout.split()
+            was_draft, url = (fields[1] == "true", fields[-1]) if len(fields) >= 3 else (False, fields[-1])
+            result: dict[str, Any] = {"status": "updated", "url": url}
             if keep_body:
-                return {"status": "updated", "url": url, "body": "kept"}
-            edited = run("pr", "edit", branch, "--body-file", str(body_file))
-            return {"status": "updated", "url": url, **({} if edited.returncode == 0 else {"warning": tail(edited.stderr, 5)})}
+                result["body"] = "kept"
+            else:
+                edited = run("pr", "edit", branch, "--body-file", str(body_file))
+                if edited.returncode != 0:
+                    result["warning"] = tail(edited.stderr, 5)
+            # A draft opened by an earlier delivery becomes ready once every check passed (never the reverse).
+            if was_draft and not draft:
+                readied = run("pr", "ready", branch)
+                result["ready"] = readied.returncode == 0
+                if readied.returncode != 0:
+                    result["ready_warning"] = tail(readied.stderr or readied.stdout, 5)
+            elif was_draft:
+                result["draft"] = True
+            return result
         created = run(
             "pr", "create", "--base", base, "--head", branch, "--title", subject, "--body-file", str(body_file),
             *(["--draft"] if draft else []),
@@ -266,8 +280,12 @@ def deliver(
         raise ValueError("source changed after `finish`; re-run the gate, review and `finish`")
     body_file = agent_dir / "pr-description.md"
     text = body_file.read_text(encoding="utf-8") if body_file.is_file() else ""
-    if is_stub_pr_body(text):
-        raise ValueError("pr-description.md is missing or still the stub; write the PR body first")
+    template_path = spec.get("pr_template")
+    template_text = (target / template_path).read_text(encoding="utf-8") \
+        if template_path and (target / template_path).is_file() else None
+    if is_stub_pr_body(text, spec, template_text):
+        raise ValueError("pr-description.md is missing, still the stub or the PR template left unfilled; "
+                         "Read it, then Write the PR body")
 
     ticket = spec.get("ticket") or {}
     subject = strip_agent_attribution(subject or f"{ticket.get('id')}: {ticket.get('title')}").strip()
@@ -299,13 +317,12 @@ def deliver(
         if media["unpaired"]:
             warnings.append("captures without a pair (use the same --name in before and after): "
                             + ", ".join(media["unpaired"]))
-    template_path = spec.get("pr_template")
-    if template_path and (target / template_path).is_file():
+    if template_text is not None:
         from android_workflow.cli import source_changes
         from android_workflow.decide import visual
 
         text, checklist = normalize_checklist(
-            text, (target / template_path).read_text(encoding="utf-8"), (spec.get("ticket") or {}).get("id"),
+            text, template_text, (spec.get("ticket") or {}).get("id"),
             visual(spec), source_changes(target))
         if checklist:
             result["checklist"] = checklist

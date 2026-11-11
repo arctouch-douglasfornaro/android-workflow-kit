@@ -415,6 +415,7 @@ class TokenTests(test_decide.RunTests):
     def test_the_transcript_wins_over_a_reported_estimate(self) -> None:
         self.start("--level", "express")
         cli("log", "--target", self.target, "--stage", "Reviewer", "--status", "started")
+        (self.rundir / "review.json").write_text('{"schema_version": 1, "status": "approved"}', encoding="utf-8")
         measured = {"tokens": 41234, "host": "claude", "processed": 900000}
         with mock.patch("android_workflow.cli.measured_round", return_value=measured):
             cli("log", "--target", self.target, "--stage", "Reviewer", "--status", "completed", "--tokens", "60000")
@@ -425,6 +426,7 @@ class TokenTests(test_decide.RunTests):
 
     def test_a_reported_figure_stays_when_no_transcript_names_the_run(self) -> None:
         self.start("--level", "express")
+        (self.rundir / "review.json").write_text('{"schema_version": 1, "status": "approved"}', encoding="utf-8")
         with mock.patch("android_workflow.cli.measured_round", return_value=None):
             cli("log", "--target", self.target, "--stage", "Reviewer", "--status", "completed", "--tokens", "500")
         entry = read_json(self.rundir / "stage-metrics.json")["stages"]["T6"]

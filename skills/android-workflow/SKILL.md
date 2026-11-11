@@ -129,7 +129,7 @@ CLI resume   --target T --question-id Q --answer "…" CLI update-spec --target 
 CLI prebuild --target T [--wait [--timeout S]|--status] [--force]   CLI gate     --target T
 CLI emulator --target T [--wait] [--wait-free] [--stop]            CLI team     --target T [--check]
 CLI skills   --target T [--add NAME] [--drop NAME]    CLI delta    --target T   (since the last review)
-CLI finish   --target T [--skip-device "r"] [--no-device] [--draft "r"] [--accept-partial "what"]
+CLI finish   --target T [--skip-device "r"] [--no-device [--developer-said "quote"]] [--draft "r"] [--accept-partial "what"]
 CLI deliver  --target T [--subject "ID: …"] [--no-push|--no-pr]
 CLI log --target T --stage <Role> --status started --note "<what it is about to do>"
 CLI log --target T --stage <Role> --status completed --note "…" [--file P]… [--tokens N] [--wait-seconds S]
@@ -171,7 +171,7 @@ CLI status|list --target T                          CLI clean --target T [--tick
    `needs_setup_agent` → spawn `aw-setup` with the JSON; its questions are batched to the user
    once; a missing formatter or app id never blocks a domain-only ticket.
 3. **Ticket:** `CLI start` (add `--type bug --reproduction "..."`, `--acceptance "a|b"`,
-   `--surfaces` when known, and the developer's `--level`). It writes `ticket-spec.json` (with the
+   `--surfaces` when known, and the developer's `--level` and `--no-device`). It writes `ticket-spec.json` (with the
    level the rules give) and `change-set-map.json` (the likely files).
 4. **From here on, `CLI next` decides.** Run `CLI next --target TARGET [--no-device] [--no-watch]`
    and do the one thing it returns, then run it again. It reads the run's files (state, verdicts,
@@ -198,7 +198,7 @@ CLI status|list --target T                          CLI clean --target T [--tick
      it to `aw-device` (`before` writes the flows while the Implementer works, `after` replays them and judges).
    - `checks`: run what `run` lists in the same turn: `CLI gate --target TARGET` (long command
      timeout, e.g. 30 min) and/or `agent` (`aw-reviewer`, `mode` `full` or `delta` with the `fixed`
-     IDs) in the background. The review only reads code, so it never waits for the gate. Start `also`
+     IDs and the `tree` it reviews) in the background. A review.json of another tree is refused at `log`. The review only reads code, so it never waits for the gate. Start `also`
      in the background too (`CLI device build`: the APK the Device installs, built before it holds a
      device).
    - `fix` (a team): resume the Implementer of each slice in `routes` with its IDs (logged with its
@@ -206,9 +206,13 @@ CLI status|list --target T                          CLI clean --target T [--tick
    - `wait`, `wait_prebuild`, `wait_device`: an agent, a build or a device is still busy; run
      `command` if given (long timeout or in the background), else wait for the agent's return, then
      `next`. A `wait` with `if_returned`: when that agent already returned, run it (its `completed`
-     was never logged, so `next` would wait forever). `wait_device` starting with `booting`: an
+     was never logged, so `next` would wait forever). `log … --status completed` refuses a stage whose
+     file (plan.md, implementation-notes.md, review.json, device-report.md, pr-description.md) is
+     missing, empty, the stub or older than the round's `started`; `next` then answers `spawn` with
+     `resume` for that agent: resume it to write the file, never write it yourself. `wait_device` starting with `booting`: an
      emulator is starting for this run (`CLI emulator --wait`); otherwise it names the run holding each
-     device and `CLI emulator --wait-free` returns once this run has one.
+     device and `CLI emulator --wait-free` returns once this run has one. Past `device.wait_max_seconds`
+     (900) of waiting it answers `ask_user` instead (keep waiting / JVM renders / skip the device).
    - `spawn` with `with_agent` (route `both`): spawn both in the same turn: `aw-device` for the AC that
      need a running app and the `with_agent` (`aw-media` mode `render`) for `render_ac`, the states the
      device does not reach. Tell the Device agent those AC are the renders' and not to spend its budget on them.
@@ -222,6 +226,9 @@ CLI status|list --target T                          CLI clean --target T [--tick
    - `replay_before`: run `command` (the saved flows on the cached base APK, no agent: the `before`
      column the run could not capture earlier), then `next`.
    - `finish`: run `command` as is. With `draft`, the PR opens as a draft listing what is open.
+     **Never skip the device on your own.** `finish --no-device` is refused unless the run was started
+     with `--no-device` or `--developer-said "<the developer's words, verbatim>"` quotes them; the stage log
+     and the PR quote those words, and nothing says the developer asked otherwise.
    - `ask_user`: ask `question` once (batched), then run `then`. With `options` (a PARTIAL device
      check), offer them as the choices and run the one the developer picks.
    - `watch` / `done`: step 5 / the Done summary; run `also` (`CLI emulator --stop`: gives the device
@@ -236,8 +243,10 @@ CLI status|list --target T                          CLI clean --target T [--tick
    --acceptance … --proofs …` first), never a redesign fix round on your own; `NEEDS_APPROVAL`
    (Delivery) → see *Invocation*. A red gate is never waived by hand; a gate that itself looks wrong
    (a misclassified waiver, a parser miss) is a toolkit defect: `finish --draft`. No agent edits the
-   toolkit (`~/.ai`) during a run; `start` fingerprints it, and after a change the gate reports
-   `blocked` (`toolkit_modified_during_run`) and only a draft PR can ship.
+   toolkit (`~/.ai`) during a run; `start` fingerprints the code that judges a run, and a change to it
+   is noted in the stage log and fingerprinted again (the run goes on; never re-run `start` for it).
+   `start` on a run that is not finished resumes it: every AC, stage, verdict and metric stays; a new
+   AC is only appended.
 
    What the CLI decides, for reference (change it in `android_workflow/decide.py`, not here):
    level `full` for high risk or complexity, lifecycle/room_migration/workmanager surfaces or a
@@ -258,7 +267,10 @@ CLI status|list --target T                          CLI clean --target T [--tick
    for the touched modules in one build, plus compile and unit tests for modules that use a changed
    declaration, and a secret scan. Lint or format findings only in files the change does not touch,
    and Android lint findings on lines of a touched file that the change did not write, are
-   **waived** and disclosed in the PR; never "fix" a waived finding: it widens the diff.
+   **waived** and disclosed in the PR; never "fix" a waived finding: it widens the diff. Gradle failing
+   by itself (a lock timeout, a daemon that died or ran out of memory, "Could not create service") is
+   retried once and never a fix round; still failing, `next` asks the developer. The gate and the
+   device APK build never build in the same checkout at once.
 
 5. **Watch the PR** (unless `--no-watch` or a `--no-*` flag stopped before the PR; `--watch` starts
     here for a ticket whose run exists, and with no run: `CLI start` with the PR's title, then this).
@@ -293,7 +305,9 @@ CLI status|list --target T                          CLI clean --target T [--tick
       red after its fix rounds: push nothing, tell the developer what is open, keep watching.
     - `sync` (`behind` or `conflict`): `CLI pr sync --target TARGET`. `synced` → wait again.
       `conflict` → the Implementer resolves the listed files (keeping both intents), the gate runs,
-      then `CLI pr sync --target TARGET --continue`. Never rebase or force-push.
+      then `CLI pr sync --target TARGET --continue`. Never rebase or force-push. While the merge is open
+      the gate measures the change against the commit being merged in, so the base branch's own files
+      are never linted as ours.
     - `merge`: with `auto_merge` (the default) → `CLI pr merge --target TARGET`; it reads the PR again,
       merges with the method the repository allows (squash first) only if still ready, and never
       bypasses branch protection. `not_ready` → wait again. Without `auto_merge` → tell the developer
@@ -427,6 +441,7 @@ in a PR: STOP, ask the user, and continue once answered.
 FAIL, device BLOCKED with a device connected, a toolkit defect — never end without a PR:
 `CLI finish --target TARGET --draft "<why it stopped>"` records every unresolved check as a known
 issue, then `aw-delivery` delivers a **draft** PR that lists them. Tell the user what unblocks it.
+A later delivery of the same run with no open issues marks that draft ready for review by itself.
 
 ## Done
 

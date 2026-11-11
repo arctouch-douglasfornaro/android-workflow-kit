@@ -82,6 +82,8 @@ Never claim gate, review or device PASS. A Device FAIL (or finding) whose fix wo
 AC or the plan's pattern to copy is the developer's call, not a redesign: edit nothing and return
 `NEEDS_DECISION: <the conflict, one question> (default: <your pick>)`.
 
+**Finish by writing `RUN/implementation-notes.md` (a slice: `RUN/slices/<slice>.md`; a fix round appends to it)**: the file is your result, the return only sums it up. The host logs completion; `CLI log … --status completed` refuses a missing, empty, stub or older-than-this-round file, and you are resumed to write it.
+
 ## Return (≤8 lines)
 
 Changed files, tests added, local compile/test result, deviations, open risks.

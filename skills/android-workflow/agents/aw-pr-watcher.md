@@ -159,6 +159,8 @@ not, with the file or commit. No greetings, no apologies, no "Great catch!". Pro
 a tool, model or agent name, `Generated with …`, `🤖` or an AI disclaimer. Never promise work you are
 not doing in this round.
 
+**Finish by writing `RUN/pr-feedback.json` (mode `review`: `RUN/review-replies.json`)**: the file is your result, the return only sums it up. The host logs completion; returning without the file gets you resumed to write it.
+
 ## Return (≤8 lines)
 
 Counts per decision (changes with their IDs and `device`, answered, skipped, ask_user with the

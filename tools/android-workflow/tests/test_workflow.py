@@ -331,6 +331,8 @@ class RunLayoutTests(unittest.TestCase):
             path.write_text(json.dumps({**read_json(path), "status": "failed"}), encoding="utf-8")
             approve_review(root)
             implement(root)  # an approved review of the same source is kept; see test_run_speedups
+            state = run_dir(root) / "run-state.json"  # finished: starting it again is a new run
+            state.write_text(json.dumps({**read_json(state), "status": "completed"}), encoding="utf-8")
             run(root, {"id": "R-1", "title": "Change ProfileScreen", "type": "chore"})
             gate = read_json(run_dir(root) / "gate-report.json")
             review = read_json(run_dir(root) / "review.json")
@@ -817,6 +819,7 @@ class VerificationTests(unittest.TestCase):
             domain = root / "core/domain/src/main/java/Rule.kt"
             domain.parent.mkdir(parents=True)
             domain.write_text("class Rule\n", encoding="utf-8")
+            (run_dir(root) / "implementation-notes.md").write_text("# Decisions\n\nRule.\n", encoding="utf-8")
             main(["log", "--target", str(root), "--stage", "T4", "--status", "completed",
                   "--file", "core/domain/src/main/java/Rule.kt"])
             change_set = read_json(run_dir(root) / "change-set-map.json")
@@ -1011,6 +1014,15 @@ for task in tasks:
             "  The full lint text report is located at:",
             f"    {report}",
         ]))
+    elif kind in ("infra", "infra_once"):
+        marker = cwd / "build" / "infra-failed-once"
+        if kind == "infra_once" and marker.exists():
+            print(f"> Task {task}")
+            continue
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("1")
+        blocks.append((task, ["> Timeout waiting to lock file hash cache (/x/.gradle/8.9/fileHashes). It is "
+                              "currently in use by another Gradle instance."]))
     else:
         blocks.append((task, ["> There were failing tests."]))
 if not blocks:
@@ -1076,6 +1088,32 @@ class BatchedGateTests(unittest.TestCase):
         self.assertEqual(report["status"], "failed")
         self.assertEqual(outcomes["feature docs (*/README.md)"], "failed")
         self.assertTrue(calls, "compile/test/lint must still run when only the doc is stale")
+
+    def test_a_gradle_lock_timeout_is_retried_once_and_passes(self) -> None:
+        with AndroidProject() as root:
+            report = self.gate(root, {"tasks": {":app:testDebugUnitTest": "infra_once"}})
+            calls = gradle_calls(root)
+            log = (run_dir(root) / "stage-log.md").read_text(encoding="utf-8")
+        self.assertEqual((self.code, report["status"]), (0, "passed"))
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(report["infra_retried"])
+        self.assertIn("Gradle infrastructure failure, retried once", log)
+
+    def test_a_gradle_failure_that_stays_is_never_a_fix_round(self) -> None:
+        from android_workflow.decide import next_action
+
+        with AndroidProject() as root:
+            report = self.gate(root, {"tasks": {":app:testDebugUnitTest": "infra"}})
+            approve_review(root)
+            spec_path = run_dir(root) / "ticket-spec.json"
+            spec_path.write_text(json.dumps({**read_json(spec_path), "level": "express", "level_source": "flag",
+                                             "acceptance_criteria": ["a"]}), encoding="utf-8")
+            answer = next_action(root, record=False)
+        self.assertEqual(report["status"], "failed")
+        self.assertIn("Timeout waiting to lock", report["infra"])
+        self.assertEqual(report["red_streak"], 0)
+        self.assertEqual(answer["next"], "ask_user")
+        self.assertIn("again", answer["options"])
 
     def test_gradle_tasks_share_one_continue_invocation(self) -> None:
         with AndroidProject() as root:
@@ -1370,6 +1408,7 @@ class RunStateTests(unittest.TestCase):
             self.assertEqual(read_json(run_dir(root) / "run-state.json")["status"], "escalated")
             main(["log", "--target", str(root), "--stage", "Quality gate", "--status", "completed", "--note", "waived"])
             after_gate = read_json(run_dir(root) / "run-state.json")
+            (run_dir(root) / "pr-description.md").write_text("### What changed\n\nThe empty state.\n", encoding="utf-8")
             main(["log", "--target", str(root), "--stage", "Delivery", "--status", "completed", "--note", "PR"])
             after_delivery = read_json(run_dir(root) / "run-state.json")
         self.assertEqual(after_gate["status"], "running")
@@ -1380,6 +1419,7 @@ class RunStateTests(unittest.TestCase):
     def test_wait_seconds_are_kept_apart_from_work_time(self) -> None:
         with AndroidProject() as root:
             run(root, {"id": "S-2", "title": "Change ProfileScreen", "type": "chore"})
+            (run_dir(root) / "review.json").write_text('{"schema_version": 1, "status": "approved"}', encoding="utf-8")
             main(["log", "--target", str(root), "--stage", "Reviewer", "--status", "completed",
                   "--seconds", "100", "--wait-seconds", "70"])
             entry = read_json(run_dir(root) / "stage-metrics.json")["stages"]["T6"]

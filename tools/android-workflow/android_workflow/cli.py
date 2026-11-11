@@ -170,29 +170,50 @@ def text_if_exists(path: Path) -> str:
 
 TOOLKIT_SOURCES = (
     (Path(__file__).resolve().parent, "*.py"),
-    (Path.home() / ".ai" / "skills" / "android-workflow", "*"),
-    (Path.home() / ".ai" / "bin", "feature_setup.py"),
-    (Path.home() / ".ai" / "bin", "feature_workspace.py"),
-    (Path.home() / ".ai" / "bin", "android-workflow"),
+    (Path.home() / ".ai" / "skills" / "android-workflow", "*.json"),
 )
+# Only the code that decides a gate, a verdict or the next step: the office page, token counting,
+# emulators, caches and the scripts around the CLI never change a run's result.
+TOOLKIT_JUDGING_MODULES = frozenset({
+    "cli.py", "decide.py", "delivery.py", "evidence.py", "flows.py", "render.py", "replay.py", "review.py",
+    "team.py", "watch.py", "base.py",
+})
 
 
 def toolkit_fingerprint() -> dict[str, str]:
-    """Hash of the code and instructions that judge a run, so a run cannot quietly rewrite its own gate."""
+    """Hash of the code that judges a run, so a change to it mid-run is seen and noted."""
     files: dict[str, str] = {}
+    package = Path(__file__).resolve().parent
     for root, pattern in TOOLKIT_SOURCES:
         if not root.is_dir():
             continue
-        paths = root.rglob(pattern) if pattern == "*" else root.glob(pattern)
-        for path in paths:
-            if path.is_file() and "__pycache__" not in path.parts and not path.name.endswith("_test.py"):
-                files[str(path)] = hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in root.glob(pattern):
+            if not path.is_file() or (root == package and path.name not in TOOLKIT_JUDGING_MODULES):
+                continue
+            files[str(path)] = hashlib.sha256(path.read_bytes()).hexdigest()
     return files
 
 
 TOOLKIT_FINGERPRINT_FILE = "toolkit-fingerprint.json"
 # Prose an agent reads (role files, the skill) does not judge a run: editing it mid-run never blocks the gate.
 TOOLKIT_PROSE_SUFFIXES = (".md",)
+
+
+def refresh_toolkit_fingerprint(agent_dir: Path, stage: str, actor: str = "cli") -> list[str]:
+    """The toolkit's judging code changed since it was fingerprinted: note it in the stage log and the run
+    state and fingerprint it again, so the run goes on with it (a block made hosts re-run `start`)."""
+    changed = toolkit_changes(agent_dir)
+    if not changed:
+        return []
+    path = agent_dir / TOOLKIT_FINGERPRINT_FILE
+    recorded = read_json(path) if path.exists() else {}
+    history = list(recorded.get("changed_during_run") or [])
+    history.append({"at": int(time.time()), "files": changed})
+    write_json(path, {"files": toolkit_fingerprint(), "changed_during_run": history[-20:]})
+    names = ", ".join(Path(item).name for item in changed[:6]) + ("…" if len(changed) > 6 else "")
+    append_stage_log(agent_dir, stage, "note", actor, f"the workflow toolkit changed during this run ({names}); "
+                                                     "fingerprint refreshed, the run continues with it")
+    return changed
 
 
 def toolkit_changes(agent_dir: Path) -> list[str]:
@@ -484,8 +505,18 @@ def durable_overrides(root: Path) -> dict[str, Any]:
     return read_json(path) if path.is_file() else {}
 
 
+def merge_head(target: Path) -> str | None:
+    """The commit being merged in (`pr sync` stopped on a conflict, or before its commit), else None."""
+    result = subprocess.run(["git", "-C", str(target), "rev-parse", "-q", "--verify", "MERGE_HEAD"],
+                            text=True, capture_output=True, check=False)
+    return result.stdout.strip() or None if result.returncode == 0 else None
+
+
 def diff_base(target: Path) -> str | None:
     """The commit this change is measured against.
+
+    While a merge of the base branch is in progress, that is the commit being merged (MERGE_HEAD): the
+    change is what this branch adds on top of it, never the base branch's own files.
 
     The pinned `base_commit` is HEAD when the run started. Merging the default branch in afterwards
     would make every file that branch brought look changed (a whole-repo gate, waivers on files
@@ -496,6 +527,9 @@ def diff_base(target: Path) -> str | None:
     base = read_json(repo_map_path).get("base_commit") if repo_map_path.exists() else None
     if not base:
         return None
+    merging = merge_head(target)
+    if merging:
+        return merging
 
     def git_out(*args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(["git", "-C", str(target), *args], text=True, capture_output=True, check=False)
@@ -1849,9 +1883,21 @@ def git_status_paths(target: Path) -> list[str]:
     return paths
 
 
+def merged_in(target: Path, names: Any) -> list[str]:
+    """`names` without the files a merge in progress brought from the base branch: during a merge `git
+    status` lists every file the base changed as staged, though this change never wrote them."""
+    names = list(names)
+    merging = merge_head(target)
+    if not merging:
+        return names
+    ours = set(git_lines(target, "diff", "--name-only", merging) or [])
+    ours.update(git_lines(target, "ls-files", "--others", "--exclude-standard") or [])
+    return [name for name in names if name in ours]
+
+
 def touched_files(target: Path) -> set[str]:
     """Every file this change touches, whatever its type: the scope lint findings are judged against."""
-    names = set(source_changes(target)) | set(git_status_paths(target))
+    names = set(source_changes(target)) | set(merged_in(target, git_status_paths(target)))
     base = diff_base(target)
     diff = subprocess.run(
         ["git", "-C", str(target), "diff", "--name-only", *([base] if base else [])],
@@ -2160,6 +2206,42 @@ def planner_ran(target: Path) -> bool:
     return bool(((metrics.get("stages") or {}).get("T3") or {}).get("tokens"))
 
 
+# Gradle itself failing, not the change: a lock another build held too long, a daemon that died, a
+# service it could not start, a daemon out of memory. Retried once; never a fix round for the Implementer.
+GRADLE_INFRA_PATTERNS = (
+    re.compile(r"Timeout waiting to lock", re.I),
+    re.compile(r"Gradle build daemon disappeared unexpectedly", re.I),
+    re.compile(r"Could not receive a message from the daemon", re.I),
+    re.compile(r"Could not connect to the Gradle daemon", re.I),
+    re.compile(r"Could not create service of type", re.I),
+    re.compile(r"Daemon will be stopped at the end of the build after running out of JVM memory", re.I),
+    re.compile(r"Expiring Daemon because JVM heap space is exhausted", re.I),
+    re.compile(r"OutOfMemoryError: (?:GC overhead limit exceeded|Metaspace)", re.I),
+)
+
+
+def gradle_infra_failure(steps: list[dict[str, Any]]) -> str | None:
+    """The line of a failed step's log that shows Gradle's own failure, or None (a real failure)."""
+    failed = [step for step in steps if not step_passes(step)]
+    if not failed:
+        return None
+    for step in failed:
+        log = step.get("log")
+        text = text_if_exists(Path(log)) if log else ""
+        for line in text.splitlines():
+            if any(pattern.search(line) for pattern in GRADLE_INFRA_PATTERNS):
+                return line.strip()[:300]
+    return None
+
+
+def worktree_build_lock(target: Path):
+    """One Gradle build at a time in this checkout: the gate and the background device build share the
+    project's caches, and two builds at once ended in "Timeout waiting to lock file hash cache"."""
+    from android_workflow.locks import exclusive
+
+    return exclusive(cache_dir(target) / "worktree-build.lock")
+
+
 def run_gate_rounds(
     target: Path,
     config: dict[str, Any],
@@ -2168,9 +2250,20 @@ def run_gate_rounds(
     run_number: int = 1,
     extras: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str], float]:
-    """One gate attempt; a red gate goes back to the Implementer, not to a retry loop here."""
+    """One gate attempt; a red gate goes back to the Implementer, not to a retry loop here. Only a Gradle
+    infrastructure failure (`GRADLE_INFRA_PATTERNS`) is retried, once, and recorded in `extras["infra"]`."""
     started = time.monotonic()
-    steps, warnings = gate_attempt(target, config, change_set, needs_device, 1, run_number, extras)
+    with worktree_build_lock(target):
+        steps, warnings = gate_attempt(target, config, change_set, needs_device, 1, run_number, extras)
+        infra = gradle_infra_failure(steps)
+        if infra:
+            append_stage_log(run_dir(target), "T5", "retry", "cli", f"Gradle infrastructure failure, retried once: {infra}")
+            steps, warnings = gate_attempt(target, config, change_set, needs_device, 2, run_number, extras)
+            infra = gradle_infra_failure(steps)
+            if extras is not None:
+                extras["infra_retried"] = True
+                if infra:
+                    extras["infra"] = infra
     return steps, warnings, round(time.monotonic() - started, 3)
 
 
@@ -2215,9 +2308,35 @@ def device_report_anomalies(device: str) -> list[str]:
 STUB_PR_MARKER = "See the diff and `implementation-notes.md`"
 
 
-def is_stub_pr_body(content: str) -> bool:
+def _body_lines(text: str) -> list[str]:
+    """The lines of a PR body that say something: no headings, HTML comments, checklist items, table
+    rules or blank lines, whitespace and case folded."""
+    text = re.sub(r"<!--.*?-->", "", text, flags=re.S)
+    kept = []
+    for line in text.splitlines():
+        line = " ".join(line.split()).lower()
+        if not line or line.startswith("#") or re.match(r"^[-*]\s+\[[ xX]\]", line) or re.fullmatch(r"[|:\- ]+", line):
+            continue
+        kept.append(line)
+    return kept
+
+
+def is_stub_pr_body(content: str, spec: dict[str, Any] | None = None, template: str | None = None) -> bool:
+    """Nothing written by the Delivery agent: empty, the marker, the ticket title/description `finish`
+    wrote as a placeholder, only headings and checklist, or the repo's PR template left as it is."""
     text = content.strip()
-    return (not text) or STUB_PR_MARKER in text
+    if not text or STUB_PR_MARKER in text:
+        return True
+    said = _body_lines(text)
+    if not said:
+        return True
+    if spec is not None and said == _body_lines(short_pr_body(spec)):
+        return True
+    if template:
+        from_template = set(_body_lines(template))
+        if all(line in from_template for line in said):
+            return True
+    return False
 
 
 def short_pr_body(spec: dict[str, Any]) -> str:
@@ -2412,9 +2531,8 @@ def changed_paths(target: Path) -> tuple[list[str], list[str]]:
         capture_output=True,
         check=False,
     )
-    for entry in status.stdout.splitlines():
-        if len(entry) >= 4:
-            names.append(entry[3:].strip().split(" -> ")[-1].strip('"'))
+    listed = [entry[3:].strip().split(" -> ")[-1].strip('"') for entry in status.stdout.splitlines() if len(entry) >= 4]
+    names.extend(merged_in(target, listed))
     return names, tracked
 
 
@@ -2586,22 +2704,10 @@ def run_quality_gate(target: Path) -> dict[str, Any]:
             }
         )
     run_number = int(previous.get("run") or 0) + 1
-    changed_toolkit = toolkit_changes(agent_dir)
-    if changed_toolkit:
-        report = {
-            "schema_version": 1,
-            "status": "blocked",
-            "run": run_number,
-            "reason": "toolkit_modified_during_run",
-            "toolkit_files": changed_toolkit,
-            "fingerprint": source_fingerprint(target),
-            "steps": [],
-            "prohibitions_respected": False,
-            "prior_runs": prior_runs[-3:],
-        }
-        write_json(agent_dir / "gate-report.json", report)
-        return report
     extras: dict[str, Any] = {}
+    changed_toolkit = refresh_toolkit_fingerprint(agent_dir, "T5")
+    if changed_toolkit:
+        extras["toolkit_changed"] = changed_toolkit  # noted, never a block: the gate runs with the new code
     from android_workflow.locks import build_slot
 
     def slot_wait(holders: list[dict[str, Any]]) -> None:
@@ -2635,7 +2741,9 @@ def run_quality_gate(target: Path) -> dict[str, Any]:
         "duration_seconds": duration,
         "secret_scan": scan,
         "prior_runs": prior_runs[-3:],
-        "red_streak": (int(previous.get("red_streak") or (1 if previous.get("status") == "failed" else 0)) + 1)
+        # Gradle failing by itself is not a red gate of the change: the streak stays where it was.
+        "red_streak": int(previous.get("red_streak") or 0) if gate_status == "failed" and extras.get("infra")
+        else (int(previous.get("red_streak") or (1 if previous.get("status") == "failed" else 0)) + 1)
         if gate_status == "failed" else 0,
         "prohibitions_respected": True,
         **extras,
@@ -2790,6 +2898,103 @@ def attach_pending_setup(target: Path, agent_dir: Path, state: dict[str, Any], m
         state["stages"]["T0"] = {"status": "started"}
 
 
+# What each agent's `completed` stands on: the file it must have written in this round. An agent that
+# returns without it is resumed, never logged as done (a stub once shipped as the PR description).
+STAGE_ARTIFACTS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "T3": ("aw-planner", ("plan.md", "review-spec.json", "ticket-spec.json")),  # or its `update-spec`
+    "T4": ("aw-implementer", ("implementation-notes.md",)),
+    "T4L": ("aw-tech-lead", ("implementation-notes.md", "team-plan.json")),
+    "T6": ("aw-reviewer", ("review.json",)),
+    "T7": ("aw-device", ("device-report.md",)),
+    "T8": ("aw-delivery", ("pr-description.md",)),
+}
+ARTIFACT_CLOCK_SLACK_SECONDS = 2  # file mtimes and the logged clock may disagree by this much
+
+
+def artifact_stub(name: str, text: str, spec: dict[str, Any] | None = None, template: str | None = None) -> bool:
+    """The file still holds what the CLI wrote before the agent ran (or nothing at all)."""
+    if not text.strip():
+        return True
+    if name == "implementation-notes.md":
+        return "Host has not implemented yet." in text
+    if name == "plan.md":
+        return "Not required for this route." in text
+    if name == "ticket-spec.json":
+        try:
+            return not json.loads(text).get("planner_updated")
+        except (ValueError, AttributeError):
+            return True
+    if name == "device-report.md":
+        return device_report_status(text) in {"", "not_run"}
+    if name == "review.json":
+        try:
+            return json.loads(text).get("status") in (None, "", "not_run")
+        except (ValueError, AttributeError):
+            return True
+    if name == "pr-description.md":
+        return is_stub_pr_body(text, spec, template)
+    return False
+
+
+def stage_artifact_error(agent_dir: Path, stage: str, since: Any) -> str | None:
+    """Why `stage` cannot be logged `completed`: its artifact is missing, empty, still the stub, or
+    older than this round's `started` (`since`). None when one of its files is fresh."""
+    if stage not in STAGE_ARTIFACTS:
+        return None
+    agent, names = STAGE_ARTIFACTS[stage]
+    spec = read_json(agent_dir / "ticket-spec.json") if (agent_dir / "ticket-spec.json").is_file() else {}
+    template = None
+    if stage == "T8" and spec.get("pr_template"):
+        # RUN is TARGET/.ai/workflow/<ticket>
+        template = text_if_exists(agent_dir.parents[2] / str(spec["pr_template"])) or None
+    problems = []
+    for name in names:
+        path = agent_dir / name
+        if not path.is_file():
+            problems.append(f"{name} is missing")
+            continue
+        if artifact_stub(name, path.read_text(encoding="utf-8", errors="replace"), spec, template):
+            problems.append(f"{name} is empty or still the stub")
+            continue
+        if isinstance(since, (int, float)) and path.stat().st_mtime + ARTIFACT_CLOCK_SLACK_SECONDS < float(since):
+            problems.append(f"{name} was not written in this round (older than its `started`)")
+            continue
+        return None
+    return (f"{STAGE_ROLES.get(stage, stage)} returned without its artifact ({'; '.join(problems)}): resume "
+            f"{agent} to write RUN/{names[0]}, then log `completed` again")
+
+
+def review_tree_error(target: Path, agent_dir: Path, opened: bool) -> str | None:
+    """Why review.json does not describe the working tree as it is now, or None.
+
+    The tree it reviewed is its own `reviewed_tree` (the `tree` the `checks` answer handed the Reviewer),
+    else the tree when this round's `started` was logged. Whitespace-only differences and files the
+    gate's formatter rewrote do not count."""
+    review = read_json(agent_dir / "review.json") if (agent_dir / "review.json").is_file() else {}
+    entry = (read_json(agent_dir / "run-state.json").get("stages") or {}).get("T6") or {}
+    seen = str(review.get("reviewed_tree") or "") or (entry.get("started_tree") if opened else None)
+    if not seen:
+        return None
+    try:
+        current = snapshot_tree(target)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if not current or current == seen:
+        return None
+    changed = git_lines(target, "diff", "-w", "--ignore-blank-lines", "--name-only", seen, current)
+    if changed is None:
+        return None if review.get("reviewed_tree") is None else (
+            f"review.json names reviewed_tree {seen[:12]}, which is not a tree of this repository: re-run the Reviewer")
+    gate = read_json(agent_dir / "gate-report.json") if (agent_dir / "gate-report.json").is_file() else {}
+    formatted = set((gate.get("auto_format") or {}).get("formatted") or [])
+    changed = [name for name in changed if name not in formatted and ".ai" not in Path(name).parts]
+    if not changed:
+        return None
+    return (f"review.json is stale: it reviewed tree {seen[:12]}, and the working tree changed since "
+            f"({', '.join(changed[:5])}{'…' if len(changed) > 5 else ''}): resume aw-reviewer on the delta "
+            "(`CLI delta --target TARGET`), then log `completed` again")
+
+
 def log_stage(*args: Any, **kwargs: Any) -> dict[str, Any]:
     target = args[0] if args else kwargs["target"]
     stage = args[1] if len(args) > 1 else kwargs["stage"]
@@ -2835,6 +3040,19 @@ def _log_stage(
         unproven = device_pass_unproven(target, agent_dir)
         if unproven:
             raise ValueError(unproven)
+    if status == "completed" and not slice_id and read_json(agent_dir / "run-state.json").get("status") != "paused":
+        stages_now = read_json(agent_dir / "run-state.json").get("stages") or {}
+        clock = ((read_json(agent_dir / "stage-metrics.json").get("stages") or {}).get(stage) or {}).get("running_since")
+        opened = (stages_now.get(stage) or {}).get("status") in OPENING_STATUSES
+        missing = stage_artifact_error(agent_dir, stage, clock if opened else None) \
+            or (review_tree_error(target, agent_dir, opened) if stage == "T6" else None)
+        if missing:
+            with contextlib.suppress(OSError, ValueError):
+                # `next` reads this and resumes the agent instead of waiting for it forever.
+                state_now = load_state(target)
+                state_now.setdefault("stages", {}).setdefault(stage, {})["missing_artifact"] = missing
+                save_state(target, state_now)
+            raise ValueError(missing)
     if stage == "T3" and status == "completed" and read_json(agent_dir / "run-state.json").get("status") != "paused":
         spec_path = agent_dir / "ticket-spec.json"
         spec = read_json(spec_path) if spec_path.is_file() else {}
@@ -2865,6 +3083,13 @@ def _log_stage(
     state.setdefault("stages", {}).setdefault(stage, {})
     previous = str(state["stages"][stage].get("status") or "")
     state["stages"][stage]["status"] = status
+    state["stages"][stage].pop("missing_artifact", None)
+    if stage == "T6" and status == "started":
+        try:
+            # What the Reviewer is about to read: `completed` refuses a review.json of another tree.
+            state["stages"][stage]["started_tree"] = snapshot_tree(target)
+        except (OSError, subprocess.SubprocessError):
+            state["stages"][stage].pop("started_tree", None)
     if note:
         state["stages"][stage]["note"] = note
     entry = metrics.setdefault("stages", {}).setdefault(stage, {})
@@ -2971,11 +3196,11 @@ def _log_stage(
     if status == "completed" and tokens is None and role and role.lower() in AGENT_STAGES and stage != "T5":
         warnings.append(f"{role} logged without --tokens: pass the total the agent's result reports")
     if status == "started":
-        changed_toolkit = toolkit_changes(agent_dir)
+        changed_toolkit = refresh_toolkit_fingerprint(agent_dir, stage)
         if changed_toolkit:
             warnings.append(
-                f"the workflow toolkit changed since `start` ({len(changed_toolkit)} file(s)): run `CLI start` "
-                "for this ticket again now (it keeps the plan); otherwise the gate will be blocked"
+                f"the workflow toolkit changed since `start` ({len(changed_toolkit)} file(s)): noted in the stage "
+                "log and fingerprinted again; the run continues (do not re-run `start`)"
             )
     return {**state, "warnings": warnings} if warnings else state
 
@@ -3290,6 +3515,23 @@ def connected_device(target: Path) -> str | None:
     return None
 
 
+def _waiting_for_device(agent_dir: Path) -> bool:
+    """The run's latest decision is a `wait_device` for a device starting for it."""
+    from android_workflow.decide import BOOTING, DECISIONS_FILE
+
+    try:
+        lines = (agent_dir / DECISIONS_FILE).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    for line in reversed(lines):
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue
+        return item.get("next") == "wait_device" and str(item.get("why") or "").startswith(BOOTING)
+    return False
+
+
 def finish_run(
     target: Path,
     skip_device: str | None = None,
@@ -3297,22 +3539,41 @@ def finish_run(
     no_device: bool = False,
     keep_device: str | None = None,
     accept_partial: str | None = None,
+    developer_said: str | None = None,
 ) -> dict[str, Any]:
     """Final check before the PR. With `draft`, unresolved checks become known issues of a draft PR.
     `accept_partial` is the developer's answer to a PARTIAL device check: ship it ready for review,
     with what stays unverified disclosed in the PR.
 
     `skip_device` is refused while a device is connected: "no device" is checked, not believed. The
-    developer's own `--no-device` (`no_device`) is the only way to skip a device that is there.
+    developer's own `--no-device` (`no_device`) is the only way to skip a device that is there, and it
+    needs proof the developer asked: `start --no-device` on record, or their words (`developer_said`),
+    which the stage log and the PR quote. Nothing claims the developer asked without one of them.
     `keep_device` (a PR feedback round with nothing visible on the device) keeps an earlier device PASS
     of this run instead of verifying again; the reason is logged.
     """
     errors = implementation_errors(target)
     if errors:
         raise ValueError("Implementer incomplete: " + "; ".join(errors))
-    if no_device and not skip_device:
-        skip_device = "the developer asked for --no-device"
     agent_dir = run_dir(target)
+    said = " ".join((developer_said or "").split())
+    if no_device or (skip_device and "developer" in skip_device.lower()):
+        recorded = (read_json(agent_dir / "run-state.json") if (agent_dir / "run-state.json").is_file() else {}).get("no_device")
+        if not recorded and not said:
+            raise ValueError(
+                "the developer did not ask to skip the device in this run (no `start --no-device` on record): "
+                "run the Device stage (`CLI next`), `finish --draft \"<what blocks it>\"`, or, only if the developer "
+                "said so, pass their words verbatim with `--developer-said \"…\"`"
+            )
+        if said:
+            skip_device = f'the developer said: "{said}"'
+        elif no_device and not skip_device:
+            skip_device = "the developer asked for --no-device (start --no-device)"
+    elif skip_device and not draft and _waiting_for_device(agent_dir):
+        raise ValueError(
+            "an emulator is still starting for this run (the last decision was `wait_device`): wait for it "
+            "(`CLI emulator --target TARGET --wait`, then `CLI next`); `next` asks the developer when the wait runs long"
+        )
     spec = read_json(agent_dir / "ticket-spec.json")
     if skip_device and not no_device and not draft and "T7" in spec["route"]:
         serial = connected_device(target)
@@ -3341,12 +3602,7 @@ def finish_run(
         issues.append("quality gate is blocked: " + (gate.get("reason") or "see gate-report.json"))
     elif gate.get("status") != "passed":
         issues.append("quality gate was not run")
-    changed_toolkit = toolkit_changes(agent_dir)
-    if changed_toolkit:
-        issues.append(
-            "the workflow toolkit changed during this run (" + ", ".join(changed_toolkit)
-            + "); a human must review that change"
-        )
+    refresh_toolkit_fingerprint(agent_dir, "T9")  # noted in the stage log; never an issue of the change
     issues.extend(verification_errors(target, spec, state, gate, skip_device, accept_partial))
     if accept_partial and not issues:
         state["device_partial"] = accept_partial
@@ -3535,7 +3791,7 @@ def mark_moved_copies(target: Path, ticket_id: str) -> list[str]:
 
 
 def run(target: Path, ticket: dict[str, Any], take_over: bool = False,
-        review_files: list[str] | None = None) -> dict[str, Any]:
+        review_files: list[str] | None = None, no_device: bool = False) -> dict[str, Any]:
     started = time.monotonic()
     ensure_gitignore(target)
     bootstrap(target)
@@ -3549,12 +3805,15 @@ def run(target: Path, ticket: dict[str, Any], take_over: bool = False,
     agent_dir.mkdir(parents=True, exist_ok=True)
     set_current(target, ticket_id)
     mark_moved_copies(target, ticket_id)
+    if review_files is None and resumable(agent_dir):
+        return resume_run(target, agent_dir, ticket, no_device=no_device)
     spec = keep_planner_decisions(agent_dir, spec, ticket)
     if review_files is not None:
         spec["review_files"] = list(review_files)
     write_json(agent_dir / "ticket-spec.json", spec)
     write_json(agent_dir / TOOLKIT_FINGERPRINT_FILE, {"files": toolkit_fingerprint()})
     kept = still_valid_verdicts(target, agent_dir)
+    previous_state = read_json(agent_dir / "run-state.json") if (agent_dir / "run-state.json").is_file() else {}
     # Starting a ticket again is a new run: verdicts of the previous one must not carry over,
     # except a review or device verdict recorded for exactly the source that is there now.
     for verdict in RUN_VERDICTS:
@@ -3584,6 +3843,10 @@ def run(target: Path, ticket: dict[str, Any], take_over: bool = False,
         "created_at": int(time.time()),
         "updated_at": int(time.time()),
     }
+    if no_device or previous_state.get("no_device"):
+        # The developer's `--no-device`, on record for this ticket: only it lets `finish --no-device` skip
+        # the device without the developer's own words (`--developer-said`).
+        state["no_device"] = "start --no-device" if no_device else previous_state["no_device"]
     attach_pending_setup(target, agent_dir, state, metrics)
     write_json(agent_dir / "stage-metrics.json", metrics)
     question = pending_question(spec, state["answers"])
@@ -3595,6 +3858,75 @@ def run(target: Path, ticket: dict[str, Any], take_over: bool = False,
 
 
 PLANNER_FIELDS = ("surfaces", "acceptance_criteria", "type", "risk", "complexity", "reproduction")
+
+
+def resumable(agent_dir: Path) -> bool:
+    """A run of this ticket that is not over: `start` again continues it instead of starting over."""
+    path = agent_dir / "run-state.json"
+    if not path.is_file() or not (agent_dir / "ticket-spec.json").is_file():
+        return False
+    return read_json(path).get("status") not in (None, "completed", "moved")
+
+
+def _ac_key(text: str) -> str:
+    return re.sub(r"\W+", " ", str(text).lower()).strip()
+
+
+def resume_run(target: Path, agent_dir: Path, ticket: dict[str, Any], no_device: bool = False) -> dict[str, Any]:
+    """`start` on a run that is still going (a host re-running it after a toolkit change or a lost
+    session): nothing it has is dropped. The acceptance criteria are kept and a new one is only appended,
+    the stages, verdicts and metrics stay, and only what the new start states explicitly (type, risk,
+    complexity, reproduction, more surfaces, the level) changes the spec."""
+    from android_workflow.decide import apply_level
+
+    with run_lock(target):
+        spec_path = agent_dir / "ticket-spec.json"
+        spec = read_json(spec_path)
+        state = load_state(target)
+        notes: list[str] = []
+        known = {_ac_key(item) for item in spec.get("acceptance_criteria") or []}
+        added = []
+        for item in ticket.get("acceptance_criteria") or []:
+            if str(item).strip() and _ac_key(item) not in known:
+                known.add(_ac_key(item))
+                added.append(str(item).strip())
+        kept = len(spec.get("acceptance_criteria") or [])
+        if added:
+            spec["acceptance_criteria"] = [*(spec.get("acceptance_criteria") or []), *added]
+            if spec.get("ac_ids"):
+                spec["ac_ids"] = [*spec["ac_ids"], *[f"AC{kept + index}" for index in range(1, len(added) + 1)]]
+            notes.append(f"added {len(added)} AC")
+        old_ticket = spec.setdefault("ticket", {})
+        for key in ("title", "description"):
+            if not old_ticket.get(key) and ticket.get(key):
+                old_ticket[key] = ticket[key]
+        explicit = set(ticket.get("explicit") or [])
+        for field, default in (("type", "feature"), ("risk", "low"), ("complexity", "low")):
+            value = ticket.get(field)
+            if (field in explicit or value not in (None, "", default)) and value and value != spec.get(field):
+                spec[field] = str(value)
+                notes.append(f"{field} {value}")
+        if ticket.get("reproduction") and ticket["reproduction"] != spec.get("reproduction"):
+            spec["reproduction"] = ticket["reproduction"]
+            notes.append("reproduction")
+        more = [item for item in infer_surfaces(ticket) if item not in (spec.get("surfaces") or [])] \
+            if ticket.get("surfaces") else []
+        if more:
+            spec["surfaces"] = [*(spec.get("surfaces") or []), *more]
+            notes.append("surfaces +" + ",".join(more))
+        spec["route"] = route_for(spec["type"], spec["complexity"], spec["risk"], spec.get("surfaces") or [])
+        level = ticket.get("level") if ticket.get("level") in LEVELS else None
+        apply_level(spec, read_json(agent_dir / "change-set-map.json") if (agent_dir / "change-set-map.json").is_file()
+                    else None, level)
+        write_json(spec_path, spec)
+        if no_device and not state.get("no_device"):
+            state["no_device"] = "start --no-device"
+            notes.append("--no-device")
+        save_state(target, state)
+        refresh_toolkit_fingerprint(agent_dir, "T1")
+        append_stage_log(agent_dir, "T1", "resumed", "cli",
+                         f"start again: the run continues ({kept} AC kept" + (", " + ", ".join(notes) if notes else "") + ")")
+    return {**state, "resumed": True, "acceptance_kept": kept, "acceptance_added": added}
 
 
 def keep_planner_decisions(agent_dir: Path, spec: dict[str, Any], ticket: dict[str, Any]) -> dict[str, Any]:
@@ -3687,6 +4019,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     start_parser.add_argument("--reproduction")
     start_parser.add_argument("--overrides", type=Path)
     start_parser.add_argument("--level", choices=LEVELS, help="overrides the level the CLI picks")
+    start_parser.add_argument("--no-device", action="store_true", dest="no_device",
+                              help="the developer passed --no-device: recorded, so `finish --no-device` may skip the device")
     start_parser.add_argument("--take-over", action="store_true", dest="take_over",
                               help="start here although another ticket's agent is still logged as working in this "
                                    "checkout (its session is gone)")
@@ -3732,7 +4066,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     finish_parser.add_argument(
         "--no-device", action="store_true",
-        help="the developer asked for --no-device: skip the Device stage even with a device connected",
+        help="skip the Device stage even with a device connected: needs `start --no-device` or --developer-said",
+    )
+    finish_parser.add_argument(
+        "--developer-said", metavar="QUOTE", dest="developer_said",
+        help="the developer's own words asking to skip the device, verbatim; recorded in the stage log and the PR",
     )
     finish_parser.add_argument(
         "--keep-device", metavar="REASON",
@@ -3944,7 +4282,7 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
             raise ValueError("start requires --ticket or --id and --title")
         if args.overrides:
             configure(target, args.overrides)
-        result = run(target, ticket_from_flags(args), take_over=args.take_over)
+        result = run(target, ticket_from_flags(args), take_over=args.take_over, no_device=args.no_device)
         from android_workflow.skills import refresh as refresh_skills
 
         refresh_skills(target)  # which Android skills this ticket needs, from the ticket and its likely files
@@ -4013,7 +4351,7 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
         with run_lock(target):
             return finish_run(
                 target, skip_device=args.skip_device, draft=args.draft, no_device=args.no_device,
-                keep_device=args.keep_device, accept_partial=args.accept_partial,
+                keep_device=args.keep_device, accept_partial=args.accept_partial, developer_said=args.developer_said,
             ), 0
     if args.command == "prebuild":
         from android_workflow.prebuild import current_status, start_prebuild, wait_prebuild

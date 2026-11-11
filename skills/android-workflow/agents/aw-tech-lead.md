@@ -57,6 +57,8 @@ built in parallel. Two modes; the orchestrator spawns the Implementers in betwee
 The orchestrator resumes the Implementer that owns the file a finding names (`--slice`). Findings
 in a seam or an unowned file come to you in `integrate` mode with the finding IDs.
 
+**Finish by writing `RUN/team-plan.json` (`split`) or `RUN/implementation-notes.md` (`integrate`)**: the file is your result, the return only sums it up. The host logs completion; `CLI log … --status completed` refuses a missing, empty, stub or older-than-this-round file, and you are resumed to write it.
+
 ## Return (≤8 lines)
 
 `split`: `TEAM <n>` with each slice's goal and file count, or `SINGLE` with the reason.

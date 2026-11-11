@@ -117,10 +117,10 @@ class GradleArgsTests(unittest.TestCase):
 
 
 class DeviceCheckTests(unittest.TestCase):
-    def finish_project(self, root: Path) -> None:
+    def finish_project(self, root: Path, *start: str) -> None:
         with contextlib.redirect_stdout(io.StringIO()):
             main(["start", "--target", str(root), "--id", "D-1", "--title", "Change ProfileScreen", "--type", "feature",
-                  "--surfaces", "ui"])
+                  "--surfaces", "ui", *start])
         (root / "app/src/main/java/com/example/ProfileScreen.kt").write_text("package com.example\nclass P\n", encoding="utf-8")
         notes(root)
         main(["log", "--target", str(root), "--stage", "Implementer", "--status", "completed", "--tokens", "1"])
@@ -133,14 +133,15 @@ class DeviceCheckTests(unittest.TestCase):
             with mock.patch.object(cli, "connected_device", return_value="emulator-5554"):
                 _, refused = quiet("finish", "--target", str(root), "--skip-device", "no device")
                 state_after_refusal = read_json(run_dir(root) / "run-state.json")["status"]
-                _, allowed = quiet("finish", "--target", str(root), "--skip-device", "developer passed --no-device", "--no-device")
+                _, allowed = quiet("finish", "--target", str(root), "--skip-device", "developer passed --no-device", "--no-device",
+                                    "--developer-said", "no device for this one")
         self.assertEqual(refused, 2)
         self.assertNotEqual(state_after_refusal, "completed")
         self.assertEqual(allowed, 0)
 
     def test_no_device_alone_skips_the_device(self) -> None:
         with GitProject() as root:
-            self.finish_project(root)
+            self.finish_project(root, "--no-device")
             with mock.patch.object(cli, "connected_device", return_value="emulator-5554"):
                 result, code = quiet("finish", "--target", str(root), "--no-device")
         self.assertEqual(code, 0)
@@ -174,6 +175,7 @@ class LogTests(unittest.TestCase):
     def test_the_same_round_logged_twice_counts_once(self) -> None:
         with GitProject() as root:
             run(root, {"id": "L-9", "title": "Change ProfileScreen", "type": "chore"})
+            (run_dir(root) / "review.json").write_text(json.dumps({"schema_version": 1, "status": "approved"}), encoding="utf-8")
             for args in (["--status", "started"], ["--status", "completed", "--note", "approved"],
                          ["--status", "completed", "--note", "approved, 0 blocking", "--tokens", "500"]):
                 main(["log", "--target", str(root), "--stage", "Reviewer", *args])
@@ -181,6 +183,8 @@ class LogTests(unittest.TestCase):
             main(["log", "--target", str(root), "--stage", "Reviewer", "--status", "completed", "--tokens", "500"])
             repeated = read_json(run_dir(root) / "stage-metrics.json")["stages"]["T6"]
             main(["log", "--target", str(root), "--stage", "Reviewer", "--status", "started"])
+            (run_dir(root) / "review.json").write_text(json.dumps({"schema_version": 1, "status": "approved"}),
+                                                     encoding="utf-8")  # the second round's own review
             main(["log", "--target", str(root), "--stage", "Reviewer", "--status", "completed", "--tokens", "200"])
             two = read_json(run_dir(root) / "stage-metrics.json")["stages"]["T6"]
         self.assertEqual((once["attempts"], once["tokens"]), (1, 500))
@@ -190,6 +194,7 @@ class LogTests(unittest.TestCase):
     def test_a_second_round_after_other_work_is_not_merged(self) -> None:
         with GitProject() as root:
             run(root, {"id": "L-8", "title": "Change ProfileScreen", "type": "chore"})
+            (run_dir(root) / "implementation-notes.md").write_text("# Decisions\n\nDone.\n", encoding="utf-8")
             main(["log", "--target", str(root), "--stage", "Implementer", "--status", "completed", "--tokens", "10"])
             main(["log", "--target", str(root), "--stage", "Quality gate", "--status", "completed", "--note", "failed"])
             main(["log", "--target", str(root), "--stage", "Implementer", "--status", "completed", "--tokens", "7"])
@@ -212,6 +217,7 @@ class LogTests(unittest.TestCase):
             main(["update-spec", "--target", str(root), "--surfaces", "ui,navigation", "--acceptance", "shows a|hides b",
                   "--complexity", "medium"])
             planned = read_json(run_dir(root) / "ticket-spec.json")
+            (run_dir(root) / "implementation-notes.md").write_text("# Decisions\n\nDone.\n", encoding="utf-8")
             main(["log", "--target", str(root), "--stage", "Implementer", "--status", "completed", "--tokens", "42"])
             run(root, {"id": "R-1", "title": "Change ProfileScreen", "type": "feature"})
             again = read_json(run_dir(root) / "ticket-spec.json")
@@ -220,8 +226,44 @@ class LogTests(unittest.TestCase):
         self.assertEqual(again["acceptance_criteria"], ["shows a", "hides b"])
         self.assertEqual(again["complexity"], "medium")
         self.assertEqual(again["route"], planned["route"])
-        self.assertIsNone(metrics["stages"]["T4"]["tokens"])  # this run starts at zero…
+        # The run was still going: `start` resumed it, so its metrics stay where they are.
+        self.assertEqual(metrics["stages"]["T4"]["tokens"], 42)
+        self.assertNotIn("earlier_runs", metrics)
+
+    def test_a_new_start_after_a_finished_run_moves_its_metrics_to_earlier_runs(self) -> None:
+        with GitProject() as root:
+            run(root, {"id": "R-4", "title": "Change ProfileScreen", "type": "feature"})
+            (run_dir(root) / "implementation-notes.md").write_text("# Decisions\n\nDone.\n", encoding="utf-8")
+            main(["log", "--target", str(root), "--stage", "Implementer", "--status", "completed", "--tokens", "42"])
+            path = run_dir(root) / "run-state.json"
+            path.write_text(json.dumps({**read_json(path), "status": "completed"}), encoding="utf-8")
+            run(root, {"id": "R-4", "title": "Change ProfileScreen", "type": "feature"})
+            metrics = read_json(run_dir(root) / "stage-metrics.json")
+        self.assertIsNone(metrics["stages"]["T4"]["tokens"])  # a new run starts at zero…
         self.assertEqual(metrics["earlier_runs"][-1]["stages"]["T4"]["tokens"], 42)  # …the earlier one is kept
+
+    def test_start_on_a_run_that_is_still_going_resumes_it_and_keeps_every_ac(self) -> None:
+        with GitProject() as root:
+            quiet("start", "--target", str(root), "--id", "R-3", "--title", "Change ProfileScreen", "--type", "feature",
+                  "--acceptance", "shows a|hides b|keeps c")
+            main(["update-spec", "--target", str(root), "--acceptance", "shows a|hides b|keeps c|moves d",
+                  "--surfaces", "ui"])
+            before = read_json(run_dir(root) / "run-state.json")
+            (run_dir(root) / "implementation-notes.md").write_text("# Decisions\n\nDone.\n", encoding="utf-8")
+            main(["log", "--target", str(root), "--stage", "Implementer", "--status", "completed", "--tokens", "42"])
+            result, code = quiet("start", "--target", str(root), "--id", "R-3", "--title", "Another title",
+                                 "--type", "feature", "--acceptance", "shows a|new e")
+            spec = read_json(run_dir(root) / "ticket-spec.json")
+            state = read_json(run_dir(root) / "run-state.json")
+            metrics = read_json(run_dir(root) / "stage-metrics.json")
+        self.assertEqual(code, 0)
+        self.assertTrue(result["resumed"])
+        self.assertEqual(spec["acceptance_criteria"], ["shows a", "hides b", "keeps c", "moves d", "new e"])
+        self.assertEqual(spec["ticket"]["title"], "Change ProfileScreen")
+        self.assertEqual(spec["surfaces"], ["ui"])
+        self.assertEqual(state["run_id"], before["run_id"])
+        self.assertEqual(state["stages"]["T4"]["status"], "completed")
+        self.assertEqual(metrics["stages"]["T4"]["tokens"], 42)
 
     def test_a_changed_toolkit_is_reported_when_an_agent_starts_not_at_the_gate(self) -> None:
         with GitProject() as root:

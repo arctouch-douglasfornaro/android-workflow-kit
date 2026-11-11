@@ -178,7 +178,10 @@ def build_current(target: Path, config: dict[str, Any] | None = None) -> dict[st
         timeout = int((config.get("execution") or {}).get("command_timeout_seconds") or 900) * 2
         log = agent_dir / "device-build.log"
         started = time.time()
-        with build_slot(f"device build ({target.name})", config) as slot:
+        from android_workflow.cli import worktree_build_lock
+
+        # After the gate's build in this checkout, never at the same time (Gradle's lock timeouts).
+        with worktree_build_lock(target), build_slot(f"device build ({target.name})", config) as slot:
             code = run_build(command, target, log, timeout)
         # An up-to-date build does not write the APK again: then the newest one is this source's.
         built = _pick_apk(find_apks(target, started), config) or (_pick_apk(find_apks(target, 0.0), config) if code == 0 else None)

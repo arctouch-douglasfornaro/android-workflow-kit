@@ -244,11 +244,87 @@ class RunTests(unittest.TestCase):
         self.assertEqual((answer["next"], answer["agent"], answer["ids"]), ("spawn", "aw-implementer", ["G1", "R1"]))
         self.assertEqual(sorted(answer["read"]), ["gate-report.json", "review.json"])
 
+    def test_a_reviewer_that_returns_without_review_json_is_resumed(self) -> None:
+        self.checked()
+        self.assertIn("reviewer", self.next()["run"])  # logs the Reviewer started
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            code = main(["log", "--target", self.target, "--stage", "Reviewer", "--status", "completed", "--note", "ok"])
+        self.assertNotEqual(code, 0)
+        self.assertIn("resume aw-reviewer", out.getvalue())
+        answer = self.next()
+        self.assertEqual((answer["next"], answer["agent"], answer["resume"]), ("spawn", "aw-reviewer", True))
+        self.review("approved")  # written now: accepted, and `next` moves on
+        self.assertNotIn("missing_artifact", read_json(self.rundir / "run-state.json")["stages"]["T6"])
+
+    def test_a_review_of_an_older_tree_is_refused(self) -> None:
+        self.checked()
+        answer = self.next()
+        self.assertTrue(answer["tree"])  # the Reviewer copies it into review.json as `reviewed_tree`
+        (self.root / SCREEN).write_text("package com.example\nclass ProfileScreen { val b = 2 }\n", encoding="utf-8")
+        (self.rundir / "review.json").write_text(json.dumps({"schema_version": 1, "status": "approved",
+                                                             "reviewed_tree": answer["tree"]}), encoding="utf-8")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            code = main(["log", "--target", self.target, "--stage", "Reviewer", "--status", "completed"])
+        self.assertNotEqual(code, 0)
+        self.assertIn("review.json is stale", out.getvalue())
+        self.assertIn(SCREEN, out.getvalue())
+        resumed = self.next()
+        self.assertEqual((resumed["agent"], resumed["resume"]), ("aw-reviewer", True))
+        # Whitespace only (the formatter) since the tree it names: accepted.
+        (self.root / SCREEN).write_text("package com.example\nclass ProfileScreen {  val a = 1  }\n", encoding="utf-8")
+        (self.rundir / "review.json").write_text(json.dumps({"schema_version": 1, "status": "approved",
+                                                             "reviewed_tree": answer["tree"]}), encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(main(["log", "--target", self.target, "--stage", "Reviewer", "--status", "completed"]), 0)
+
+    def test_without_its_own_tree_the_review_is_checked_against_the_round_start(self) -> None:
+        self.checked()
+        self.next()  # the Reviewer starts on this tree
+        self.implement("val c = 3")  # the code moves while it reads
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            self.review("approved")
+        self.assertEqual(read_json(self.rundir / "run-state.json")["stages"]["T6"]["status"], "started")
+
+    def test_an_artifact_from_before_the_round_started_is_refused(self) -> None:
+        self.checked()
+        self.gate("failed")
+        self.review("approved")
+        self.assertEqual(self.next()["mode"], "fix")
+        notes = self.rundir / "implementation-notes.md"
+        os.utime(notes, (notes.stat().st_mtime - 60,) * 2)  # written by the first round, not this one
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            code = main(["log", "--target", self.target, "--stage", "Implementer", "--status", "completed"])
+        self.assertNotEqual(code, 0)
+        self.assertIn("not written in this round", out.getvalue())
+
+    def test_a_stub_or_template_only_pr_description_cannot_complete_delivery(self) -> None:
+        from android_workflow.cli import is_stub_pr_body, short_pr_body
+
+        ticket = {"ticket": {"title": "Change ProfileScreen title", "description": "Bigger."}}
+        template = "## What\n\n<!-- describe the change -->\n\n## Checklist\n\n- [ ] Tests\n"
+        self.assertTrue(is_stub_pr_body(short_pr_body(ticket), ticket))
+        self.assertTrue(is_stub_pr_body("## What\n\n## Checklist\n\n- [x] Tests\n", ticket, template))
+        self.assertFalse(is_stub_pr_body("## What\n\nThe title is 24sp now.\n\n- [ ] Tests\n", ticket, template))
+        self.checked()
+        (self.rundir / "pr-description.md").write_text(short_pr_body(read_json(self.rundir / "ticket-spec.json")),
+                                                     encoding="utf-8")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            code = main(["log", "--target", self.target, "--stage", "Delivery", "--status", "completed"])
+        self.assertNotEqual(code, 0)
+        self.assertIn("resume aw-delivery", out.getvalue())
+
     def test_a_fix_round_that_changes_nothing_opens_a_draft_instead_of_looping(self) -> None:
         self.checked()
         self.gate("failed")
         self.review("approved")
         self.assertEqual(self.next()["mode"], "fix")
+        with (self.rundir / "implementation-notes.md").open("a", encoding="utf-8") as notes:
+            notes.write("\nG1 → nothing changed\n")  # the round's notes, but no code change
         cli("log", "--target", self.target, "--stage", "Implementer", "--status", "completed", "--tokens", "1")
         answer = self.next()
         self.assertIn("without changing the code", answer.get("draft", ""))
@@ -265,6 +341,8 @@ class RunTests(unittest.TestCase):
         self.review("changes_requested", [{"id": "R1", "file": "app/README.md"}])
         self.assertEqual(self.next()["mode"], "fix")
         readme.write_text("# App\n\nPaging rule.\n", encoding="utf-8")
+        with (self.rundir / "implementation-notes.md").open("a", encoding="utf-8") as notes:
+            notes.write("\nR1 → app/README.md\n")
         cli("log", "--target", self.target, "--stage", "Implementer", "--status", "completed", "--tokens", "1")
         answer = self.next()
         self.assertNotIn("draft", answer)
@@ -406,6 +484,54 @@ class RunTests(unittest.TestCase):
         self.assertEqual(answer["next"], "finish")
         self.assertIn('--skip-device "no device: no device connected"', answer["command"])
         self.assertIn("--no-device", self.next("--no-device")["command"])
+
+    def test_finish_no_device_needs_the_developer_flag_or_their_words(self) -> None:
+        self.visual_run()
+        self.assertIn("--developer-said", self.next("--no-device")["command"])  # not on record: their words
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            refused = main(["finish", "--target", self.target, "--no-device"])
+            claimed = main(["finish", "--target", self.target, "--skip-device", "the developer asked to skip it"])
+        self.assertNotEqual(refused, 0)
+        self.assertNotEqual(claimed, 0)
+        self.assertIn("--developer-said", out.getvalue())
+        self.assertEqual(read_json(self.rundir / "run-state.json")["status"], "running")
+        cli("finish", "--target", self.target, "--no-device", "--developer-said", "skip the  device, I tested it")
+        state = read_json(self.rundir / "run-state.json")
+        self.assertEqual(state["stages"]["T7"]["reason"], 'the developer said: "skip the device, I tested it"')
+        self.assertIn('the developer said: "skip the device, I tested it"',
+                      (self.rundir / "stage-log.md").read_text(encoding="utf-8"))
+
+    def test_start_no_device_is_recorded_and_lets_finish_skip(self) -> None:
+        self.start("--level", "express", "--no-device")
+        cli("update-spec", "--target", self.target, "--acceptance", "a", "--surfaces", "ui")
+        self.next()
+        self.implement("val a = 1")
+        self.gate("passed")
+        self.review("approved")
+        self.assertEqual(self.next()["command"], "CLI finish --target TARGET --no-device")
+        cli("finish", "--target", self.target, "--no-device")
+        self.assertEqual(read_json(self.rundir / "run-state.json")["stages"]["T7"]["reason"],
+                         "the developer asked for --no-device (start --no-device)")
+
+    def test_a_long_wait_for_a_booting_device_asks_the_developer(self) -> None:
+        self.visual_run()
+        booting = {"status": "booting", "serial": "emulator-5558", "avd": "a", "started_by_workflow": True}
+        with mock.patch("android_workflow.emulator.claim", return_value=booting):
+            first = self.next()
+            self.assertEqual(first["next"], "wait_device")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                code = main(["finish", "--target", self.target, "--skip-device", "no device: booting"])
+            self.assertNotEqual(code, 0)  # the run is waiting for its emulator: not a skip
+            lines = (self.rundir / "decisions.jsonl").read_text(encoding="utf-8").splitlines()
+            old = [dict(json.loads(line), at=json.loads(line)["at"] - 20 * 60) for line in lines]
+            (self.rundir / "decisions.jsonl").write_text("".join(json.dumps(item) + "\n" for item in old), encoding="utf-8")
+            asked = self.next()
+            self.assertEqual(asked["next"], "ask_user")
+            self.assertEqual(set(asked["options"]), {"wait", "skip"})
+            self.assertIn("--developer-said", asked["options"]["skip"])
+            self.assertEqual(self.next()["next"], "wait_device")  # the developer said wait: a new stretch
 
     def test_a_connected_device_runs_the_device_agent_and_two_fails_open_a_draft(self) -> None:
         self.visual_run()

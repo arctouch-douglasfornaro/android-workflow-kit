@@ -180,6 +180,8 @@ file with one `Timing:` line (not a heading): install / replay / hand-driven sec
 Must be >400 bytes so the CLI keeps it. Then
 `CLI log --target TARGET --stage Device --status completed --note "<verdict>"`.
 
+**Finish by writing `RUN/device-report.md` (mode `after`; `flows_ready` in `before`)**: the file is your result, the return only sums it up. The host logs completion; `CLI log … --status completed` refuses a missing, empty, stub or older-than-this-round file, and you are resumed to write it.
+
 ## Return (≤8 lines)
 
 Verdict, failed AC with observed behavior, media paths, flow path.
