@@ -6,8 +6,9 @@ description: >-
   (architecture, side effects), the attached screenshots and videos, CI, and a
   device check of base vs PR head when the PR changes UI. Posts one review
   (inline comments, verdict) only after the developer's OK. Use when the user
-  types /android-review or asks to run this review workflow on a PR.
-disable-model-invocation: true
+  types /android-review, asks to review a PR (by number, URL or branch), or
+  asks whether our review comments on a PR were addressed ("were my comments
+  addressed?", "tudo foi addressado?").
 ---
 
 # Android Review
@@ -25,8 +26,11 @@ for one exact draft id.
 ## Invocation
 
 ```text
-/android-review <PR number or URL> [--target PATH] [--no-device] [--no-media] [--no-watch]
+/android-review <PR number, URL or branch> [--target PATH] [--no-device] [--no-media] [--no-watch]
 ```
+
+A branch name is resolved to its PR by the CLI with its own `gh` account: never put
+`GH_TOKEN=$(gh auth token …)` in the shell, pass the branch to `--pr` as is.
 
 `TARGET_MAIN` = `--target`, else the current workspace if it has `settings.gradle(.kts)`.
 `CLI` is shorthand for `python3 ~/.ai/bin/android-workflow`: write the full command in Bash, never a shell variable (`$CLI` exits 127 in zsh).
@@ -45,12 +49,14 @@ developer to raise it in `#security` as well.
 ## Commands
 
 ```text
-CLI review start  --target MAIN --pr N [--worktree PATH] [--no-media]   (worktree at the PR head, pr-context.json, media)
+CLI review start  --target MAIN --pr N|BRANCH [--worktree PATH] [--no-media]  (worktree at the PR head, pr-context.json, media)
+CLI review status --target MAIN --pr N|BRANCH                            (were our comments addressed? no worktree)
 CLI setup         --target WT --source-repo MAIN                          (inherits the main checkout's profile)
 CLI review next   --target WT [--no-device]                               (the one thing to do now)
 CLI review ci     --target WT [--wait]                                    (trust CI, or wait, or the local gate)
 CLI review draft  --target WT                                             (RUN/review-draft.md + draft id)
 CLI review edit   --target WT [--drop C2]… [--set C3 "text"]… [--keep-open T1]… [--event COMMENT] [--body "…"]
+CLI review shown  --target WT --draft-id ID                               (the developer saw this draft)
 CLI review post   --target WT --draft-id ID                               (only after the developer's OK)
 CLI review answer --target WT --question "q" --answer "a"
 CLI review device --target WT --require "why"                             (Reviewer: UI effect the rule missed)
@@ -91,9 +97,12 @@ CLI gate | prebuild | device … | emulator … | log …  --target WT         (
    - `ask_user` with `show` (the draft): print `RUN/review-draft.md` **as is** (event, body, each
      inline comment with `file:line`, and in a delta round the *Threads to resolve*) and ask the
      developer: post, edit, or stop. Edits → `CLI review edit …` (`--keep-open T1` leaves one of
-     those threads open), show the new draft, ask again. Only on an explicit OK → `CLI review post --draft-id <id>`
-     with the id of the draft they saw. `refused: head_moved` → `CLI review start` again (delta round).
-     Never post on silence, on a standing preference, or with another draft id.
+     those threads open), then `CLI review next` again: it returns the new draft with `show`; print it,
+     ask again. Only on an explicit OK → `CLI review post --draft-id <id>` with the id of the draft they
+     saw. `post` refuses an id never returned with `show` (`refused: not_shown`; `CLI review shown` marks
+     one printed some other way), so an edit is never posted unseen. `refused: head_moved` →
+     `CLI review start` again (delta round). Never post on silence, on a standing preference, or with
+     another draft id.
    - `ask_user` with `show` on a **quiet** draft (`Event: none`: we already approved an earlier head and
      the delta raised nothing new): print it as is and ask: resolve the listed threads without a new
      review, keep one open (`--keep-open T1`), post a review anyway (`CLI review edit --event APPROVE`
@@ -101,7 +110,8 @@ CLI gate | prebuild | device … | emulator … | log …  --target WT         (
      --draft-id <id>` (it resolves the threads and posts no review).
    - `done`: run `also` (gives the device back), then follow the PR (step 4) unless `--no-watch`. A
      `done` whose `why` says "no new review" means the round was quiet with nothing to resolve: say so
-     in one line and keep watching.
+     in one line and keep watching. Tell the developer its `tell` line: the watch ends with this
+     session; later, `/android-review N` again or `CLI review status` answers what happened.
    Agents log their own `completed` (Planner, Reviewer, Device); `aw-media` writes
    `media-review.json` and does not log.
 4. **Watch** (default; skipped with `--no-watch`): `CLI review wait --target WT` (background, `--timeout 3300` on Claude Code)
@@ -122,6 +132,18 @@ CLI gate | prebuild | device … | emulator … | log …  --target WT         (
      72 by default, the same limit as the watch of our own PRs) → tell the developer and stop.
    The polling is the one of `CLI pr wait` (`watch.poll`): every minute, slower while nothing changes
    (up to every 5 min), back to every minute after something happened.
+
+## Were my comments addressed?
+
+"Were my comments addressed?" / "tudo foi addressado?" on a PR we reviewed →
+`CLI review status --target MAIN --pr N` (number, URL or branch; read-only, no worktree, works after
+the session that posted the review is gone). It lists each thread we opened: `addressed` (the line or
+file changed since our reviewed head, or someone replied), `open`, `resolved`, and
+`resolved_without_change_or_reply` (flag it to the developer), plus the commits since our last
+reviewed head. Relay `counts`, the open and flagged threads (`file:line`, one line each) and `next`:
+new commits → offer `/android-review N` for a delta round (it re-checks every open thread on the new
+head and proposes resolving the addressed ones). A run of that PR on disk also gets
+`RUN/review-status.md`. Nothing is posted or resolved from `status`.
 
 ## What the CLI decides (change it in `android_workflow/review.py`)
 
@@ -169,34 +191,46 @@ CLI gate | prebuild | device … | emulator … | log …  --target WT         (
   and every attachment is the same (link, status, SHA-256); any change runs the Media analyst again.
   The device is this run's own lease, as in android-workflow; with `device.dedicated` (default `true`) it is
   always an emulator the workflow started, never the developer's own emulator or phone.
-- **CI** is trusted when every required check (else every check) on the PR head passed. Pending →
+- **CI** is trusted when every required check (else every check) on the PR head passed; only those
+  fail it, an optional check failing is listed in the body as info. Pending →
   wait up to `review.ci_wait_minutes` (30), then the local gate; no check at all, or all skipped →
   the local gate for the touched modules. **Documentation only** (every changed file `.md`/`.txt`/…,
   or CI passed on the previous head and the new commits are docs only) → CI is not waited for, the
   gate never runs, and pending CI does not hold the approval (the body says why).
 - **Acceptance** is reconciled at draft time with what ran after the Reviewer: a device scenario
   `ACn …: PASS` proves an AC (FAIL makes it unmet), media shown proves it, and an attachment the tool
-  could not download is marked "not checked", never held against the author.
-- **Verdict**: any blocking finding, failing CI, a failed local gate, a device FAIL or an unmet AC
-  → `REQUEST_CHANGES`; else unverified claims (checked template items without evidence), a BLOCKED
-  device, a PARTIAL device with a device AC still open, or CI still pending → `COMMENT`; else
-  `APPROVE`. **Concerns and nits approve** (posted with it as comments; `review.approve_with_concerns:
-  false` makes concerns `COMMENT` again). Own PR → always `COMMENT` (GitHub's rule).
-  `review.allow_approve: false` → `COMMENT` instead of approve. `edit --event` rewrites the body's
-  generated first line to match the new event.
+  could not download is marked "not checked", never held against the author. Each AC keeps its
+  `source` (`pr_body` | `jira` | `template`; an AC with none whose text is a checked PR-template item
+  is `template`). In `review.json` the Reviewer marks `on_base: true` on an unmet AC the base build
+  fails the same way (a device line `ACn …: FAIL, also fails on base` does the same), and an AC that
+  waits for a product or design answer gets `status: open` (or `question: "…"`): shown as ❓ with it.
+- **Verdict** — approve with comments unless the PR itself introduces a blocker: a blocking finding,
+  failing required CI, a failed local gate, a device FAIL, or an unmet AC the PR claims →
+  `REQUEST_CHANGES`. Never from a PR-template item (listed only), a failure the base has too, or a
+  device FAIL whose every failing scenario is on the base. An AC waiting for an answer, an unproven
+  claim, or CI still pending → `COMMENT`; else `APPROVE`. A BLOCKED or PARTIAL device does not hold
+  the approval when CI (or the local gate) passed and nothing blocks: the body says what the device
+  could not verify. **Concerns and nits approve** (posted with it as comments;
+  `review.approve_with_concerns: false` makes concerns `COMMENT` again). `review.max_event: "COMMENT"`
+  caps what the CLI picks: `REQUEST_CHANGES` is then only the developer's `edit --event`. Own PR →
+  always `COMMENT` (GitHub's rule). `review.allow_approve: false` → `COMMENT` instead of approve.
+  `edit --event` rewrites the body's generated first line to match the new event.
 - **Quiet delta round**: we already approved an earlier head and the delta Reviewer, the media and
   CI found nothing new (every earlier thread addressed, no device needed) → no CI wait and no second
   review: a draft with `Event: none` that only resolves our addressed threads after the OK, or `done`
   at once when there is nothing to resolve.
 - **Body**: the headline, `verified` (what the Reviewer proved, with evidence), checks, device,
-  acceptance, other notes.
+  acceptance, other notes. The device line says what ran: "before (base) and after (this PR)" only
+  when both were captured, "after only; base replay missing (why)", or "BLOCKED — … not verified".
+  A met AC with no text is left out.
 - **Comments**: at most `review.max_inline_comments` inline (default 10, max 15), blocking first,
   then concerns, then nits (prefixed `nit:`; `review.nits_inline: false` moves them to the body); a comment off the diff's lines or past the cap goes in
   the body under *Other notes*. A finding with a valid `suggestion` carries GitHub's suggested-change
   block (the author's "Commit suggestion"); one the CLI cannot apply (off the hunk, >10 lines,
   overlapping, no change) is posted as the text fix and listed under `suggestions_as_text` in the draft result.
 - **Post**: one review via `POST /repos/{o}/{r}/pulls/{n}/reviews` pinned to the reviewed commit;
-  refused when the draft changed since the OK or the PR head moved. The PR is never merged from this mode.
+  refused when the draft changed since the OK, was never shown (`next` returning it with `show`, or
+  `review shown`; every `edit` or redraft resets it) or the PR head moved. The PR is never merged from this mode.
 - **Others' comments**: `pr-context.json` carries `other_threads` (inline threads others opened, open
   first, max 40) and `discussion` (PR comments and review bodies, max 30). A finding may repeat a point
   from one of them with more detail (`thread` → the comment links it); `replies` (agree, disagree,
@@ -219,7 +253,7 @@ CLI gate | prebuild | device … | emulator … | log …  --target WT         (
 
 Config, per project in `.ai/android-workflow.json`:
 `{"review": {"max_inline_comments": 10, "allow_approve": true, "media_max_mb": 100, "ci_wait_minutes": 30,
-"nits_inline": true, "approve_with_concerns": true}}`.
+"nits_inline": true, "approve_with_concerns": true, "max_event": null}}`.
 
 Attachments of a private repo download through the signed URL GitHub renders in the PR's
 `body_html` (`private-user-images…?jwt=`); the plain `user-attachments` link answers a login page.
@@ -235,7 +269,8 @@ In `RUN`: `pr-context.json` (with `copies`), `ticket/<KEY>.md`, `copy-diff/*.dif
 `plan.md` (UI only), `review.json`, `media-review.json`, `media/pr/`, `ci-report.json`,
 `gate-report.json` (local gate only), `device-report.md` and `media/{before,after}/` (UI only),
 `review-draft.json` / `review-draft.md`, `review-delta.diff` (delta rounds), `review-inbox.json`,
-`review-replies.json` (agent) / `review-replies-draft.json` / `review-replies.md` (watch), `stage-log.md`.
+`review-replies.json` (agent) / `review-replies-draft.json` / `review-replies.md` (watch),
+`review-status.md` (`review status`), `stage-log.md`.
 
 ## Done
 

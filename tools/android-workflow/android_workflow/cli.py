@@ -3775,10 +3775,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     pr_parser.add_argument("--section", help='body: the heading whose section to replace, e.g. "## Analytics events"')
     pr_parser.add_argument("--file", type=Path, help="body: the markdown that becomes that section")
     review_parser = subparsers.add_parser("review", help="Android Review: review an open PR, post one review after the OK")
-    review_parser.add_argument("review_action", choices=("start", "next", "ci", "draft", "edit", "post", "answer", "device", "ticket", "wait", "replies", "reply"))
+    review_parser.add_argument("review_action", choices=("start", "next", "ci", "draft", "edit", "shown", "post", "answer", "device", "ticket", "wait", "replies", "reply", "status"))
     review_parser.add_argument("--target", required=True, type=Path,
                                help="start: the app's main checkout; every other action: the review worktree")
-    review_parser.add_argument("--pr", help="start: PR number or URL")
+    review_parser.add_argument("--pr", help="start / status: PR number, URL or branch name")
     review_parser.add_argument("--worktree", type=Path, help="start: where the review worktree goes")
     review_parser.add_argument("--no-media", action="store_true", dest="no_media", help="start: do not download PR media")
     review_parser.add_argument("--no-device", action="store_true", dest="no_device")
@@ -3792,7 +3792,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                                help="edit / replies: a thread id (T1 / R1) to leave open instead of resolving (repeatable)")
     review_parser.add_argument("--event", help="edit: APPROVE | COMMENT | REQUEST_CHANGES")
     review_parser.add_argument("--body", help="edit: the review body")
-    review_parser.add_argument("--draft-id", dest="draft_id", help="post / reply: the draft id the developer approved")
+    review_parser.add_argument("--draft-id", dest="draft_id", help="shown / post / reply: the draft id the developer saw / approved")
     review_parser.add_argument("--question", help="answer: the Planner's question")
     review_parser.add_argument("--answer", help="answer: the developer's answer")
     review_parser.add_argument("--require", help="device: why the device must run although no UI file changed")
@@ -4023,7 +4023,8 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
     if args.command == "review":
         from android_workflow.review import dispatch as dispatch_review
 
-        missing = {"start": "pr", "post": "draft_id", "reply": "draft_id", "answer": "answer", "device": "require"}.get(args.review_action)
+        missing = {"start": "pr", "shown": "draft_id", "post": "draft_id", "reply": "draft_id", "answer": "answer", "device": "require",
+                   "status": "pr"}.get(args.review_action)
         if missing and not getattr(args, missing):
             raise ValueError(f"review {args.review_action} needs --{missing.replace('_', '-')}")
         if args.review_action == "answer" and not args.question:

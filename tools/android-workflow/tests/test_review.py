@@ -132,8 +132,14 @@ class PureRuleTests(unittest.TestCase):
         self.assertEqual(review.assess_ci(context, [ok], "old")["status"], "pending")
         self.assertEqual(review.assess_ci(context, [], "abc")["status"], "none")
         self.assertEqual(review.assess_ci(context, [{**ok, "outcome": "pending"}], "abc")["status"], "pending")
-        failed = review.assess_ci(context, [ok, {"name": "lint", "outcome": "failed", "required": False}], "abc")
-        self.assertEqual((failed["status"], failed["failed"]), ("failed", ["lint"]))
+        # an optional check failing is info, never "CI failing"
+        optional = review.assess_ci(context, [ok, {"name": "lint", "outcome": "failed", "required": False}], "abc")
+        self.assertEqual((optional["status"], optional["optional_failed"]), ("passed", ["lint"]))
+        failed = review.assess_ci(context, [{**ok, "outcome": "failed"}, {"name": "lint", "outcome": "failed"}], "abc")
+        self.assertEqual((failed["status"], failed["failed"], failed["optional_failed"]), ("failed", ["build"], ["lint"]))
+        # no check marked required: every check counts
+        unmarked = review.assess_ci(context, [{"name": "lint", "outcome": "failed"}], "abc")
+        self.assertEqual((unmarked["status"], unmarked["failed"]), ("failed", ["lint"]))
         skipped = review.assess_ci(context, [{"name": "x", "outcome": "pending", "required": False},
                                              {"name": "build", "outcome": "passed", "required": False}], "abc")
         self.assertEqual(skipped["status"], "pending")
@@ -149,9 +155,25 @@ class PureRuleTests(unittest.TestCase):
         self.assertEqual(review.verdict([], {"status": "failed", "failed": ["build"]}, {}, None, [], {}, True)[0],
                          "REQUEST_CHANGES")
         self.assertEqual(review.verdict([], ci_ok, {}, "fail", [], {}, True)[0], "REQUEST_CHANGES")
-        self.assertEqual(review.verdict([], ci_ok, {}, "partial", [], {}, True)[0], "COMMENT")
+        # our device could not finish: with CI green and nothing blocking, the gap does not hold the approval
+        self.assertEqual(review.verdict([], ci_ok, {}, "partial", [], {}, True)[0], "APPROVE")
+        self.assertEqual(review.verdict([], ci_ok, {}, "blocked", [{"status": "unverified", "evidence": "device"}],
+                                        {}, True)[0], "APPROVE")
+        self.assertEqual(review.verdict([], {"status": "pending"}, {}, "blocked", [], {}, True)[0], "COMMENT")
+        self.assertEqual(review.verdict([], {"status": "none"}, {"status": "passed"}, "blocked", [], {}, True)[0], "APPROVE")
         self.assertEqual(review.verdict([], ci_ok, {}, None, [{"status": "unverified"}], {}, True)[0], "COMMENT")
         self.assertEqual(review.verdict([], ci_ok, {}, None, [{"status": "unmet"}], {}, True)[0], "REQUEST_CHANGES")
+        # only what the PR itself introduces blocks: a template item, a failure the base has too, an open question
+        template = {"status": "unmet", "source": "template"}
+        self.assertEqual(review.verdict([], ci_ok, {}, None, [template, {**template, "status": "unverified"}], {}, True),
+                         ("APPROVE", []))
+        self.assertEqual(review.verdict([], ci_ok, {}, None, [{"status": "unmet", "on_base": True}], {}, True)[0], "APPROVE")
+        self.assertEqual(review.verdict([], ci_ok, {}, None, [{"status": "open"}], {}, True)[0], "COMMENT")
+        # review.max_event caps what the CLI picks by itself
+        capped = review.verdict([blocking], ci_ok, {}, None, [], {}, True, max_event="COMMENT")
+        self.assertEqual(capped[0], "COMMENT")
+        self.assertIn("edit --event REQUEST_CHANGES", capped[1][-1])
+        self.assertEqual(review.verdict([nit], ci_ok, {}, None, [], {}, True, max_event="COMMENT")[0], "APPROVE")
         self.assertEqual(review.verdict([], ci_ok, {}, None, [], {}, False)[0], "COMMENT")
         self.assertEqual(review.verdict([blocking], ci_ok, {}, None, [], {"own_pr": True}, True)[0], "COMMENT")
         # approve_with_concerns: concerns ride along an approval; an unproven claim still comments
@@ -323,7 +345,7 @@ class FlowTests(unittest.TestCase):
             drafted = review.draft(worktree)
             agent_dir = review.agent_dir_for(worktree)
             value = read_json(agent_dir / review.DRAFT_FILE)
-            self.assertEqual(drafted["event"], "COMMENT")
+            self.assertEqual(drafted["event"], "APPROVE")  # concerns approve; a template item never holds it
             self.assertEqual(len(value["comments"]), 10)
             self.assertEqual(value["comments"][0]["body"], "cache() is never invalidated")
             self.assertTrue(value["comments"][1]["body"].startswith("nit: "))
@@ -340,13 +362,19 @@ class FlowTests(unittest.TestCase):
                     mock.patch("android_workflow.watch._gh") as gh:
                 refused = review.post(worktree, drafted["draft_id"])
                 self.assertEqual((refused["status"], refused["reason"]), ("refused", "draft_changed"))
+                # the edited draft was never shown to the developer: no OK can cover it yet
+                unseen = review.post(worktree, edited["draft_id"])
+                self.assertEqual((unseen["status"], unseen["reason"]), ("refused", "not_shown"))
+                self.assertIn("review-draft.md", unseen["next"])
                 gh.assert_not_called()
+                again = review.next_action(worktree)
+                self.assertEqual((again["next"], again["draft_id"]), ("ask_user", edited["draft_id"]))
                 gh.return_value = subprocess.CompletedProcess([], 0, json.dumps({"id": 99, "html_url": "u"}), "")
                 posted = review.post(worktree, edited["draft_id"])
                 payload = json.loads(gh.call_args.kwargs["stdin"])
             self.assertEqual(posted["status"], "posted")
             self.assertEqual((payload["event"], payload["commit_id"], len(payload["comments"])),
-                             ("COMMENT", project.head, 9))
+                             ("APPROVE", project.head, 9))
             self.assertEqual(payload["comments"][1]["body"], "nit: shorter")
             self.assertIn("/pulls/7/reviews", gh.call_args.args[0][3])
             self.assertEqual(review.next_action(worktree)["next"], "done")
@@ -366,6 +394,7 @@ class FlowTests(unittest.TestCase):
             worktree = self.run_to_draft(project, {"status": "approved", "blocking": [], "acceptance": []})
             drafted = review.draft(worktree)
             self.assertEqual(drafted["event"], "APPROVE")
+            review.next_action(worktree)
             with mock.patch.object(review, "fetch_pr", return_value=fake_pr("f" * 40)), \
                     mock.patch("android_workflow.watch._gh") as gh:
                 refused = review.post(worktree, drafted["draft_id"])
@@ -412,6 +441,8 @@ class FlowTests(unittest.TestCase):
         with Project(self.CHANGE) as project:
             worktree = self.run_to_draft(project, findings)
             drafted = review.draft(worktree)
+            self.assertEqual(review.shown(worktree, "0" * 12)["reason"], "draft_changed")
+            self.assertEqual(review.shown(worktree, drafted["draft_id"])["status"], "shown")
             with mock.patch.object(review, "fetch_pr", return_value=fake_pr(project.head)), \
                     mock.patch("android_workflow.watch._gh") as gh:
                 gh.return_value = subprocess.CompletedProcess([], 0, json.dumps({"id": 1, "html_url": "u"}), "")
@@ -559,6 +590,7 @@ class FlowTests(unittest.TestCase):
                 review.edit(worktree, keep_open=["T9"])
             redrafted = review.draft(worktree)
             self.assertEqual(redrafted["draft_id"], drafted["draft_id"])
+            review.next_action(worktree)  # shows it again
             with mock.patch.object(review, "fetch_pr", return_value=fake_pr(project.head)), \
                     mock.patch("android_workflow.watch._gh") as gh, \
                     mock.patch("android_workflow.watch._graphql") as graphql:
@@ -580,6 +612,7 @@ class FlowTests(unittest.TestCase):
             context["our_threads"] = [{"id": "T_a", "path": REPO, "line": 5, "resolved": False}]
             (agent_dir / review.CONTEXT_FILE).write_text(json.dumps(context))
             drafted = review.draft(worktree)
+            review.next_action(worktree)
             with mock.patch.object(review, "fetch_pr", return_value=fake_pr(project.head)), \
                     mock.patch("android_workflow.watch._gh") as gh, \
                     mock.patch("android_workflow.watch._graphql", side_effect=[RuntimeError("forbidden"), {}]):
@@ -780,6 +813,69 @@ class DeviceTests(unittest.TestCase):
             body = read_json(agent_dir / review.DRAFT_FILE)["body"]
         self.assertEqual(drafted["event"], "APPROVE")
         self.assertIn("not verified on a device: no device: no SDK", body)
+
+    def drafted_with_device(self, project: Project, report: str, acceptance: list[dict], ci: dict | None = None,
+                            before: bool = True, after: bool = True) -> tuple[dict, dict]:
+        """A UI change whose device run ended with `report`; returns (draft result, draft json)."""
+        result = project.start()
+        worktree, agent_dir = Path(result["worktree_path"]), Path(result["run"])
+        write_profile(worktree)
+        review.next_action(worktree)
+        (agent_dir / review.SPEC_FILE).write_text(json.dumps({"status": "ready", "acceptance": [
+            {"id": row["id"], "text": row.get("text", row["id"]), "evidence": row.get("evidence", "device")}
+            for row in acceptance]}))
+        log_stage(worktree, "Planner", "completed", "AC", "host")
+        review.next_action(worktree)
+        (agent_dir / "review.json").write_text(json.dumps({"status": "approved", "blocking": [], "acceptance": [
+            {"id": row["id"], "status": row.get("status", "unverified")} for row in acceptance]}))
+        log_stage(worktree, "Reviewer", "completed", "done", "host")
+        (agent_dir / review.CI_FILE).write_text(json.dumps(ci or {"status": "passed", "passed": 1}))
+        (agent_dir / "device-report.md").write_text(report)
+        for phase, present in (("before", before), ("after", after)):
+            if present:
+                (agent_dir / "media" / phase).mkdir(parents=True, exist_ok=True)
+                (agent_dir / "media" / phase / "profile.png").write_bytes(b"png")
+        drafted = review.draft(worktree)
+        return drafted, read_json(agent_dir / review.DRAFT_FILE)
+
+    def test_our_device_gap_or_a_base_failure_does_not_hold_the_approval(self) -> None:
+        ui = {SCREEN: "package com.example\n\n@Composable\nfun ProfileScreen() {}\n"}
+        blocked = "# Status\n\nBLOCKED\n\n# Not verified\n\n- The login wall hides the profile.\n"
+        with Project(ui) as project:
+            drafted, value = self.drafted_with_device(project, blocked, [{"id": "AC1"}],
+                                                      ci={"status": "passed", "passed": 2, "optional_failed": ["lint"]})
+        self.assertEqual(drafted["event"], "APPROVE")
+        self.assertIn("Optional check(s) failing (not required): lint.", value["body"])
+        on_base = "# Status\n\nFAIL\n\n# Scenarios\n\n- AC1 profile: FAIL, also fails on base\n"
+        with Project(ui) as project:
+            drafted, value = self.drafted_with_device(project, on_base, [{"id": "AC1"}])
+        self.assertEqual(drafted["event"], "APPROVE")
+        self.assertIn("fails on the base too: not introduced by this PR", value["body"])
+        with Project(ui) as project:
+            drafted, _ = self.drafted_with_device(project, blocked, [{"id": "AC1"}], ci={"status": "pending"})
+        self.assertEqual(drafted["event"], "COMMENT")  # CI not green yet: the gap still holds it
+
+    def test_the_device_line_says_what_actually_ran(self) -> None:
+        ui = {SCREEN: "package com.example\n\n@Composable\nfun ProfileScreen() {}\n"}
+        passed = "# Status\n\nPASS\n\n# Scenarios\n\n- AC1 profile: PASS\n"
+        with Project(ui) as project:
+            _, value = self.drafted_with_device(project, passed, [{"id": "AC1", "text": "Profile shows"},
+                                                                 {"id": "AC2", "text": "", "status": "met"}])
+        self.assertIn("**Device:** PASS — before (base) and after (this PR) checked on a device.", value["body"])
+        self.assertNotIn("- ✅\n", value["body"] + "\n")  # a met AC with no text is not a row
+        self.assertIn("- ✅ Profile shows _(on device)_", value["body"])
+        with Project(ui) as project:
+            _, value = self.drafted_with_device(project, passed, [{"id": "AC1"}], before=False)
+        self.assertIn("**Device:** PASS — after (this PR) only, on a device; base replay missing.", value["body"])
+        self.assertNotIn("before (base) and after", value["body"])
+        blocked = "# Status\n\nBLOCKED\n\n# Not verified\n\n- The login wall hides the profile.\n"
+        with Project(ui) as project:
+            _, value = self.drafted_with_device(project, blocked, [{"id": "AC1"}], before=False, after=False)
+        self.assertIn("**Device:** BLOCKED — the device could not reach the changed screen; not verified. "
+                      "Not covered: The login wall hides the profile.", value["body"])
+        with Project(ui) as project:
+            _, value = self.drafted_with_device(project, "# Status\n\nPARTIAL\n", [{"id": "AC1"}], before=False, after=False)
+        self.assertIn("**Device:** PARTIAL — no before or after capture was saved", value["body"])
 
     def test_the_reviewer_can_require_the_device_never_remove_it(self) -> None:
         with Project({REPO: "package com.example\n\nclass ProfileRepository\n"}) as project:
@@ -1030,6 +1126,40 @@ class SignalTests(unittest.TestCase):
             rows = {r["id"]: r["status"] for r in review._acceptance(run, context, report)}
         self.assertEqual(rows, {"AC1": "met", "AC2": "unmet", "AC3": "unchecked", "AC4": "unverified"})
 
+    def test_acceptance_knows_template_items_base_failures_and_open_questions(self) -> None:
+        report = "# Status\n\nFAIL\n\n# Scenarios\n\n- AC2 empty state: FAIL, also fails on base\n- AC3 retry: FAIL\n"
+        self.assertEqual(review.device_on_base(report), {"AC2"})
+        with tempfile.TemporaryDirectory() as folder:
+            run = Path(folder)
+            (run / "review.json").write_text(json.dumps({"acceptance": [
+                {"id": "AC1", "status": "unmet"}, {"id": "AC2", "status": "unverified"},
+                {"id": "AC3", "status": "unverified"}, {"id": "AC4", "status": "unmet", "question": "Which copy?"},
+                {"id": "AC5", "status": "unmet", "on_base": True}]}))
+            (run / review.SPEC_FILE).write_text(json.dumps({"acceptance": [
+                {"id": "AC1", "text": "Tested on device."}, {"id": "AC2", "text": "b", "evidence": "device"},
+                {"id": "AC3", "text": "c", "evidence": "device"}, {"id": "AC4", "text": "d"}, {"id": "AC5", "text": "e"}]}))
+            context = {"template_items": [{"id": "T1", "text": "Tested on device", "checked": True},
+                                          {"id": "T2", "text": "e", "checked": False}]}
+            rows = {r["id"]: r for r in review._acceptance(run, context, report)}
+        self.assertEqual(rows["AC1"]["source"], "template")  # a checked template item, by its text
+        self.assertIsNone(rows["AC5"]["source"])              # unchecked items are no claims
+        self.assertEqual((rows["AC2"]["status"], rows["AC2"].get("on_base")), ("unmet", True))
+        self.assertEqual((rows["AC3"]["status"], rows["AC3"].get("on_base")), ("unmet", None))
+        self.assertEqual((rows["AC4"]["status"], rows["AC4"]["question"]), ("open", "Which copy?"))
+        self.assertTrue(rows["AC5"]["on_base"])
+        event, reasons = review.verdict([], {"status": "passed"}, {}, None, list(rows.values()), {}, True)
+        self.assertEqual((event, reasons), ("REQUEST_CHANGES", ["1 acceptance criterion/criteria not met"]))  # AC3 only
+
+    def test_max_event_config(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            target = Path(folder)
+            (target / ".ai").mkdir()
+            self.assertIsNone(review.review_config(target)["max_event"])
+            (target / ".ai/android-workflow.json").write_text(json.dumps({"review": {"max_event": "comment"}}))
+            self.assertEqual(review.review_config(target)["max_event"], "COMMENT")
+            (target / ".ai/android-workflow.json").write_text(json.dumps({"review": {"max_event": "nope"}}))
+            self.assertIsNone(review.review_config(target)["max_event"])
+
     def test_nits_alone_approve(self) -> None:
         nit = [{"id": "S1", "severity": "nit", "problem": "rename", "path": REPO, "line": 4}]
         event, reasons = review.verdict(nit, {"status": "passed"}, {}, "pass",
@@ -1186,14 +1316,100 @@ class ReplyWatchTests(unittest.TestCase):
         self.assertEqual((waited["status"], waited["replies_pending"]), ("new_commits", 1))
 
 
+class StatusTests(unittest.TestCase):
+    """`CLI review status`: were our comments addressed? Read from GitHub, no worktree needed."""
+
+    @staticmethod
+    def pr() -> dict:
+        def note(login: str, body: str, kind: str = "User") -> dict:
+            return {"author": {"__typename": kind, "login": login}, "body": body, "url": f"u/{body}"}
+
+        def node(tid: str, path: str, *comments: dict, resolved: bool = False, outdated: bool = False) -> dict:
+            return {"id": tid, "path": path, "line": 4, "isResolved": resolved, "isOutdated": outdated,
+                    "comments": {"nodes": list(comments)}}
+
+        return {"number": 7, "url": "https://g/pull/7", "state": "OPEN", "headRefOid": "b" * 40,
+                "reviews": {"nodes": [{"author": {"login": "bob"}, "state": "COMMENTED", "commit": {"oid": "a" * 40}}]},
+                "reviewThreads": {"nodes": [
+                    node("T_line", REPO, note("bob", "cache never expires"), outdated=True),
+                    node("T_file", SCREEN, note("bob", "name it")),
+                    node("T_reply", "B.kt", note("bob", "why?"), note("alice", "on purpose: see ticket")),
+                    node("T_open", "C.kt", note("bob", "null here"), note("ci[bot]", "coverage", "Bot")),
+                    node("T_silent", "D.kt", note("bob", "leak"), resolved=True),
+                    node("T_done", REPO, note("bob", "rename"), resolved=True, outdated=True),
+                    node("T_theirs", REPO, note("carol", "mine"))]}}
+
+    def test_each_thread_we_opened_gets_what_happened_to_it(self) -> None:
+        rows = {t["thread"]: t for t in review.comment_status(self.pr(), "bob", "a" * 40, [SCREEN])}
+        self.assertEqual({key: row["status"] for key, row in rows.items()}, {
+            "T_line": "addressed", "T_file": "addressed", "T_reply": "addressed", "T_open": "open",
+            "T_silent": "resolved_without_change_or_reply", "T_done": "resolved"})
+        self.assertIn(f"{SCREEN} changed since aaaaaaa", rows["T_file"]["evidence"])
+        self.assertEqual(rows["T_reply"]["last_reply"]["author"], "alice")
+        self.assertEqual(review.comment_status(self.pr(), "bob", None, [])[0]["status"], "open")  # open first
+
+    def test_status_reads_github_and_suggests_a_delta_round(self) -> None:
+        compare = json.dumps({"status": "ahead", "commits": [{"sha": "c" * 40, "commit": {"message": "Fix cache\n\nbody"}}],
+                              "files": [{"filename": SCREEN}]})
+        _TMP.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=_TMP) as folder:
+            main = Path(folder) / "app"
+            run = Path(folder) / "wt-review-PR-7" / ".ai" / "workflow" / "PR-7"
+            run.mkdir(parents=True)
+            main.mkdir()
+            with mock.patch("android_workflow.watch._remote", return_value=("github.com", "org/app")), \
+                    mock.patch("android_workflow.watch.github_env", return_value={"GH_TOKEN": "t"}), \
+                    mock.patch("android_workflow.watch._graphql", return_value={"viewer": {"login": "bob"},
+                                                                                 "repository": {"pullRequest": self.pr()}}), \
+                    mock.patch("android_workflow.watch._gh") as gh:
+                gh.side_effect = [subprocess.CompletedProcess([], 0, "7\n", ""),
+                                  subprocess.CompletedProcess([], 0, compare, "")]
+                result = review.status(main, "alice/APP-12-load")
+            branch_call, compare_call = gh.call_args_list
+            summary = (run / review.STATUS_FILE).read_text()
+        self.assertEqual(branch_call.args[0][:3], ["pr", "view", "alice/APP-12-load"])
+        self.assertEqual(branch_call.kwargs["env"], {"GH_TOKEN": "t"})  # the CLI's own account, no GH_TOKEN in the shell
+        self.assertIn(f"repos/org/app/compare/{'a' * 40}...{'b' * 40}", compare_call.args[0][1])
+        self.assertEqual((result["pr"], result["reviewed_head"]), (7, "a" * 40))
+        self.assertEqual(result["commits_since"], [{"sha": "ccccccc", "message": "Fix cache"}])
+        self.assertEqual(result["counts"], {"addressed": 3, "open": 1, "resolved": 1, "resolved_without_change_or_reply": 1})
+        self.assertEqual([t["thread"] for t in result["flagged"]], ["T_silent"])
+        self.assertIn("/android-review 7 for a delta round", result["next"])
+        self.assertIn("⚠️ resolved without a change or a reply", summary)
+
+    def test_start_takes_a_branch_name(self) -> None:
+        with Project({REPO: "package com.example\n\nclass ProfileRepository\n"}) as project:
+            with mock.patch("android_workflow.watch._gh",
+                            return_value=subprocess.CompletedProcess([], 0, "7\n", "")) as gh, \
+                    mock.patch.object(review, "fetch_pr", return_value=fake_pr(project.head)) as fetch, \
+                    mock.patch.object(review, "signed_media", return_value={}):
+                result = review.start(project.main, "alice/APP-12-load")
+            self.assertEqual((result["status"], result["pr"]), ("ready", 7))
+            self.assertEqual(fetch.call_args.args[2], 7)
+            self.assertEqual(gh.call_args.args[0][:3], ["pr", "view", "alice/APP-12-load"])
+        with mock.patch("android_workflow.watch._gh", return_value=subprocess.CompletedProcess([], 1, "", "no pr")):
+            with self.assertRaises(ValueError):
+                review.resolve_pr({}, "org/app", "gone-branch")
+
+    def test_done_says_the_watch_ends_with_the_session(self) -> None:
+        done = review._done({"main": "/app", "posted": []}, {"number": 7}, "posted")
+        self.assertIn("/android-review 7", done["tell"])
+        self.assertIn("CLI review status --target /app --pr 7", done["tell"])
+
+
 class SkillContractTests(unittest.TestCase):
     def test_the_skill_names_every_review_command_the_cli_has(self) -> None:
         from android_workflow.paths import KIT_ROOT
 
         text = (KIT_ROOT / "skills/android-review/SKILL.md").read_text(encoding="utf-8")
-        for action in ("start", "next", "ci", "draft", "edit", "post", "answer", "device", "ticket", "wait", "replies", "reply"):
+        for action in ("start", "next", "ci", "draft", "edit", "shown", "post", "answer", "device", "ticket", "wait", "replies",
+                       "reply", "status"):
             self.assertIn(f"CLI review {action}", text)
         self.assertIn("Nothing reaches GitHub before the developer's OK", text)
+        # the model routes "were my comments addressed?" here: the skill is not slash-only
+        front = text.split("---", 2)[1]
+        self.assertNotIn("disable-model-invocation", front)
+        self.assertIn("comments on a PR were addressed", " ".join(front.split()))
 
 
 if __name__ == "__main__":
