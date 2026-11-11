@@ -855,6 +855,28 @@ class DeviceTests(unittest.TestCase):
             drafted, _ = self.drafted_with_device(project, blocked, [{"id": "AC1"}], ci={"status": "pending"})
         self.assertEqual(drafted["event"], "COMMENT")  # CI not green yet: the gap still holds it
 
+    def test_the_device_line_says_what_actually_ran(self) -> None:
+        ui = {SCREEN: "package com.example\n\n@Composable\nfun ProfileScreen() {}\n"}
+        passed = "# Status\n\nPASS\n\n# Scenarios\n\n- AC1 profile: PASS\n"
+        with Project(ui) as project:
+            _, value = self.drafted_with_device(project, passed, [{"id": "AC1", "text": "Profile shows"},
+                                                                 {"id": "AC2", "text": "", "status": "met"}])
+        self.assertIn("**Device:** PASS — before (base) and after (this PR) checked on a device.", value["body"])
+        self.assertNotIn("- ✅\n", value["body"] + "\n")  # a met AC with no text is not a row
+        self.assertIn("- ✅ Profile shows _(on device)_", value["body"])
+        with Project(ui) as project:
+            _, value = self.drafted_with_device(project, passed, [{"id": "AC1"}], before=False)
+        self.assertIn("**Device:** PASS — after (this PR) only, on a device; base replay missing.", value["body"])
+        self.assertNotIn("before (base) and after", value["body"])
+        blocked = "# Status\n\nBLOCKED\n\n# Not verified\n\n- The login wall hides the profile.\n"
+        with Project(ui) as project:
+            _, value = self.drafted_with_device(project, blocked, [{"id": "AC1"}], before=False, after=False)
+        self.assertIn("**Device:** BLOCKED — the device could not reach the changed screen; not verified. "
+                      "Not covered: The login wall hides the profile.", value["body"])
+        with Project(ui) as project:
+            _, value = self.drafted_with_device(project, "# Status\n\nPARTIAL\n", [{"id": "AC1"}], before=False, after=False)
+        self.assertIn("**Device:** PARTIAL — no before or after capture was saved", value["body"])
+
     def test_the_reviewer_can_require_the_device_never_remove_it(self) -> None:
         with Project({REPO: "package com.example\n\nclass ProfileRepository\n"}) as project:
             result = project.start()

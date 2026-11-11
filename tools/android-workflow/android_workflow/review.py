@@ -1580,6 +1580,39 @@ def device_not_verified(report: str, limit: int = 3) -> list[str]:
     return [item for item in items if item][:limit]
 
 
+def _captured(folder: Path) -> bool:
+    return folder.is_dir() and any(path.is_file() and not path.name.startswith(".") for path in folder.rglob("*"))
+
+
+def _before_missing(agent_dir: Path) -> str:
+    """Why the base was not replayed, from `replay-before.json` or the run's `device_before` note."""
+    replayed = _read(agent_dir / "replay-before.json")
+    if replayed.get("reason") or replayed.get("status") not in (None, "replayed", "partial"):
+        return str(replayed.get("reason") or f"replay {replayed.get('status')}")
+    note = str(_read(agent_dir / "run-state.json").get("device_before") or "")
+    return re.sub(r"^(late:\s*)?(skipped:?\s*)?", "", note).strip()
+
+
+def device_line(agent_dir: Path, status: str, report: str) -> str:
+    """The body's device line from what actually ran: the verdict, then which builds were captured."""
+    word = str(status or "").upper() or "NOT RUN"
+    gaps = device_not_verified(report)
+    not_covered = " Not covered: " + "; ".join(g.rstrip(".") for g in gaps) + "." if gaps and word != "PASS" else ""
+    if word == "BLOCKED":
+        return "BLOCKED — the device could not reach the changed screen; not verified." + not_covered
+    before, after = _captured(agent_dir / "media" / "before"), _captured(agent_dir / "media" / "after")
+    if before and after:
+        what = "before (base) and after (this PR) checked on a device."
+    elif after:
+        why = _before_missing(agent_dir)
+        what = "after (this PR) only, on a device; base replay missing" + (f" ({why})" if why else "") + "."
+    elif before:
+        what = "only the base was captured; nothing on this PR's head."
+    else:
+        what = "no before or after capture was saved: not verified on screen."
+    return f"{word} — {what}{not_covered}"
+
+
 def _acceptance(agent_dir: Path, context: dict[str, Any] | None = None,
                 device_report: str = "", target: Path | None = None) -> list[dict[str, Any]]:
     """One row per AC, reconciled with everything that ran after the Reviewer wrote it: a device
@@ -1748,21 +1781,22 @@ def draft(target: Path, allow_quiet: bool = True) -> dict[str, Any]:
                      f"{context['head'][:7]}: the AC show static UI."
                      + (" Not covered: " + "; ".join(g.rstrip(".") for g in gaps) + "." if gaps and str(status).upper() != "PASS" else ""))
     elif device:
-        status = device_report_status(report) if report else device
-        gaps = device_not_verified(report)
-        lines.append(f"**Device:** {str(status).upper()} — before (base) and after (this PR) checked on a device."
-                     + (" Not covered: " + "; ".join(g.rstrip(".") for g in gaps) + "." if gaps and status != "PASS" else ""))
+        lines.append("**Device:** " + device_line(agent_dir, (device_report_status(report) if report else "") or device,
+                                                  report))
     else:
         lines.append(f"**Device:** not verified on a device: {state.get('device_skipped') or 'no device available'}.")
     render_met = rendered_met(target)
     if render_met and RENDER_PROOF not in report:
         lines.append(f"**Renders:** {', '.join(render_met)} shown by JVM renders (states the device does not reach).")
-    if acceptance:
+    # A met AC with no text says nothing ("- ✅"); any other row without text shows its id.
+    shown_rows = [{**row, "text": str(row.get("text") or "").strip() or row["id"]} for row in acceptance
+                  if str(row.get("text") or "").strip() or row["status"] != "met"]
+    if shown_rows:
         lines.append("")
         lines.append("**Acceptance criteria**")
         mark = {"met": "✅", "unmet": "❌", "unverified": "⚠️ not verified:", "open": "❓ open:",
                 "unchecked": "➖ not checked (the attachment could not be downloaded):"}
-        for row in acceptance:
+        for row in shown_rows:
             source = " _(PR template)_" if row.get("source") == "template" else ""
             by = {"device": " _(on device)_", "render": " _(in a JVM render)_",
                   "media": " _(in the attached media)_"}.get(str(row.get("proved_by")), "")

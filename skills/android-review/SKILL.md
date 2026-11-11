@@ -202,7 +202,9 @@ CLI gate | prebuild | device … | emulator … | log …  --target WT         (
   review: a draft with `Event: none` that only resolves our addressed threads after the OK, or `done`
   at once when there is nothing to resolve.
 - **Body**: the headline, `verified` (what the Reviewer proved, with evidence), checks, device,
-  acceptance, other notes.
+  acceptance, other notes. The device line says what ran: "before (base) and after (this PR)" only
+  when both were captured, "after only; base replay missing (why)", or "BLOCKED — … not verified".
+  A met AC with no text is left out.
 - **Comments**: at most `review.max_inline_comments` inline (default 10, max 15), blocking first,
   then concerns, then nits (prefixed `nit:`; `review.nits_inline: false` moves them to the body); a comment off the diff's lines or past the cap goes in
   the body under *Other notes*. A finding with a valid `suggestion` carries GitHub's suggested-change
