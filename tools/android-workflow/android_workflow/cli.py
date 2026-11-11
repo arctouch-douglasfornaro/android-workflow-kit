@@ -3198,6 +3198,23 @@ def connected_device(target: Path) -> str | None:
     return None
 
 
+def _waiting_for_device(agent_dir: Path) -> bool:
+    """The run's latest decision is a `wait_device` for a device starting for it."""
+    from android_workflow.decide import BOOTING, DECISIONS_FILE
+
+    try:
+        lines = (agent_dir / DECISIONS_FILE).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    for line in reversed(lines):
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue
+        return item.get("next") == "wait_device" and str(item.get("why") or "").startswith(BOOTING)
+    return False
+
+
 def finish_run(
     target: Path,
     skip_device: str | None = None,
@@ -3205,22 +3222,41 @@ def finish_run(
     no_device: bool = False,
     keep_device: str | None = None,
     accept_partial: str | None = None,
+    developer_said: str | None = None,
 ) -> dict[str, Any]:
     """Final check before the PR. With `draft`, unresolved checks become known issues of a draft PR.
     `accept_partial` is the developer's answer to a PARTIAL device check: ship it ready for review,
     with what stays unverified disclosed in the PR.
 
     `skip_device` is refused while a device is connected: "no device" is checked, not believed. The
-    developer's own `--no-device` (`no_device`) is the only way to skip a device that is there.
+    developer's own `--no-device` (`no_device`) is the only way to skip a device that is there, and it
+    needs proof the developer asked: `start --no-device` on record, or their words (`developer_said`),
+    which the stage log and the PR quote. Nothing claims the developer asked without one of them.
     `keep_device` (a PR feedback round with nothing visible on the device) keeps an earlier device PASS
     of this run instead of verifying again; the reason is logged.
     """
     errors = implementation_errors(target)
     if errors:
         raise ValueError("Implementer incomplete: " + "; ".join(errors))
-    if no_device and not skip_device:
-        skip_device = "the developer asked for --no-device"
     agent_dir = run_dir(target)
+    said = " ".join((developer_said or "").split())
+    if no_device or (skip_device and "developer" in skip_device.lower()):
+        recorded = (read_json(agent_dir / "run-state.json") if (agent_dir / "run-state.json").is_file() else {}).get("no_device")
+        if not recorded and not said:
+            raise ValueError(
+                "the developer did not ask to skip the device in this run (no `start --no-device` on record): "
+                "run the Device stage (`CLI next`), `finish --draft \"<what blocks it>\"`, or, only if the developer "
+                "said so, pass their words verbatim with `--developer-said \"…\"`"
+            )
+        if said:
+            skip_device = f'the developer said: "{said}"'
+        elif no_device and not skip_device:
+            skip_device = "the developer asked for --no-device (start --no-device)"
+    elif skip_device and not draft and _waiting_for_device(agent_dir):
+        raise ValueError(
+            "an emulator is still starting for this run (the last decision was `wait_device`): wait for it "
+            "(`CLI emulator --target TARGET --wait`, then `CLI next`); `next` asks the developer when the wait runs long"
+        )
     spec = read_json(agent_dir / "ticket-spec.json")
     if skip_device and not no_device and not draft and "T7" in spec["route"]:
         serial = connected_device(target)
@@ -3443,7 +3479,7 @@ def mark_moved_copies(target: Path, ticket_id: str) -> list[str]:
 
 
 def run(target: Path, ticket: dict[str, Any], take_over: bool = False,
-        review_files: list[str] | None = None) -> dict[str, Any]:
+        review_files: list[str] | None = None, no_device: bool = False) -> dict[str, Any]:
     started = time.monotonic()
     ensure_gitignore(target)
     bootstrap(target)
@@ -3463,6 +3499,7 @@ def run(target: Path, ticket: dict[str, Any], take_over: bool = False,
     write_json(agent_dir / "ticket-spec.json", spec)
     write_json(agent_dir / TOOLKIT_FINGERPRINT_FILE, {"files": toolkit_fingerprint()})
     kept = still_valid_verdicts(target, agent_dir)
+    previous_state = read_json(agent_dir / "run-state.json") if (agent_dir / "run-state.json").is_file() else {}
     # Starting a ticket again is a new run: verdicts of the previous one must not carry over,
     # except a review or device verdict recorded for exactly the source that is there now.
     for verdict in RUN_VERDICTS:
@@ -3492,6 +3529,10 @@ def run(target: Path, ticket: dict[str, Any], take_over: bool = False,
         "created_at": int(time.time()),
         "updated_at": int(time.time()),
     }
+    if no_device or previous_state.get("no_device"):
+        # The developer's `--no-device`, on record for this ticket: only it lets `finish --no-device` skip
+        # the device without the developer's own words (`--developer-said`).
+        state["no_device"] = "start --no-device" if no_device else previous_state["no_device"]
     attach_pending_setup(target, agent_dir, state, metrics)
     write_json(agent_dir / "stage-metrics.json", metrics)
     question = pending_question(spec, state["answers"])
@@ -3595,6 +3636,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     start_parser.add_argument("--reproduction")
     start_parser.add_argument("--overrides", type=Path)
     start_parser.add_argument("--level", choices=LEVELS, help="overrides the level the CLI picks")
+    start_parser.add_argument("--no-device", action="store_true", dest="no_device",
+                              help="the developer passed --no-device: recorded, so `finish --no-device` may skip the device")
     start_parser.add_argument("--take-over", action="store_true", dest="take_over",
                               help="start here although another ticket's agent is still logged as working in this "
                                    "checkout (its session is gone)")
@@ -3640,7 +3683,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     finish_parser.add_argument(
         "--no-device", action="store_true",
-        help="the developer asked for --no-device: skip the Device stage even with a device connected",
+        help="skip the Device stage even with a device connected: needs `start --no-device` or --developer-said",
+    )
+    finish_parser.add_argument(
+        "--developer-said", metavar="QUOTE", dest="developer_said",
+        help="the developer's own words asking to skip the device, verbatim; recorded in the stage log and the PR",
     )
     finish_parser.add_argument(
         "--keep-device", metavar="REASON",
@@ -3850,7 +3897,7 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
             raise ValueError("start requires --ticket or --id and --title")
         if args.overrides:
             configure(target, args.overrides)
-        result = run(target, ticket_from_flags(args), take_over=args.take_over)
+        result = run(target, ticket_from_flags(args), take_over=args.take_over, no_device=args.no_device)
         from android_workflow.skills import refresh as refresh_skills
 
         refresh_skills(target)  # which Android skills this ticket needs, from the ticket and its likely files
@@ -3919,7 +3966,7 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
         with run_lock(target):
             return finish_run(
                 target, skip_device=args.skip_device, draft=args.draft, no_device=args.no_device,
-                keep_device=args.keep_device, accept_partial=args.accept_partial,
+                keep_device=args.keep_device, accept_partial=args.accept_partial, developer_said=args.developer_said,
             ), 0
     if args.command == "prebuild":
         from android_workflow.prebuild import current_status, start_prebuild, wait_prebuild

@@ -117,10 +117,10 @@ class GradleArgsTests(unittest.TestCase):
 
 
 class DeviceCheckTests(unittest.TestCase):
-    def finish_project(self, root: Path) -> None:
+    def finish_project(self, root: Path, *start: str) -> None:
         with contextlib.redirect_stdout(io.StringIO()):
             main(["start", "--target", str(root), "--id", "D-1", "--title", "Change ProfileScreen", "--type", "feature",
-                  "--surfaces", "ui"])
+                  "--surfaces", "ui", *start])
         (root / "app/src/main/java/com/example/ProfileScreen.kt").write_text("package com.example\nclass P\n", encoding="utf-8")
         notes(root)
         main(["log", "--target", str(root), "--stage", "Implementer", "--status", "completed", "--tokens", "1"])
@@ -133,14 +133,15 @@ class DeviceCheckTests(unittest.TestCase):
             with mock.patch.object(cli, "connected_device", return_value="emulator-5554"):
                 _, refused = quiet("finish", "--target", str(root), "--skip-device", "no device")
                 state_after_refusal = read_json(run_dir(root) / "run-state.json")["status"]
-                _, allowed = quiet("finish", "--target", str(root), "--skip-device", "developer passed --no-device", "--no-device")
+                _, allowed = quiet("finish", "--target", str(root), "--skip-device", "developer passed --no-device", "--no-device",
+                                    "--developer-said", "no device for this one")
         self.assertEqual(refused, 2)
         self.assertNotEqual(state_after_refusal, "completed")
         self.assertEqual(allowed, 0)
 
     def test_no_device_alone_skips_the_device(self) -> None:
         with GitProject() as root:
-            self.finish_project(root)
+            self.finish_project(root, "--no-device")
             with mock.patch.object(cli, "connected_device", return_value="emulator-5554"):
                 result, code = quiet("finish", "--target", str(root), "--no-device")
         self.assertEqual(code, 0)

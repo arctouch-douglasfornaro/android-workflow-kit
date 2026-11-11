@@ -117,7 +117,7 @@ CLI resume   --target T --question-id Q --answer "…" CLI update-spec --target 
 CLI prebuild --target T [--wait [--timeout S]|--status] [--force]   CLI gate     --target T
 CLI emulator --target T [--wait] [--wait-free] [--stop]            CLI team     --target T [--check]
 CLI skills   --target T [--add NAME] [--drop NAME]    CLI delta    --target T   (since the last review)
-CLI finish   --target T [--skip-device "r"] [--no-device] [--draft "r"] [--accept-partial "what"]
+CLI finish   --target T [--skip-device "r"] [--no-device [--developer-said "quote"]] [--draft "r"] [--accept-partial "what"]
 CLI deliver  --target T [--subject "ID: …"] [--no-push|--no-pr]
 CLI log --target T --stage <Role> --status started --note "<what it is about to do>"
 CLI log --target T --stage <Role> --status completed --note "…" [--file P]… [--tokens N] [--wait-seconds S]
@@ -156,7 +156,7 @@ CLI status|list --target T                          CLI clean --target T [--tick
    `needs_setup_agent` → spawn `aw-setup` with the JSON; its questions are batched to the user
    once; a missing formatter or app id never blocks a domain-only ticket.
 3. **Ticket:** `CLI start` (add `--type bug --reproduction "..."`, `--acceptance "a|b"`,
-   `--surfaces` when known, and the developer's `--level`). It writes `ticket-spec.json` (with the
+   `--surfaces` when known, and the developer's `--level` and `--no-device`). It writes `ticket-spec.json` (with the
    level the rules give) and `change-set-map.json` (the likely files).
 4. **From here on, `CLI next` decides.** Run `CLI next --target TARGET [--no-device] [--no-watch]`
    and do the one thing it returns, then run it again. It reads the run's files (state, verdicts,
@@ -193,7 +193,8 @@ CLI status|list --target T                          CLI clean --target T [--tick
      `next`. A `wait` with `if_returned`: when that agent already returned, run it (its `completed`
      was never logged, so `next` would wait forever). `wait_device` starting with `booting`: an
      emulator is starting for this run (`CLI emulator --wait`); otherwise it names the run holding each
-     device and `CLI emulator --wait-free` returns once this run has one.
+     device and `CLI emulator --wait-free` returns once this run has one. Past `device.wait_max_seconds`
+     (900) of waiting it answers `ask_user` instead (keep waiting / JVM renders / skip the device).
    - `spawn` with `with_agent` (route `both`): spawn both in the same turn: `aw-device` for the AC that
      need a running app and the `with_agent` (`aw-media` mode `render`) for `render_ac`, the states the
      device does not reach. Tell the Device agent those AC are the renders' and not to spend its budget on them.
@@ -207,6 +208,9 @@ CLI status|list --target T                          CLI clean --target T [--tick
    - `replay_before`: run `command` (the saved flows on the cached base APK, no agent: the `before`
      column the run could not capture earlier), then `next`.
    - `finish`: run `command` as is. With `draft`, the PR opens as a draft listing what is open.
+     **Never skip the device on your own.** `finish --no-device` is refused unless the run was started
+     with `--no-device` or `--developer-said "<the developer's words, verbatim>"` quotes them; the stage log
+     and the PR quote those words, and nothing says the developer asked otherwise.
    - `ask_user`: ask `question` once (batched), then run `then`. With `options` (a PARTIAL device
      check), offer them as the choices and run the one the developer picks.
    - `watch` / `done`: step 5 / the Done summary; run `also` (`CLI emulator --stop`: gives the device

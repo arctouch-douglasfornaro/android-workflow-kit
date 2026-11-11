@@ -36,6 +36,7 @@ BEFORE_BUDGET_SECONDS = 600  # the Device `before` agent stops here: the Impleme
 AFTER_BUDGET_SECONDS = 300   # the Device `after` agent: replay, judge, a few hand-driven checks
 DECISIONS_FILE = "decisions.jsonl"
 BOOTING = "booting"  # how a `wait_device` for a device starting for this run begins its `why`
+DEVICE_WAIT_MAX_SECONDS = 900  # `device.wait_max_seconds`: past this, `wait_device` becomes `ask_user`
 
 
 # --- level -------------------------------------------------------------------------------------
@@ -256,6 +257,7 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
     state = load_state(target)
     spec = _read(agent_dir / "ticket-spec.json")
     stages = state.get("stages") or {}
+    no_device = no_device or bool(state.get("no_device"))  # `start --no-device`: the developer's flag, recorded
     if state.get("status") == "paused" and state.get("pending_question"):
         question = state["pending_question"]
         return _answer("ask_user", "a business question is open", question=question,
@@ -456,10 +458,12 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
                 waiting_render = _render_for_both(target, agent_dir, spec, proof, team, review, fingerprint, state, record)
                 if waiting_render:
                     return waiting_render
-            return _finish(spec, skip="the developer asked for --no-device", no_device=True)
+            return _finish(spec, skip="the developer asked for --no-device", no_device=True,
+                           recorded=bool(state.get("no_device")))
         serial, waiting, reason = _device_for(target, agent_dir, record)
         if waiting is not None:
-            return waiting
+            renders = render.route(target, spec, {**state, "render": {**(state.get("render") or {}), "prefer": "render"}})
+            return _bounded_wait(target, agent_dir, waiting, renders["mode"] == "render")
         if serial:
             spawn = _spawn("aw-device", "the change passed the gate and the review: verify it on the device",
                            stage="Device", mode="after", serial=serial,
@@ -509,9 +513,11 @@ def _want_device(agent_dir: Path) -> None:
         pass
 
 
-def _finish(spec: dict[str, Any], skip: str | None = None, no_device: bool = False) -> dict[str, Any]:
+def _finish(spec: dict[str, Any], skip: str | None = None, no_device: bool = False, recorded: bool = True) -> dict[str, Any]:
     if no_device:
-        return _answer("finish", "every check passed", command="CLI finish --target TARGET --no-device")
+        # `finish --no-device` needs the developer's flag on record (`start --no-device`) or their own words.
+        said = "" if recorded else ' --developer-said "<the developer\'s words asking to skip the device, verbatim>"'
+        return _answer("finish", "every check passed", command="CLI finish --target TARGET --no-device" + said)
     if skip:
         return _answer("finish", "every check passed; " + skip, command=f'CLI finish --target TARGET --skip-device "{skip}"')
     return _answer("finish", "every check passed", command="CLI finish --target TARGET")
@@ -611,8 +617,10 @@ def _device_before(target: Path, agent_dir: Path, spec: dict[str, Any], state: d
         return _skip_before(target, f"no base APK (prebuild {build.get('status')})", record)
     serial, waiting, reason = _device_for(target, agent_dir, record)
     if waiting is not None:
-        # Booting for this run: wait for it. Every device busy: the late `before` (after the `after`) covers it.
-        return waiting if waiting["why"].startswith(BOOTING) else None
+        # Booting for this run: wait for it (bounded). Every device busy: the late `before` (after the `after`) covers it.
+        if not waiting["why"].startswith(BOOTING) or _waited_too_long(target, agent_dir):
+            return None
+        return waiting
     if not serial:
         return _skip_before(target, f"no device ({reason})", record)
     if record:
@@ -670,6 +678,59 @@ def _device_for(target: Path, agent_dir: Path, record: bool) -> tuple[str | None
         return None, _answer("ask_user", "a phone waits for its USB-debugging prompt",
                              question="accept USB debugging on the phone", then="CLI next --target TARGET"), ""
     return None, None, str(current.get("reason") or state or "no device")
+
+
+def device_wait_max_seconds(target: Path) -> float:
+    from android_workflow.emulator import _overrides
+
+    try:
+        return float(_overrides(target).get("wait_max_seconds") or DEVICE_WAIT_MAX_SECONDS)
+    except (TypeError, ValueError, OSError):
+        return float(DEVICE_WAIT_MAX_SECONDS)
+
+
+def device_waiting_since(agent_dir: Path) -> float | None:
+    """When the current stretch of `wait_device` answers began: the trailing decisions that are only waits
+    (`wait_device`, `wait`, `wait_prebuild`). Any other answer, an `ask_user` included, ends a stretch."""
+    try:
+        lines = (agent_dir / DECISIONS_FILE).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    since = None
+    for line in reversed(lines):
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue
+        if item.get("next") not in {"wait_device", "wait", "wait_prebuild"}:
+            break
+        if item.get("next") == "wait_device":
+            since = float(item.get("at") or 0) or since
+    return since
+
+
+def _waited_too_long(target: Path, agent_dir: Path) -> bool:
+    since = device_waiting_since(agent_dir)
+    return since is not None and time.time() - since > device_wait_max_seconds(target)
+
+
+def _bounded_wait(target: Path, agent_dir: Path, waiting: dict[str, Any], renders: bool) -> dict[str, Any]:
+    """`wait_device`, until it has lasted `device.wait_max_seconds`: then the developer decides. The
+    orchestrator never skips the device on its own (`finish --no-device` needs their words)."""
+    if not _waited_too_long(target, agent_dir):
+        return waiting
+    minutes = round(device_wait_max_seconds(target) / 60)
+    options = {"wait": "CLI emulator --target TARGET --wait, then CLI next --target TARGET (another "
+                       f"{minutes} min before asking again)"}
+    if renders:
+        options["render"] = "CLI render prefer --target TARGET --mode render, then CLI next --target TARGET " \
+                            "(JVM renders prove the static AC; the rest stays unverified on a device)"
+    options["skip"] = ('CLI finish --target TARGET --no-device --developer-said "<the developer\'s answer, verbatim>" '
+                       "(the PR says the device was not verified)")
+    return _answer("ask_user", f"waited more than {minutes} min for a device: {waiting['why']}",
+                   question="No device became ready for this run. Keep waiting, prove the visible AC with JVM renders"
+                            + ("" if renders else " (not available here: no render probe or AC proved by a render)")
+                            + ", or skip the device check?", options=options)
 
 
 def _late_before(target: Path, agent_dir: Path, spec: dict[str, Any], state: dict[str, Any],

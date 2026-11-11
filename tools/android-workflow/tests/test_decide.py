@@ -387,6 +387,54 @@ class RunTests(unittest.TestCase):
         self.assertIn('--skip-device "no device: no device connected"', answer["command"])
         self.assertIn("--no-device", self.next("--no-device")["command"])
 
+    def test_finish_no_device_needs_the_developer_flag_or_their_words(self) -> None:
+        self.visual_run()
+        self.assertIn("--developer-said", self.next("--no-device")["command"])  # not on record: their words
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            refused = main(["finish", "--target", self.target, "--no-device"])
+            claimed = main(["finish", "--target", self.target, "--skip-device", "the developer asked to skip it"])
+        self.assertNotEqual(refused, 0)
+        self.assertNotEqual(claimed, 0)
+        self.assertIn("--developer-said", out.getvalue())
+        self.assertEqual(read_json(self.rundir / "run-state.json")["status"], "running")
+        cli("finish", "--target", self.target, "--no-device", "--developer-said", "skip the  device, I tested it")
+        state = read_json(self.rundir / "run-state.json")
+        self.assertEqual(state["stages"]["T7"]["reason"], 'the developer said: "skip the device, I tested it"')
+        self.assertIn('the developer said: "skip the device, I tested it"',
+                      (self.rundir / "stage-log.md").read_text(encoding="utf-8"))
+
+    def test_start_no_device_is_recorded_and_lets_finish_skip(self) -> None:
+        self.start("--level", "express", "--no-device")
+        cli("update-spec", "--target", self.target, "--acceptance", "a", "--surfaces", "ui")
+        self.next()
+        self.implement("val a = 1")
+        self.gate("passed")
+        self.review("approved")
+        self.assertEqual(self.next()["command"], "CLI finish --target TARGET --no-device")
+        cli("finish", "--target", self.target, "--no-device")
+        self.assertEqual(read_json(self.rundir / "run-state.json")["stages"]["T7"]["reason"],
+                         "the developer asked for --no-device (start --no-device)")
+
+    def test_a_long_wait_for_a_booting_device_asks_the_developer(self) -> None:
+        self.visual_run()
+        booting = {"status": "booting", "serial": "emulator-5558", "avd": "a", "started_by_workflow": True}
+        with mock.patch("android_workflow.emulator.claim", return_value=booting):
+            first = self.next()
+            self.assertEqual(first["next"], "wait_device")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                code = main(["finish", "--target", self.target, "--skip-device", "no device: booting"])
+            self.assertNotEqual(code, 0)  # the run is waiting for its emulator: not a skip
+            lines = (self.rundir / "decisions.jsonl").read_text(encoding="utf-8").splitlines()
+            old = [dict(json.loads(line), at=json.loads(line)["at"] - 20 * 60) for line in lines]
+            (self.rundir / "decisions.jsonl").write_text("".join(json.dumps(item) + "\n" for item in old), encoding="utf-8")
+            asked = self.next()
+            self.assertEqual(asked["next"], "ask_user")
+            self.assertEqual(set(asked["options"]), {"wait", "skip"})
+            self.assertIn("--developer-said", asked["options"]["skip"])
+            self.assertEqual(self.next()["next"], "wait_device")  # the developer said wait: a new stretch
+
     def test_a_connected_device_runs_the_device_agent_and_two_fails_open_a_draft(self) -> None:
         self.visual_run()
         with mock.patch("android_workflow.emulator.status", return_value={"status": "connected", "serial": "emu-1"}):
