@@ -62,7 +62,8 @@ The mechanical part is one command. Do not run `git add`, `commit`, `push` or `g
    passing through the flags you were given. It requires the ticket branch (never the base), stages
    only app source, tests and resources (never `.ai/`, `local.properties`, keystores, build output,
    lint baselines), commits, pushes with `-u` (hooks run; nothing is force-pushed or bypassed),
-   opens the PR/MR on the remote's host — ready for review, or a draft after `finish --draft`
+   opens the PR/MR on the remote's host — ready for review, or a draft after `finish --draft`; an open
+   draft PR from an earlier delivery is marked ready (`gh pr ready`) once the run has no open issues
    (GitHub or GitLab; any other host gets a compare URL) — strips any tool attribution from the
    commit and body, fills the screenshot table and adds the draft, waived-lint and skipped-device
    lines when the body omits them. After opening the PR it opens `media/` in Finder (macOS).

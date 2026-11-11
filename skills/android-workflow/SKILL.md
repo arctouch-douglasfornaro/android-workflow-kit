@@ -398,6 +398,7 @@ in a PR: STOP, ask the user, and continue once answered.
 FAIL, device BLOCKED with a device connected, a toolkit defect — never end without a PR:
 `CLI finish --target TARGET --draft "<why it stopped>"` records every unresolved check as a known
 issue, then `aw-delivery` delivers a **draft** PR that lists them. Tell the user what unblocks it.
+A later delivery of the same run with no open issues marks that draft ready for review by itself.
 
 ## Done
 

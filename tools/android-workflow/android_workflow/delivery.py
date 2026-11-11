@@ -153,13 +153,27 @@ def open_pull_request(
             raise ValueError(f"`{cli}` timed out after {timeout}s") from error
 
     if host == "github":
-        existing = run("pr", "view", branch, "--json", "url,state", "-q", '.state + " " + .url')
+        existing = run("pr", "view", branch, "--json", "url,state,isDraft", "-q",
+                       '.state + " " + (.isDraft | tostring) + " " + .url')
         if existing.returncode == 0 and existing.stdout.startswith("OPEN "):
-            url = existing.stdout.split(" ", 1)[1].strip()
+            fields = existing.stdout.split()
+            was_draft, url = (fields[1] == "true", fields[-1]) if len(fields) >= 3 else (False, fields[-1])
+            result: dict[str, Any] = {"status": "updated", "url": url}
             if keep_body:
-                return {"status": "updated", "url": url, "body": "kept"}
-            edited = run("pr", "edit", branch, "--body-file", str(body_file))
-            return {"status": "updated", "url": url, **({} if edited.returncode == 0 else {"warning": tail(edited.stderr, 5)})}
+                result["body"] = "kept"
+            else:
+                edited = run("pr", "edit", branch, "--body-file", str(body_file))
+                if edited.returncode != 0:
+                    result["warning"] = tail(edited.stderr, 5)
+            # A draft opened by an earlier delivery becomes ready once every check passed (never the reverse).
+            if was_draft and not draft:
+                readied = run("pr", "ready", branch)
+                result["ready"] = readied.returncode == 0
+                if readied.returncode != 0:
+                    result["ready_warning"] = tail(readied.stderr or readied.stdout, 5)
+            elif was_draft:
+                result["draft"] = True
+            return result
         created = run(
             "pr", "create", "--base", base, "--head", branch, "--title", subject, "--body-file", str(body_file),
             *(["--draft"] if draft else []),

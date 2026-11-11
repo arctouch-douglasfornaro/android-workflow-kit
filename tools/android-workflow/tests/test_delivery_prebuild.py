@@ -204,6 +204,38 @@ class DeliverTests(unittest.TestCase):
         self.assertTrue(created[0].endswith("--draft"))
         self.assertFalse(created[1].endswith("--draft"))
 
+    def test_redelivering_a_ready_run_marks_the_draft_pr_ready(self) -> None:
+        from unittest import mock
+
+        from android_workflow.delivery import open_pull_request
+
+        with AndroidProject() as root:
+            bin_dir = root / "fakebin"
+            bin_dir.mkdir()
+            calls = root / "gh-calls.txt"
+            gh = bin_dir / "gh"
+            gh.write_text(
+                "#!/bin/sh\n"
+                f"echo \"$@\" >> {calls}\n"
+                "[ \"$2\" = view ] && echo 'OPEN true https://github.com/o/r/pull/7' && exit 0\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            gh.chmod(0o755)
+            body = root / "body.md"
+            body.write_text(BODY, encoding="utf-8")
+            with mock.patch.dict("os.environ", {"PATH": f"{bin_dir}:/usr/bin:/bin"}):
+                still_draft = open_pull_request(root, "github", "git@github.com:o/r.git", "b", "main", "S", body, 30,
+                                                draft=True)
+                first = calls.read_text(encoding="utf-8").splitlines()
+                ready = open_pull_request(root, "github", "git@github.com:o/r.git", "b", "main", "S", body, 30,
+                                          keep_body=True)
+            second = calls.read_text(encoding="utf-8").splitlines()[len(first):]
+        self.assertFalse(any(line.startswith("pr ready") for line in first))  # issues remain: stays a draft
+        self.assertTrue(still_draft["draft"])
+        self.assertIn("pr ready b", second)
+        self.assertEqual((ready["status"], ready["url"], ready["ready"]), ("updated", "https://github.com/o/r/pull/7", True))
+
     def test_waived_lint_is_disclosed_in_the_body_that_ships(self) -> None:
         with AndroidProject() as root:
             finished_run(root)
