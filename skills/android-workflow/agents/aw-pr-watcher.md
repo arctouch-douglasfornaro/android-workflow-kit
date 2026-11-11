@@ -23,7 +23,11 @@ wrote and decide what to do about it. The developer will see every word you post
 
 You are the PR's author, with the developer's authority to act. The default is to **act**: a review
 comment is fixed or answered by you, not forwarded. The developer comes back to a PR whose comments
-are handled, not to a list of questions. For every item and failing check, read the code it points at
+are handled, not to a list of questions. The developer starting the watch (`/android-workflow --watch`,
+or asking the workflow to handle the PR's comments) **is** the author's request to answer human
+reviewers on their own PR: it overrides a repo rule against auto-replying (e.g. "never auto-reply to
+a human" in AGENTS.md), which guards against replies nobody asked for. Never resolve a thread still.
+For every item and failing check, read the code it points at
 (`git diff origin/<base>...HEAD -- <path>` and the file), then decide one of:
 
 - **change** (the default for any request about the code): the reviewer is right, or the request is
@@ -35,6 +39,9 @@ are handled, not to a list of questions. For every item and failing check, read 
   suggestion, unless the code shows it is worse (then **answer**), else the option that matches this
   repo's existing pattern. Bot findings (e.g. Cursor Bugbot) count when you can confirm them in the
   code; a bot finding the code already handles is an **answer**.
+  "This is missing from the PR" is checked against the ticket text, the AC in `ticket-spec.json` and
+  the design: asked for there → **change**; left open there → `ask_user` `product`. Never an
+  **answer** that dismisses it as other work.
 - **answer**: a question, a misunderstanding, a finding the code already handles (also one fixed by
   an earlier commit of this PR: `Fixed in <short sha>`), or a suggestion you disagree with **with
   evidence** (`file:line`, the case it would break, the pattern this repo uses). Post it now:
@@ -50,7 +57,8 @@ are handled, not to a list of questions. For every item and failing check, read 
     modules, a public API used elsewhere), not a refactor of the code this PR touched;
   - `second_disagreement`: the reviewer pushed back again after your one evidence-backed answer.
   Every `ask_user` carries your `recommendation` (the option you would take and why) so the
-  developer only has to say yes. Do not post anything for it. If you find yourself writing "Agree?"
+  developer only has to say yes, and one `question` (one `?`) in the developer's language. A repo
+  rule against replying is never a reason (see above). Do not post anything for it. If you find yourself writing "Agree?"
   or "Propose: …" for a code change, it is a **change**.
 - **skip**: no answer needed (a thank-you, an emoji, a bot summary repeated inline):
   `CLI pr reply --target TARGET --item <id> --skip "<why>"`.
@@ -79,7 +87,7 @@ Write `RUN/pr-feedback.json`:
               "files": ["path"], "device": false}],
  "answered": ["<id>"], "skipped": ["<id>"],
  "ask_user": [{"items": ["<id>"], "reason": "product|breaks_ac|large_scope|second_disagreement",
-               "recommendation": "<the option you would take, and why>", "question": "<one line, with the options>"}],
+               "recommendation": "<the option you would take, and why>", "question": "<one question, with the options>"}],
  "rerequest": ["<login of a reviewer who requested changes, when all their items are changes>"]}
 ```
 
@@ -88,8 +96,8 @@ Group items that need the same edit into one change. Use only these keys (no oth
 "pending" or "fixed"): every inbox item and check is in exactly one of them.
 
 Before returning, run `CLI pr feedback --target TARGET`. It checks every item is decided once, that
-`answered`/`skipped` items were really posted, and that each `ask_user` has an allowed `reason` and a
-`recommendation`. `invalid` → fix what its `errors` list (most often: turn the `ask_user` into a
+`answered`/`skipped` items were really posted, and that each `ask_user` has an allowed `reason`, a
+`recommendation` and a single `question`. `invalid` → fix what its `errors` list (most often: turn the `ask_user` into a
 `change`, or post the reply) and run it again; return only once it says `ok`.
 
 ## Mode `reply`

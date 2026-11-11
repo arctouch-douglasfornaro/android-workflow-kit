@@ -383,6 +383,43 @@ class FeedbackCheckTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("C2 is `answered` but nothing was posted", result["errors"][0])
 
+    def test_an_ask_is_one_question_and_never_a_repo_rule_against_replying(self) -> None:
+        with AndroidProject() as root:
+            finished_run(root)
+            self.setup(root, {
+                "changes": [], "answered": [],
+                "ask_user": [
+                    {"items": ["C1"], "reason": "product", "recommendation": "hoist it"},
+                    {"items": ["C2"], "reason": "product", "recommendation": "sealed class",
+                     "question": "Sealed class? And should the rows still open the game?"},
+                    {"items": ["C3"], "reason": "product", "recommendation": "AGENTS.md says never auto-reply to a human",
+                     "question": "May I answer ana on the PR?"},
+                ],
+            }, ci={"ci:abc:lint": "unrelated"})
+            result, code = watch.check_feedback(root)
+        errors = "\n".join(result["errors"])
+        self.assertEqual(code, 1)
+        self.assertIn("['C1']: `question` is missing", errors)
+        self.assertIn("['C2']: `question` asks more than one thing", errors)
+        self.assertIn("['C3']: a repo rule against auto-replying is not a reason to ask", errors)
+        self.assertNotIn("['C2']: a repo rule", errors)
+
+
+class NextStepTests(unittest.TestCase):
+    def test_status_and_wait_end_with_the_command_that_keeps_the_loop_going(self) -> None:
+        target = Path("/app")
+        wait_cmd = "`python3 ~/.ai/bin/android-workflow pr wait --target /app`"
+        self.assertEqual(watch.next_step({"action": "wait"}, target), wait_cmd)
+        self.assertTrue(watch.next_step({"action": "respond"}, target).endswith(wait_cmd))
+        self.assertIn("pr feedback", watch.next_step({"action": "respond"}, target))
+        self.assertTrue(watch.next_step({"action": "sync"}, target).endswith(wait_cmd))
+        self.assertIn("pr merge", watch.next_step({"action": "merge", "auto_merge": True}, target))
+        self.assertIn("stop", watch.next_step({"action": "merged"}, target))
+        args = mock.Mock(action="status", pr=None)
+        with mock.patch.object(watch, "status", return_value={"action": "wait", "waiting_for": ["checks running"]}):
+            result, code = watch.dispatch(target, args)
+        self.assertEqual((code, list(result)[-1], result["then"]), (0, "then", wait_cmd))
+
 
 class SyncTests(unittest.TestCase):
     def prepare(self, root: Path, base_change: str, path: str = "app/src/main/java/com/example/ProfileScreen.kt") -> Path:

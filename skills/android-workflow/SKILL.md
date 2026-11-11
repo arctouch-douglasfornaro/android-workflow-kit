@@ -246,7 +246,10 @@ CLI status|list --target T                          CLI clean --target T [--tick
 
 5. **Watch the PR** (unless `--no-watch` or a `--no-*` flag stopped before the PR; `--watch` starts
     here for a ticket whose run exists, and with no run: `CLI start` with the PR's title, then this).
-    The CLI reads the PR; you act on the one `action` it returns, then wait again. Loop:
+    A request such as "see the PR comments", "veja os comentários do PR" or "resolve the comments"
+    is this loop too, never a one-shot look (`pr status` alone, or spawning `aw-pr-watcher` by hand):
+    `pr wait` → watcher → fix → push → reply → `pr wait`. The CLI reads the PR; you act on the one
+    `action` it returns, then run its `then` (the next command, `pr wait` again). Loop:
     `CLI pr wait --target TARGET [--pr N]`: it polls GitHub (every minute, slower while nothing
     changes) and returns as soon as there is something to do. Run it in the background where the
     host allows (Claude Code: `run_in_background` with `--timeout 3300`), else in the foreground
@@ -258,9 +261,11 @@ CLI status|list --target T                          CLI clean --target T [--tick
       them to the developer. Review comments are acted on without asking: every `change` goes into the
       fix round below with no confirmation, and is answered on its thread once pushed.
       `ask_user` (only `product`, `breaks_ac`, `large_scope` or `second_disagreement`, each with the
-      watcher's `recommendation`) → one message listing them with the recommendation as the default
-      choice, while the changes go on in parallel; the answer becomes a change, or a reply through
-      `CLI pr reply`. Never ask "should I apply these comments?".
+      watcher's `recommendation`) → one question per prompt, in the developer's language, the
+      recommendation as the default choice, never merged with a permission prompt or a host problem,
+      while the changes go on in parallel; the answer becomes a change, or a reply through
+      `CLI pr reply`. Never ask "should I apply these comments?" or "may I reply?": the watch is the
+      author's request to answer reviewers.
       `changes` → a fix round on the same Implementer (IDs `PR-1`…, `RUN/pr-feedback.json`), then the
       gate and a delta Reviewer in parallel (`CLI next`, same limits), then Device `after` only when a
       change has `device: true` (when `next` asks for the device and none has it, do not spawn it); otherwise `CLI finish --target TARGET --keep-device "<why nothing

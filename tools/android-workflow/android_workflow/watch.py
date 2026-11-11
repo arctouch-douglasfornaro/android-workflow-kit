@@ -869,6 +869,10 @@ ASK_REASONS = {
     "large_scope": "a new feature or a redesign well outside this change set",
     "second_disagreement": "the reviewer disagreed again after one reply with evidence",
 }
+# `--watch` is the PR author's own request to answer reviewers: a repo rule against auto-replying is no reason to ask.
+AUTO_REPLY_RULE = re.compile(
+    r"auto[- ]?(?:reply|replies|replying|respond)|(?:reply|replies|respond|answer)\w*\s+automatically"
+    r"|never\s+(?:auto[- ]?)?reply\s+to\s+(?:a\s+)?human", re.I)
 
 
 def check_feedback(target: Path) -> tuple[dict[str, Any], int]:
@@ -913,6 +917,15 @@ def check_feedback(target: Path) -> tuple[dict[str, Any], int]:
                           "a `change` (or one `answer` with evidence when you disagree)")
         if not str(ask.get("recommendation") or "").strip():
             errors.append(f"ask_user {items}: `recommendation` is missing: say which option you would take and why")
+        question = str(ask.get("question") or "").strip()
+        if not question:
+            errors.append(f"ask_user {items}: `question` is missing: one line, with the options")
+        elif question.count("?") > 1:
+            errors.append(f"ask_user {items}: `question` asks more than one thing: one question per ask_user")
+        if AUTO_REPLY_RULE.search(f"{question} {ask.get('recommendation') or ''}"):
+            errors.append(f"ask_user {items}: a repo rule against auto-replying is not a reason to ask: the developer "
+                          "started the watch, the author's request to answer reviewers on their own PR; decide it "
+                          "as a `change` or an `answer`")
     comments = [item for item in inbox.get("items") or [] if item.get("kind") in {"thread", "comment", "review"}]
     for item in comments:
         where = decided.get(item["id"]) or []
@@ -938,13 +951,32 @@ def check_feedback(target: Path) -> tuple[dict[str, Any], int]:
     return result, 1 if errors else 0
 
 
+def next_step(decision: dict[str, Any], target: Path) -> str:
+    """The last key of `pr status` / `pr wait`: what to run now, so a one-shot look becomes the watch loop."""
+    cli = f"python3 ~/.ai/bin/android-workflow pr {{}} --target {target}"
+    again = f"`{cli.format('wait')}`"
+    action = decision.get("action")
+    if action == "respond":
+        return (f"spawn aw-pr-watcher mode triage, then `{cli.format('feedback')}`; after the fix round and "
+                f"its replies: {again}")
+    if action == "sync":
+        return f"`{cli.format('sync')}`, then {again}"
+    if action == "merge":
+        return f"`{cli.format('merge')}`" if decision.get("auto_merge") else "tell the developer the PR is ready; stop"
+    if action == "needs_user":
+        return "tell the developer why; stop"
+    if action in {"merged", "closed"}:
+        return "log the PR Watcher completed; stop"
+    return again
+
+
 def dispatch(target: Path, args: Any) -> tuple[dict[str, Any], int]:
     if args.action == "feedback":
         return check_feedback(target)
-    if args.action == "status":
-        return status(target, args.pr), 0
-    if args.action == "wait":
-        return wait(target, args.pr, timeout=args.timeout, interval=args.interval), 0
+    if args.action in {"status", "wait"}:
+        result = status(target, args.pr) if args.action == "status" else wait(
+            target, args.pr, timeout=args.timeout, interval=args.interval)
+        return {**result, "then": next_step(result, target)}, 0
     if args.action == "reply":
         if not args.item or (args.body is None) == (args.skip is None):
             raise ValueError("reply needs --item and either --body or --skip")
