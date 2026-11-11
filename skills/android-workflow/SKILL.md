@@ -128,6 +128,7 @@ CLI log … --stage Implementer --slice S2 …           (one Implementer of a t
 CLI office --target T                               (opens the office at this run; it updates itself)
 CLI pr status|wait|merge --target T [--pr N] [--timeout S]       CLI pr sync --target T [--continue]
 CLI pr reply --target T --item ID (--body "…" | --skip "why")     CLI pr rerequest --target T --reviewer LOGIN
+CLI pr body --target T --section "<heading>" --file F.md   (replaces only that section of the open PR's description)
 CLI pr ci --target T --check NAME --as ours|unrelated|rerun --reason "…"
 CLI finish … [--keep-device "why nothing visible changed"]     CLI deliver … [--keep-body]
 CLI evidence capture|ingest|compare|list --target T [--phase before|after] [--name N] [--file F]
@@ -274,7 +275,9 @@ CLI status|list --target T                          CLI clean --target T [--tick
       change has `device: true` (when `next` asks for the device and none has it, do not spawn it); otherwise `CLI finish --target TARGET --keep-device "<why nothing
       visible changed>"` (a plain `finish` when the route has no device). Then, with no Delivery agent:
       `CLI deliver --target TARGET --subject "<ID>: <what this round changed>" --keep-body`. Then resume
-      `aw-pr-watcher` mode `reply` with the pushed `sha` and the change IDs. A gate or review that stays
+      `aw-pr-watcher` mode `reply` with the pushed `sha` and the change IDs (`--keep-body` keeps the
+      developer's edits; when the round changes what the description says, the watcher updates that
+      section with `CLI pr body`). A gate or review that stays
       red after its fix rounds: push nothing, tell the developer what is open, keep watching.
     - `sync` (`behind` or `conflict`): `CLI pr sync --target TARGET`. `synced` → wait again.
       `conflict` → the Implementer resolves the listed files (keeping both intents), the gate runs,

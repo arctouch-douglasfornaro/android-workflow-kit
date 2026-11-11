@@ -3759,7 +3759,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                                help="drop runs whose app or run folder is gone (a removed worktree, a clean)")
     office_parser.add_argument("--days", type=float, help="with --prune: also drop past runs idle this many days")
     pr_parser = subparsers.add_parser("pr", help="PR Watcher: follow the open PR until it is merged")
-    pr_parser.add_argument("action", choices=("status", "wait", "reply", "rerequest", "ci", "sync", "merge", "feedback"))
+    pr_parser.add_argument("action", choices=("status", "wait", "reply", "rerequest", "ci", "sync", "merge", "feedback", "body"))
     pr_parser.add_argument("--target", required=True, type=Path)
     pr_parser.add_argument("--pr", type=int, help="PR number (default: the one this run opened, else the branch's)")
     pr_parser.add_argument("--timeout", type=float, default=540.0, help="wait: give up after this many seconds")
@@ -3772,6 +3772,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     pr_parser.add_argument("--as", dest="verdict", help="ci: ours | unrelated | rerun")
     pr_parser.add_argument("--reason", help="ci: one line on why")
     pr_parser.add_argument("--continue", dest="resume", action="store_true", help="sync: conflicts resolved, commit and push")
+    pr_parser.add_argument("--section", help='body: the heading whose section to replace, e.g. "## Analytics events"')
+    pr_parser.add_argument("--file", type=Path, help="body: the markdown that becomes that section")
     review_parser = subparsers.add_parser("review", help="Android Review: review an open PR, post one review after the OK")
     review_parser.add_argument("review_action", choices=("start", "next", "ci", "draft", "edit", "post", "answer", "device", "ticket", "wait", "replies", "reply"))
     review_parser.add_argument("--target", required=True, type=Path,

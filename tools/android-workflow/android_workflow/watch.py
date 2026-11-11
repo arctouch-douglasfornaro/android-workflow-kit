@@ -735,6 +735,96 @@ def rerequest(target: Path, logins: list[str]) -> dict[str, Any]:
     return {"rerequested": logins}
 
 
+HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
+FENCE = re.compile(r"^\s*(```|~~~)")
+IMAGE = re.compile(r"!\[[^\]]*\]\([^)]+\)|<img\s|<video\s|github\.com/user-attachments/", re.I)
+
+
+def _headings(lines: list[str]) -> list[tuple[int, int, str]]:
+    """(line index, level, normalized text) of each ATX heading outside fenced code."""
+    found, fenced = [], False
+    for index, line in enumerate(lines):
+        if FENCE.match(line):
+            fenced = not fenced
+            continue
+        match = None if fenced else HEADING.match(line)
+        if match:
+            found.append((index, len(match.group(1)), " ".join(match.group(2).split()).lower()))
+    return found
+
+
+def replace_section(body: str, heading: str, section: str) -> str:
+    """`body` with only the section under `heading` replaced by `section`: from the heading to the next
+    heading of the same or a higher level; everything else is kept, and so is an image the developer added
+    inside that section when the new text lacks it.
+
+    `heading` is `## Title` or `Title`; `section` may start with the heading itself. A heading the body
+    lacks is added as a new section at the end, above the project's attribution footer when it has one."""
+    from android_workflow.cli import AGENT_ATTRIBUTION_PATTERN, strip_agent_attribution
+
+    wanted = HEADING.match(heading.strip())
+    level = len(wanted.group(1)) if wanted else None
+    title = " ".join((wanted.group(2) if wanted else heading).split()).lower()
+    if not title:
+        raise ValueError("--section needs the heading's text, e.g. \"## Analytics events\"")
+    content = strip_agent_attribution(section).strip("\n").splitlines()
+    first = HEADING.match(content[0]) if content else None
+    if first and " ".join(first.group(2).split()).lower() == title:
+        content = content[1:]
+    lines = body.replace("\r\n", "\n").rstrip("\n").splitlines()
+    footer: list[str] = []
+    while lines and (not lines[-1].strip() or AGENT_ATTRIBUTION_PATTERN.search(lines[-1])):
+        footer.insert(0, lines.pop())
+    footer = [line for line in footer if line.strip()]
+    headings = _headings(lines)
+    match = next(((index, found_level) for index, found_level, text in headings
+                  if text == title and (level is None or found_level == level)), None)
+    text = "\n".join(content).strip("\n")
+    if match is None:
+        start, end = len(lines), len(lines)
+        head_line = f"{'#' * (level or 2)} {(wanted.group(2) if wanted else heading).strip()}"
+        new = ([""] if lines else []) + [head_line, ""] + ([text] if text else [])
+    else:
+        start, found_level = match
+        end = next((index for index, other_level, _ in headings if index > start and other_level <= found_level),
+                   len(lines))
+        head_line = lines[start]
+        # An image the developer dropped into this section stays, unless the new text already has it.
+        images = [line for line in lines[start + 1:end] if IMAGE.search(line) and line.strip() not in text]
+        text = "\n\n".join(part for part in (text, "\n".join(images)) if part)
+        new = [head_line, ""] + ([text, ""] if text else [])
+        if end == len(lines):
+            new = new[:-1] if text else new
+    out = lines[:start] + new + lines[end:]
+    result = "\n".join(out).rstrip("\n")
+    if footer:
+        result += "\n\n" + "\n".join(footer)
+    return result + "\n"
+
+
+def pr_body(target: Path, heading: str, file: Path, number: int | None = None) -> dict[str, Any]:
+    """Replace one section of the open PR's description on GitHub (and in RUN/pr-description.md), keeping the
+    rest as it is there now: a fix round that changes described behavior updates its section, not the body."""
+    agent_dir = run_dir(target)
+    watch = load_watch(agent_dir)
+    section = Path(file).read_text(encoding="utf-8")
+    env = _env(target, watch)
+    number = pr_number(target, agent_dir, watch, env, number)
+    view = _gh(["pr", "view", str(number), "--json", "body", "--jq", ".body"], env=env, cwd=target)
+    if view.returncode != 0:
+        raise ValueError(f"could not read PR #{number}: {(view.stderr or view.stdout).strip()[-300:]}")
+    body = replace_section(view.stdout, heading, section)
+    if body.strip() == view.stdout.strip():
+        return {"pr": number, "section": heading, "status": "unchanged"}
+    edited = _gh(["pr", "edit", str(number), "--body-file", "-"], env=env, stdin=body, cwd=target)
+    if edited.returncode != 0:
+        raise ValueError(f"could not edit PR #{number}: {(edited.stderr or edited.stdout).strip()[-300:]}")
+    local = agent_dir / "pr-description.md"
+    if local.is_file():
+        local.write_text(replace_section(local.read_text(encoding="utf-8"), heading, section), encoding="utf-8")
+    return {"pr": number, "section": heading, "status": "updated"}
+
+
 def ci(target: Path, check: str, verdict: str, reason: str = "") -> dict[str, Any]:
     """Record what a failing check is: `ours` (a fix round follows), `unrelated` (fails without this change)
     or `rerun` (flaky or infrastructure: run it again once)."""
@@ -973,6 +1063,10 @@ def next_step(decision: dict[str, Any], target: Path) -> str:
 def dispatch(target: Path, args: Any) -> tuple[dict[str, Any], int]:
     if args.action == "feedback":
         return check_feedback(target)
+    if args.action == "body":
+        if not args.section or not args.file:
+            raise ValueError('body needs --section "<heading>" and --file <md>')
+        return pr_body(target, args.section, args.file, args.pr), 0
     if args.action in {"status", "wait"}:
         result = status(target, args.pr) if args.action == "status" else wait(
             target, args.pr, timeout=args.timeout, interval=args.interval)

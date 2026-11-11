@@ -26,8 +26,8 @@ it: whatever you write is stripped and the CLI's line is the only one kept.
 ## Inputs
 
 - `TARGET`, `RUN`, ticket id and title, flags (`--no-commit`, `--no-push`, `--no-pr`, `--base`).
-- `RUN/ticket-spec.json` (`pr_template`), `implementation-notes.md`, `review.json` concerns,
-  `device-report.md`, `media/manifest.json`.
+- `RUN/ticket-spec.json` (`pr_template`, `surfaces`), `plan.md` (Out of scope),
+  `implementation-notes.md`, `review.json` concerns, `device-report.md`, `media/manifest.json`.
 
 ## PR body → `RUN/pr-description.md`
 
@@ -39,6 +39,11 @@ it: whatever you write is stripped and the CLI's line is the only one kept.
 - A PARTIAL device check the developer accepted (`run-state.json` → `device_partial`): one line with
   what stays unverified on a device (`CLI deliver` adds it if missing).
 - No template: 2–3 sentences, no extra headings.
+- Analytics or logging ticket (`ticket-spec.json` → `surfaces` has `analytics`): a `### Analytics
+  events` table, one row per event in the order the flow fires them: `Event | How to trigger | Key
+  fields | Screenshot` (the capture's file name from `media/manifest.json` when one shows it, else
+  `—`). Event names and fields come from the diff, never from memory.
+- `plan.md` has an Out of scope list: one line `Follow-up / out of scope: <items>`.
 - Device skipped (`finish --skip-device`): state the reason in one line.
 - Draft (`run-state.json` → `draft.issues`): one line "Not ready for review: <reason>" and the
   issues as bullets, so the reviewer sees what is still open. `CLI deliver` adds them if missing.

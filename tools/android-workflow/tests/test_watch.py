@@ -512,6 +512,70 @@ class DeliverKeepBodyTests(unittest.TestCase):
         self.assertFalse(any("edit" in call for call in calls))
 
 
+BODY = """## Summary
+Shows the streak banner.
+
+## Analytics events
+| Event | How to trigger |
+|---|---|
+| streak_shown | open Home |
+
+### Notes
+old note
+
+## Screenshots
+<img src="https://github.com/user-attachments/assets/added-by-hand.png" width="300">
+
+```md
+## Analytics events
+inside a fence: not a heading
+```
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+"""
+
+
+class PrBodySectionTests(unittest.TestCase):
+    def test_only_the_named_section_changes_up_to_the_next_heading_of_its_level(self) -> None:
+        new = "## Analytics events\n| Event | How to trigger |\n|---|---|\n| streak_shown | open Home |\n| streak_closed | tap X |\n"
+        out = watch.replace_section(BODY, "## Analytics events", new)
+        self.assertIn("| streak_closed | tap X |\n\n## Screenshots", out)
+        self.assertNotIn("old note", out)  # a sub-heading belongs to its section
+        self.assertEqual(out.count("## Analytics events"), 2)  # the heading once, plus the fenced copy
+        self.assertIn("added-by-hand.png", out)
+        self.assertTrue(out.startswith("## Summary\nShows the streak banner.\n\n## Analytics events\n\n| Event"))
+        self.assertTrue(out.endswith("```\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n"))
+
+    def test_a_bare_title_matches_and_a_missing_section_is_added_above_the_footer(self) -> None:
+        out = watch.replace_section(BODY, "summary", "Shows the banner and logs it.")
+        self.assertTrue(out.startswith("## Summary\n\nShows the banner and logs it.\n\n## Analytics events"))
+        added = watch.replace_section(BODY, "## Follow-up / out of scope", "- dark mode: STREAK-12")
+        self.assertTrue(added.endswith("```\n\n## Follow-up / out of scope\n\n- dark mode: STREAK-12\n\n"
+                                       "🤖 Generated with [Claude Code](https://claude.com/claude-code)\n"))
+        self.assertEqual(watch.replace_section("", "Notes", "x"), "## Notes\n\nx\n")
+
+    def test_the_command_edits_the_live_body_and_the_local_copy(self) -> None:
+        with AndroidProject() as root:
+            finished_run(root)
+            watch._write(run_dir(root) / "pr-watch.json", {"pr": {"number": 5, "repo": "o/r", "node": "PR_1"}})
+            (run_dir(root) / "pr-description.md").write_text("## Summary\nold\n", encoding="utf-8")
+            section = root / "section.md"
+            section.write_text("new summary\n", encoding="utf-8")
+            calls = []
+
+            def fake_gh(args, env=None, stdin=None, timeout=120, cwd=None):
+                calls.append((args, stdin))
+                return subprocess.CompletedProcess(args, 0, "## Summary\nold\n\n![shot](x.png)\n" if "view" in args else "", "")
+
+            with mock.patch.object(watch, "github_env", return_value={}), mock.patch.object(watch, "_gh", side_effect=fake_gh):
+                result, code = watch.dispatch(root, mock.Mock(action="body", section="## Summary", file=section, pr=None))
+            local = (run_dir(root) / "pr-description.md").read_text(encoding="utf-8")
+        self.assertEqual((code, result["status"]), (0, "updated"))
+        self.assertEqual(calls[1][0][:4], ["pr", "edit", "5", "--body-file"])
+        self.assertEqual(calls[1][1], "## Summary\n\nnew summary\n\n![shot](x.png)\n")
+        self.assertEqual(local, "## Summary\n\nnew summary\n")
+
+
 if __name__ == "__main__":
     unittest.main()
 
