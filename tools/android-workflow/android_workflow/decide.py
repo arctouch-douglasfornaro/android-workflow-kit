@@ -651,6 +651,19 @@ def _device_for(target: Path, agent_dir: Path, record: bool) -> tuple[str | None
         current = claim(target, record=record)
     except Exception as error:  # noqa: BLE001 - no SDK: no device
         current = {"status": "unavailable", "reason": f"adb is not available ({error})"}
+    if current.get("status") == "failed" and record:
+        # Its device never booted: it was closed and released; lease or start another one now.
+        failed = current
+        try:
+            current = claim(target, record=record)
+        except Exception as error:  # noqa: BLE001
+            current = {"status": "unavailable", "reason": f"adb is not available ({error})"}
+        if current.get("status") in {"failed", "unavailable", "no_device"}:
+            return None, _answer("ask_user", "no device boots for this run: " + str(failed.get("reason")),
+                                 question=f"{failed.get('reason')}; then {current.get('reason') or current.get('status')}. "
+                                 "Fix the emulator (or connect a phone) and continue, or ship without the device check?",
+                                 options={"retry": "CLI next --target TARGET",
+                                          "skip": f'CLI finish --target TARGET --skip-device "{failed.get("reason")}"'}), ""
     state = current.get("status")
     if state in {"ready", "connected"}:
         return str(current["serial"]), None, ""

@@ -6,18 +6,23 @@ runs never install their builds on one device. `claim` is the one entry point:
 * the run already holds a device → that one (a leased emulator that died is dropped and replaced);
 * a ready device nobody leases (an emulator the developer or another run opened, a phone) → leased;
 * else, below `device.max_emulators` (default 2) emulators the workflow started → one more, started
-  for this run and leased to it while it boots (an AVD that is not running, else the configured AVD
-  again with `-read-only`);
+  for this run and leased to it while it boots (the configured AVD; when it is running or failed to
+  boot lately, another AVD that is not running; else the configured AVD again with `-read-only`, once
+  its first copy has booted: two copies of one AVD never boot at once);
+* a leased emulator that is gone, or still not booted `device.boot_stall_seconds` (360) after it
+  started, is `failed`: closed (when the workflow started it), its lease released, its AVD avoided for
+  a while;
 * else `busy`, naming who holds each device; `unavailable` with the reason when there is no SDK or AVD.
 
 `device.dedicated` (default true; `false` or `ANDROID_WORKFLOW_DEDICATED_DEVICE=0` turns it off): a run
 only ever uses an emulator the workflow started. An emulator the developer opened and a connected phone are never leased, waited
 for or touched; a workflow emulator another run gave back is still reused (the lease keeps it to one run).
 
-`--stop` gives the run's device back and closes the emulators the workflow started that no lease
-holds and no other live run is waiting for; a device the developer connected or opened is never
-closed. No AVD is ever created and nothing is downloaded. The pool record lives in
-`~/.cache/android-workflow/` because the emulators serve the whole machine.
+`--stop` gives the run's device back and closes the emulators the workflow started that this run
+held (outside a run: that no lease holds) and no other live run is waiting for; an emulator another
+run holds, or a device the developer connected or opened, is never closed. No AVD is ever created and
+nothing is downloaded. The pool record lives in `~/.cache/android-workflow/` because the emulators
+serve the whole machine.
 """
 
 from __future__ import annotations
@@ -40,6 +45,9 @@ LEGACY_NAMES = ("emulator.json", "emulators-extra.json")
 DEFAULT_BOOT_TIMEOUT = 300.0
 DEFAULT_FREE_TIMEOUT = 1800.0
 DEFAULT_MAX_EMULATORS = 2
+DEFAULT_BOOT_STALL = 360.0  # an emulator not booted this long after it started is stuck: given up
+FAILED_AVD_SECONDS = 1800.0  # an AVD that failed to boot is not the first choice for this long
+FAILURES_NAME = "emulator-failures.json"
 DEDICATED_ENV = "ANDROID_WORKFLOW_DEDICATED_DEVICE"
 PORTS = range(5554, 5586, 2)
 NO_DEVICE_CHECK_ENV = "ANDROID_WORKFLOW_NO_DEVICE_CHECK"  # the test suites: never touch a real device
@@ -231,9 +239,66 @@ def _order(serials: list[str]) -> list[str]:
     return sorted(serials, key=lambda serial: not serial.startswith("emulator-"))
 
 
+def _stall_limit(target: Path) -> float:
+    try:
+        return max(float(_overrides(target).get("boot_stall_seconds") or DEFAULT_BOOT_STALL), 1.0)
+    except (TypeError, ValueError):
+        return DEFAULT_BOOT_STALL
+
+
+def _stalled(target: Path, record: dict[str, Any] | None, lease: dict[str, Any] | None) -> str | None:
+    """Why a held device that has not booted is given up, or None while it may still boot: the
+    emulator the workflow started has been booting past `device.boot_stall_seconds` (from its start;
+    a device it did not start: from the lease)."""
+    began = (record or {}).get("started_at") or (lease or {}).get("since")
+    if not isinstance(began, (int, float)):
+        return None
+    waited = time.time() - float(began)
+    if waited < _stall_limit(target):
+        return None
+    what = f"the emulator {record.get('serial')} ({record.get('avd')})" if record else "the device"
+    return f"{what} has not finished booting in {int(waited // 60)} min"
+
+
+def _failures() -> dict[str, float]:
+    try:
+        value = json.loads((state_home() / FAILURES_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    now = time.time()
+    return {str(name): float(when) for name, when in (value.items() if isinstance(value, dict) else [])
+            if isinstance(when, (int, float)) and now - float(when) < FAILED_AVD_SECONDS}
+
+
+def _note_failure(avd: Any) -> None:
+    """An AVD that did not boot: `_pick_avd` prefers another one for `FAILED_AVD_SECONDS`."""
+    if not avd:
+        return
+    path = state_home() / FAILURES_NAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps({**_failures(), str(avd): time.time()}, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def _give_up(target: Path, adb: str, run: Path, serial: str, record: dict[str, Any] | None, reason: str) -> dict[str, Any]:
+    """A held device that will not boot: close it (only one the workflow started), drop it from the
+    pool, release the lease and remember its AVD failed. Called under `_pool_lock`."""
+    from android_workflow.locks import release
+
+    if record:
+        _kill(adb, record, grace=5)
+        _write_pool([item for item in _read_pool() if str(item.get("serial")) != serial])
+        _note_failure(record.get("avd"))
+    release(run, serial=serial)
+    return {**(record or {}), "status": "failed", "serial": serial, "avd": (record or {}).get("avd"),
+            "started_by_workflow": bool(record), "leased": False,
+            "reason": reason + ": closed and its lease released; the next claim leases or starts another"}
+
+
 def status(target: Path) -> dict[str, Any]:
     """What this run has or could use, without starting or leasing anything."""
-    from android_workflow.locks import held_by
+    from android_workflow.locks import held_by, leases
 
     adb = adb_path(target)
     if not adb:
@@ -242,12 +307,17 @@ def status(target: Path) -> dict[str, Any]:
     listed = devices(adb)
     ready = [item["serial"] for item in listed if item["state"] == "device"]
     run = _run_of(target)
+    held = leases() if run else {}
     for serial in held_by(run) if run else []:
         record = pool.get(serial)
         if serial in ready and _booted(adb, serial):
             return {**(record or {}), "status": "ready" if record else "connected", "serial": serial,
                     "devices": ready, "started_by_workflow": bool(record), "leased": True}
         if record or any(item["serial"] == serial for item in listed):
+            stuck = _stalled(target, record, held.get(serial))
+            if stuck:
+                return {**(record or {}), "status": "failed", "serial": serial, "devices": ready,
+                        "started_by_workflow": bool(record), "leased": True, "reason": stuck}
             return {**(record or {}), "status": "booting", "serial": serial, "devices": ready,
                     "started_by_workflow": bool(record), "leased": True}
     if dedicated(target):  # the developer's own devices are not this run's to see
@@ -274,24 +344,46 @@ def status(target: Path) -> dict[str, Any]:
 
 
 def _pick_avd(target: Path, adb: str, emulator: str, avd: str | None) -> tuple[str | None, bool, list[str]]:
-    """(AVD, read_only, warnings): the configured AVD, else one that is not running yet; an AVD already
-    running starts again `-read-only` (one AVD can run twice that way)."""
+    """(AVD, read_only, warnings): the configured AVD when it is free; else (it runs, or failed to boot
+    lately) another AVD that is not running; else the configured one again `-read-only` (one AVD can
+    run twice that way), but only once every copy of it has booted: two copies of one AVD booting at
+    once kill the second. `(None, False, [why])` while it must wait for that boot."""
     avds = list_avds(emulator)
     if not avds:
         return None, False, []
-    running = _running_avds(adb, [item["serial"] for item in devices(adb)]) | \
-        {str(item.get("avd")) for item in _read_pool()}
-    wanted = avd or _overrides(target).get("avd")
+    pool = _read_pool()
+    listed = [item["serial"] for item in devices(adb)]
+    running = _running_avds(adb, listed) | {str(item.get("avd")) for item in pool}
+    booting = {str(item.get("avd")) for item in pool if not _booted(adb, str(item["serial"]))}
+    failed = _failures()
+    configured = avd or _overrides(target).get("avd")
     warnings = []
-    if wanted and wanted not in avds:
-        warnings.append(f"AVD {wanted!r} not found; set device.avd in .ai/android-workflow.json to one of {avds}")
-        wanted = None
-    if not wanted:
-        idle = [name for name in avds if name not in running]
-        wanted = idle[0] if idle else avds[0]
+    if configured and configured not in avds:
+        warnings.append(f"AVD {configured!r} not found; set device.avd in .ai/android-workflow.json to one of {avds}")
+        configured = None
+    idle = [name for name in avds if name not in running]
+    fresh = [name for name in idle if name not in failed]
+    if configured and configured in fresh:
+        return configured, False, warnings
+    others = [name for name in (fresh or idle) if name != configured]
+    if configured and others:
+        why = "failed to boot lately" if configured in failed else "is already running"
+        return others[0], False, [*warnings, f"device.avd {configured!r} {why}: using {others[0]!r} instead"]
+    if configured and configured in idle:
+        return configured, False, warnings  # it failed lately, but there is no other AVD to try
+    if not configured and (fresh or idle):
+        chosen = (fresh or idle)[0]
         if len(avds) > 1:
-            warnings.append(f"no device.avd configured: using {wanted!r}; pin one in .ai/android-workflow.json")
-    return wanted, wanted in running, warnings
+            warnings.append(f"no device.avd configured: using {chosen!r}; pin one in .ai/android-workflow.json")
+        return chosen, False, warnings
+    again = [name for name in ([configured] if configured else []) + avds if name not in booting]
+    if not again:
+        names = sorted(booting & set(avds))
+        return None, False, [f"{', '.join(names)} is still booting: a second copy starts -read-only once it has booted"]
+    chosen = next((name for name in again if name not in failed), again[0])
+    if configured and chosen != configured:
+        warnings.append(f"device.avd {configured!r} is busy: using {chosen!r} -read-only instead")
+    return chosen, True, warnings
 
 
 def _launch(target: Path, run: Path | None, avd: str | None = None, headless: bool | None = None) -> dict[str, Any]:
@@ -303,6 +395,8 @@ def _launch(target: Path, run: Path | None, avd: str | None = None, headless: bo
     if not emulator:
         return {"status": "unavailable", "reason": "no device connected and the Android emulator was not found (set ANDROID_HOME)"}
     chosen, read_only, warnings = _pick_avd(target, adb, emulator, avd)
+    if not chosen and warnings:
+        return {"status": "wait_boot", "reason": warnings[0]}
     if not chosen:
         return {"status": "unavailable", "reason": "no device connected and no Android Virtual Device exists; "
                 "create one in Android Studio (Device Manager) or connect a phone"}
@@ -354,11 +448,18 @@ def claim(target: Path, record: bool = True, avd: str | None = None, headless: b
         listed = devices(adb)
         ready = [item["serial"] for item in listed if item["state"] == "device"]
         only_ours = dedicated(target)
+        held = leases()
         for serial in held_by(run):
             if serial in ready and _booted(adb, serial):
                 return {**pool.get(serial, {}), "status": "ready" if serial in pool else "connected", "serial": serial,
                         "devices": ready, "started_by_workflow": serial in pool, "leased": True}
             if serial in pool or any(item["serial"] == serial for item in listed):
+                stuck = _stalled(target, pool.get(serial), held.get(serial))
+                if stuck and record:
+                    return _give_up(target, adb, run, serial, pool.get(serial), stuck)
+                if stuck:
+                    return {**pool.get(serial, {}), "status": "failed", "serial": serial, "reason": stuck,
+                            "started_by_workflow": serial in pool, "leased": True}
                 return {**pool.get(serial, {}), "status": "booting", "serial": serial, "devices": ready,
                         "started_by_workflow": serial in pool, "leased": True}
             if record:
@@ -372,7 +473,8 @@ def claim(target: Path, record: bool = True, avd: str | None = None, headless: b
             return {**pool.get(serial, {}), "status": "ready" if serial in pool else "connected", "serial": serial,
                     "devices": ready, "started_by_workflow": serial in pool, "leased": record}
         held = leases()
-        idle_booting = [serial for serial in pool if serial not in held]  # every booted free one was taken above
+        idle_booting = [serial for serial in pool if serial not in held  # every booted free one was taken above
+                        and not _stalled(target, pool[serial], None)]
         if idle_booting:
             if record:
                 acquire(idle_booting[0], run)
@@ -392,6 +494,8 @@ def claim(target: Path, record: bool = True, avd: str | None = None, headless: b
             if started.get("status") == "booting":
                 acquire(str(started["serial"]), run)
                 return {**started, "leased": True, "holders": holders}
+            if started.get("status") == "wait_boot":  # `--wait-free` claims again until it may start
+                return {"status": "busy", "holders": holders, "reason": started["reason"]}
             if not holders:
                 return started
             return {"status": "busy", "holders": holders, "reason": f"could not start one more emulator: {started.get('reason')}"}
@@ -453,9 +557,10 @@ def wait(target: Path, timeout: float | None = None, poll: float = 2.0) -> dict[
                 tail = " ".join(Path(str(watched.get("log", ""))).read_text(encoding="utf-8", errors="replace").splitlines()[-3:])
             except OSError:
                 pass
+            _note_failure(watched.get("avd"))
             return {"status": "failed", "avd": watched.get("avd"), "serial": watched.get("serial"),
                     "reason": "the emulator exited while booting" + (f": {tail}" if tail else "")}
-        if current["status"] in {"ready", "unavailable", "no_device", "unauthorized"}:
+        if current["status"] in {"ready", "unavailable", "no_device", "unauthorized", "failed"}:
             if current["status"] == "no_device" and watched:
                 pass  # the emulator it started vanished from adb: the pid check above reports it
             else:
@@ -487,12 +592,14 @@ def _kill(adb: str | None, record: dict[str, Any], grace: float) -> None:
 
 
 def stop(target: Path, grace: float = 20.0) -> dict[str, Any]:
-    """Give the run's device back; close the emulators the workflow started that no lease holds, unless
-    another live run still has a Device stage ahead (it reuses one). A device the developer opened or
-    connected is never closed."""
-    from android_workflow.locks import leases, release, run_label, unwant, wanting
+    """Give the run's device back; close the emulators the workflow started that this run held (outside
+    a run: that no lease holds), unless another live run still has a Device stage ahead (it reuses one).
+    An emulator another run holds is refused by name; a device the developer opened or connected is
+    never closed."""
+    from android_workflow.locks import held_by, leases, release, run_label, unwant, wanting
 
     run = _run_of(target)
+    mine = set(held_by(run)) if run else set()
     released = release(run) if run else []
     if run:
         unwant(run)
@@ -502,12 +609,19 @@ def stop(target: Path, grace: float = 20.0) -> dict[str, Any]:
         held = leases()
         holders = {str(lease.get("run")) for lease in held.values()}
         waiting = [item for item in wanting(exclude=run) if item not in holders]  # still needs a device of its own
-        kept, stopped, reasons = [], [], {}
+        kept, stopped, reasons, refused = [], [], {}, {}
         for record in pool:
             serial = str(record["serial"])
             if serial in held:
                 kept.append(record)
                 reasons[serial] = f"leased to {run_label(held[serial].get('run') or '?')}"
+                if run and serial not in mine:
+                    refused[serial] = (f"held by {run_label(held[serial].get('run') or '?')}: only the run "
+                                       "that holds it stops it")
+                continue
+            if run and serial not in mine and str(record.get("started_for") or "") != str(run):
+                kept.append(record)
+                reasons[serial] = "not this run's device"
                 continue
             if waiting:
                 kept.append(record)
@@ -517,6 +631,8 @@ def stop(target: Path, grace: float = 20.0) -> dict[str, Any]:
             stopped.append(serial)
         _write_pool(kept)
     result: dict[str, Any] = {"released": released} if released else {}
+    if refused:
+        result["refused"] = refused
     if stopped:
         return {**result, "status": "stopped", "stopped": stopped, "serial": stopped[0],
                 **({"left_running": reasons} if reasons else {})}

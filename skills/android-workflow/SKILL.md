@@ -300,13 +300,16 @@ Implementers of a team with each other (one owner per file).
   the same base gets them at once;
 - each run has its own device: the first time it needs one it leases a ready device nobody uses (an
   emulator already open, a phone), else one more emulator starts just for it, up to
-  `device.max_emulators` (default 2; a second copy of an AVD runs `-read-only`); past that, `next`
+  `device.max_emulators` (default 2; a busy or failing `device.avd` falls back to another AVD that is not
+  running, else a second copy runs `-read-only` once the first has booted); past that, `next`
   answers `wait_device` naming who holds each device. `device.dedicated` (default `true`): only
   emulators the workflow started are leased, never the developer's own emulator or phone; one another
   run gave back is still reused. `false` (or `ANDROID_WORKFLOW_DEDICATED_DEVICE=0`) lets a run lease an
   emulator already open or a phone. The lease lasts until `finish` (a command
   still installing keeps it until it exits), so between its `before` and `after` rounds no other run
-  installs on that device. A leased emulator that dies is replaced;
+  installs on that device. A leased emulator that dies, or is not booted after `device.boot_stall_seconds`
+  (360), is closed and replaced. `emulator --stop` closes only what this run held: an emulator another run
+  holds is refused by name;
 - the Device APK is built before the device is held (`CLI device build`, started with the gate):
   holding the device costs an `adb install`, not a Gradle build;
 - with 3 or more runs, keep `max_parallel_builds` at 2 (or 1) and close Android Studio: a cold
