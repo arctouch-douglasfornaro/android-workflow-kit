@@ -3417,6 +3417,26 @@ def recorded_verdict(agent_dir: Path, stage: str) -> str:
 
 
 MAESTRO_UNAVAILABLE = re.compile(r"(?im)^\W*maestro:\s*unavailable\b\W*(\S.{3,})$")
+UNREACHABLE = re.compile(r"(?im)^\W*unreachable:\s*(\S.{3,})$")
+UNREACHABLE_SKIP = "the changed surface is not reachable by navigation on the device"
+
+
+def device_unreachable(target: Path, agent_dir: Path) -> str | None:
+    """Why the Device could not reach the changed surface by navigation, or None: a BLOCKED or PARTIAL
+    device-report.md of the current source with an `Unreachable: <why>` line and nothing under Anomalies.
+    The developer's standing rule: such a device check is skipped without asking."""
+    path = agent_dir / "device-report.md"
+    if not path.is_file():
+        return None
+    text = path.read_text(encoding="utf-8")
+    match = UNREACHABLE.search(text)
+    if not match or recorded_verdict(agent_dir, "T7") not in {"blocked", "partial"} or device_report_anomalies(text):
+        return None
+    device = (load_state(target).get("stages") or {}).get("T7") or {}
+    if device.get("fingerprint") != source_fingerprint(target):
+        return None
+    return " ".join(match.group(1).split()).strip(" .-\u2014") or "no navigation path"
+
 
 
 STALE_REPORT_SECONDS = 30  # a replay this much newer than device-report.md ran after the report was written
@@ -3559,7 +3579,8 @@ def finish_run(
         raise ValueError("Implementer incomplete: " + "; ".join(errors))
     agent_dir = run_dir(target)
     said = " ".join((developer_said or "").split())
-    if no_device or (skip_device and "developer" in skip_device.lower()):
+    if no_device or (skip_device and "developer" in skip_device.lower()
+                     and not skip_device.startswith(UNREACHABLE_SKIP)):
         recorded = (read_json(agent_dir / "run-state.json") if (agent_dir / "run-state.json").is_file() else {}).get("no_device")
         if not recorded and not said:
             raise ValueError(
@@ -3579,7 +3600,7 @@ def finish_run(
     spec = read_json(agent_dir / "ticket-spec.json")
     if skip_device and not no_device and not draft and "T7" in spec["route"]:
         serial = connected_device(target)
-        if serial:
+        if serial and not (skip_device.startswith(UNREACHABLE_SKIP) and device_unreachable(target, agent_dir)):
             raise ValueError(
                 f"a device is connected ({serial}): run the Device stage (`CLI emulator --wait`, then aw-device) "
                 "instead of skipping it. If the screen cannot be reached on it, `finish --draft \"<what blocks it>\"`; "

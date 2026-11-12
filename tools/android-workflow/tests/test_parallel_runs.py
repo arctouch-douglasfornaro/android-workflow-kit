@@ -286,6 +286,54 @@ class DecideDeviceTests(test_decide.RunTests):
         self.assertEqual(accepted["status"], "completed")
         self.assertEqual(accepted["device_partial"], "the 1/10 swipe")
 
+    def _unreachable_report(self, status: str) -> None:
+        (self.rundir / "device-report.md").write_text(
+            f"## Status: {status}\n\n## Device\n\nemulator " + "x" * 420 + "\n\n## Scenarios\n\n- AC1 toast: BLOCKED\n\n"
+            "## Not verified\n\n- AC1: no screen navigates to the server-only error state\n\n"
+            "Unreachable: the error toast needs a 503 from the sync API; no navigation path triggers it\n\n"
+            "## Anomalies\n\nNone.\n", encoding="utf-8")
+        (self.rundir / "replay.json").write_text(json.dumps({
+            "fingerprint": source_fingerprint(self.root), "flows": [{"status": "passed"}]}), encoding="utf-8")
+        cli("log", "--target", self.target, "--stage", "Device", "--status", "completed", "--tokens", "1")
+
+    def test_an_unreachable_blocked_device_finishes_ready_without_asking(self) -> None:
+        with StateHome():
+            self.visual_run()
+            with self.connected():
+                self.next()
+                self._unreachable_report("BLOCKED")
+                answer = self.next()
+            with self.connected(), mock.patch.dict(os.environ, {"ANDROID_WORKFLOW_NO_DEVICE_CHECK": ""}):
+                done = cli("finish", "--target", self.target, "--skip-device", answer["command"].split('"')[1])
+        self.assertEqual(answer["next"], "finish")
+        self.assertIn("not reachable by navigation", answer["command"])
+        self.assertEqual(done["status"], "completed")
+        self.assertIsNone(done.get("draft"))
+        self.assertEqual(read_json(self.rundir / "run-state.json")["stages"]["T7"]["status"], "skipped")
+
+    def test_an_unreachable_partial_device_finishes_ready_without_asking(self) -> None:
+        with StateHome():
+            self.visual_run()
+            with self.connected():
+                self.next()
+                self._unreachable_report("PARTIAL")
+                (self.rundir / "media/after/screen.png").write_bytes(b"png")
+                answer = self.next()
+            done = cli("finish", "--target", self.target, "--accept-partial", answer["command"].split('"')[1])
+        self.assertEqual(answer["next"], "finish")
+        self.assertIn("--accept-partial", answer["command"])
+        self.assertEqual(done["status"], "completed")
+
+    def test_a_skip_device_claiming_unreachable_without_the_report_is_refused(self) -> None:
+        with StateHome():
+            self.visual_run()
+            with self.connected():
+                self.next()
+            with self.connected(), mock.patch.dict(os.environ, {"ANDROID_WORKFLOW_NO_DEVICE_CHECK": ""}):
+                refused = cli("finish", "--target", self.target, "--skip-device",
+                              "the changed surface is not reachable by navigation on the device: trust me")
+        self.assertNotEqual(refused.get("status"), "completed")
+
     def test_none_under_anomalies_is_still_a_pass(self) -> None:
         with StateHome():
             self.visual_run()

@@ -229,6 +229,10 @@ CLI status|list --target T                          CLI clean --target T [--tick
      **Never skip the device on your own.** `finish --no-device` is refused unless the run was started
      with `--no-device` or `--developer-said "<the developer's words, verbatim>"` quotes them; the stage log
      and the PR quote those words, and nothing says the developer asked otherwise.
+     The one exception is the developer's standing rule: when the Device could not reach the changed
+     surface by navigation (`Unreachable: <why>` in a BLOCKED or PARTIAL device-report.md, nothing under
+     Anomalies), `next` answers `finish` (`--skip-device` / `--accept-partial` with that reason) and you run
+     it without asking; the PR opens ready for review and says the device did not verify it.
    - `ask_user`: ask `question` once (batched), then run `then`. With `options` (a PARTIAL device
      check), offer them as the choices and run the one the developer picks.
    - `watch` / `done`: step 5 / the Done summary; run `also` (`CLI emulator --stop`: gives the device

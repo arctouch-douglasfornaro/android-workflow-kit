@@ -461,6 +461,17 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
         if device_now and device_verdict == "pass":
             return _finish(spec)
         stop = device_stop(target, agent_dir)
+        if device_now and device_verdict in {"partial", "blocked"}:
+            from android_workflow.cli import UNREACHABLE_SKIP, device_unreachable
+
+            unreachable = device_unreachable(target, agent_dir)
+            if unreachable:
+                # The developer's standing rule: a surface navigation cannot reach skips the device, no question.
+                if device_verdict == "partial":
+                    accepted = f"{UNREACHABLE_SKIP}: {unreachable}".replace('"', "'")
+                    return _answer("finish", "every check passed; the rest of the device check is unreachable: " + unreachable,
+                                   command=f'CLI finish --target TARGET --accept-partial "{accepted}"')
+                return _finish(spec, skip=f"{UNREACHABLE_SKIP}: {unreachable}".replace('"', "'"))
         if device_now and device_verdict == "partial":
             if state.get("finished_fingerprint"):  # a PR round: the developer decides, nothing is pushed yet
                 return _answer("ask_user", "the device check is partial (PR round)", question=PARTIAL_QUESTION,

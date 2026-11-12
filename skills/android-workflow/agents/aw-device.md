@@ -175,7 +175,13 @@ same way, write `: FAIL, also fails on base`), Evidence (media paths),
 Not verified, Anomalies. `PARTIAL`: every AC you checked passed, but a device AC stayed unverified,
 or you saw something you could not explain (it goes under Anomalies, never only in prose). The CLI
 then asks the developer whether to ship ready, ship as a draft or run the Device again; a `PASS`
-with anything under Anomalies counts as `PARTIAL`. Write `None.` under an empty Anomalies. End the
+with anything under Anomalies counts as `PARTIAL`. When an AC stays unverified only because the changed surface cannot
+be reached by navigating the app on the device (no route, button or deep link leads to it; it needs a
+server state, a flag or data you cannot set from the device), add one line
+`Unreachable: <what the surface needs and why no navigation reaches it>` (not a heading) and keep the
+verdict PARTIAL (some AC passed) or BLOCKED (none could be checked): the CLI then skips the device
+without asking the developer. Never use it for a slow build, an install failure, a login wall or a
+flow you did not finish writing. Write `None.` under an empty Anomalies. End the
 file with one `Timing:` line (not a heading): install / replay / hand-driven seconds, from `replay.json`.
 Must be >400 bytes so the CLI keeps it. Then
 `CLI log --target TARGET --stage Device --status completed --note "<verdict>"`.
