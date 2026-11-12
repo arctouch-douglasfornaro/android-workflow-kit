@@ -2372,11 +2372,10 @@ def strip_agent_attribution(text: str) -> str:
 # Opt-in per project (`attribution` in .ai/android-workflow.json); off by default. Agents never write
 # these lines: the CLI strips whatever they wrote and adds the project's own line at delivery/post time.
 HOST_ATTRIBUTION = {
-    "claude": ("🤖 Generated with [Claude Code](https://claude.com/claude-code)",
-               "Co-Authored-By: Claude <noreply@anthropic.com>"),
-    "codex": ("🤖 Generated with [Codex](https://openai.com/codex)", ""),
-    "cursor": ("🤖 Generated with [Cursor](https://cursor.com)", ""),
-    "gemini": ("🤖 Generated with [Gemini CLI](https://github.com/google-gemini/gemini-cli)", ""),
+    "claude": ("🤖 Generated with Claude Code", "Co-Authored-By: Claude <noreply@anthropic.com>"),
+    "codex": ("🤖 Generated with Codex", ""),
+    "cursor": ("🤖 Generated with Cursor", ""),
+    "gemini": ("🤖 Generated with Gemini CLI", ""),
 }
 HOST_ENV = "ANDROID_WORKFLOW_HOST"
 
@@ -2401,7 +2400,10 @@ def agent_host() -> str | None:
 def attribution(target: Path) -> dict[str, Any]:
     """`attribution` from .ai/android-workflow.json: `true`, or {enabled, text, commit_trailer,
     pull_request, review}. Off (nothing added) unless enabled; `text`/`commit_trailer` default to the host's."""
-    raw = durable_overrides(target).get("attribution")
+    overrides = durable_overrides(target)
+    main = None if "attribution" in overrides else main_worktree(target)
+    # A worktree's config is a copy taken when it was created; the project's policy lives in the main checkout.
+    raw = (durable_overrides(main) if main else overrides).get("attribution")
     config = {"enabled": raw} if isinstance(raw, bool) else (raw if isinstance(raw, dict) else {})
     if not config.get("enabled"):
         return {"enabled": False, "footer": "", "trailer": "", "pull_request": False, "review": False}

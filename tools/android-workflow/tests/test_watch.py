@@ -294,6 +294,21 @@ class ReplyTests(unittest.TestCase):
         self.assertEqual(state["posted"], ["C2"])
         self.assertEqual(state["handled"]["C1"]["how"], "replied")
 
+    def test_a_reply_is_signed_with_the_project_footer_when_attribution_is_on(self) -> None:
+        with AndroidProject() as root:
+            finished_run(root)
+            self.inbox(root)
+            config = root / ".ai" / "android-workflow.json"
+            current = json.loads(config.read_text(encoding="utf-8")) if config.exists() else {}
+            config.write_text(json.dumps({**current, "attribution": {"enabled": True}}), encoding="utf-8")
+            posted = {"addPullRequestReviewThreadReply": {"comment": {"id": "C2", "url": "u2"}}}
+            with mock.patch.dict(os.environ, {"ANDROID_WORKFLOW_HOST": "claude"}), \
+                    mock.patch.object(watch, "github_env", return_value={}), \
+                    mock.patch.object(watch, "_graphql", return_value=posted) as call:
+                watch.reply(root, "C1", body="Renamed in abc123.\n\n🤖 Generated with [Cursor](https://cursor.com)")
+        self.assertEqual(call.call_args.kwargs["body"],
+                         "Renamed in abc123.\n\n🤖 Generated with Claude Code")
+
     def test_a_top_level_comment_is_answered_with_a_quote_and_a_mention(self) -> None:
         with AndroidProject() as root:
             finished_run(root)

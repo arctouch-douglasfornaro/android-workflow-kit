@@ -434,6 +434,53 @@ class FlowTests(unittest.TestCase):
         self.assertIn("· blocking · suggestion", shown)
         self.assertEqual(payload["comments"][0]["line"], 5)
 
+    def test_attribution_on_signs_the_body_and_every_inline_comment(self) -> None:
+        findings = {"status": "changes_requested", "acceptance": [], "blocking": [
+            {"id": "B1", "file": REPO, "line": 5, "problem": "cache() never expires", "fix": "return load()",
+             "suggestion": {"line": 5, "replacement": "  fun cache() = load()\n"}}],
+            "concerns": [{"id": "C1", "file": REPO, "line": 4,
+                          "problem": "two members\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)"}]}
+        footer = "🤖 Generated with Claude Code"
+        with Project(self.CHANGE) as project:
+            worktree = self.run_to_draft(project, findings)
+            config = worktree / ".ai" / "android-workflow.json"
+            current = json.loads(config.read_text(encoding="utf-8")) if config.exists() else {}
+            config.write_text(json.dumps({**current, "attribution": {"enabled": True}}), encoding="utf-8")
+            with mock.patch.dict(os.environ, {"ANDROID_WORKFLOW_HOST": "claude"}):
+                drafted = review.draft(worktree)
+            shown = (review.agent_dir_for(worktree) / review.DRAFT_MD).read_text()
+            review.next_action(worktree)
+            with mock.patch.object(review, "fetch_pr", return_value=fake_pr(project.head)), \
+                    mock.patch("android_workflow.watch._gh") as gh:
+                gh.return_value = subprocess.CompletedProcess([], 0, json.dumps({"id": 1, "html_url": "u"}), "")
+                review.post(worktree, drafted["draft_id"])
+                payload = json.loads(gh.call_args.kwargs["stdin"])
+        self.assertTrue(payload["body"].endswith(f"\n\n{footer}"))
+        self.assertEqual(2, len(payload["comments"]))
+        for comment in payload["comments"]:
+            self.assertTrue(comment["body"].endswith(f"\n\n{footer}"), comment["body"])
+            self.assertEqual(1, comment["body"].count("Generated with"))
+            self.assertNotIn("claude.com", comment["body"])
+        self.assertIn("```suggestion\n  fun cache() = load()\n```\n\n" + footer,
+                      next(c["body"] for c in payload["comments"] if "suggestion" in c["body"]))
+        self.assertEqual(3, shown.count(footer))  # the developer sees it on the body and on each comment
+
+    def test_attribution_off_posts_no_footer_and_drops_one_an_agent_wrote(self) -> None:
+        findings = {"status": "approved", "acceptance": [], "blocking": [], "concerns": [
+            {"id": "C1", "file": REPO, "line": 4,
+             "problem": "two members\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)"}]}
+        with Project(self.CHANGE) as project:
+            worktree = self.run_to_draft(project, findings)
+            drafted = review.draft(worktree)
+            review.next_action(worktree)
+            with mock.patch.object(review, "fetch_pr", return_value=fake_pr(project.head)), \
+                    mock.patch("android_workflow.watch._gh") as gh:
+                gh.return_value = subprocess.CompletedProcess([], 0, json.dumps({"id": 1, "html_url": "u"}), "")
+                review.post(worktree, drafted["draft_id"])
+                payload = json.loads(gh.call_args.kwargs["stdin"])
+        self.assertNotIn("Generated with", payload["body"])
+        self.assertEqual("two members", payload["comments"][0]["body"])
+
     def test_a_multi_line_suggestion_spans_its_range_and_fences_backticks(self) -> None:
         findings = {"status": "approved", "acceptance": [], "blocking": [], "suggestions": [
             {"id": "S1", "file": REPO, "line": 4, "problem": "one member", "fix": "merge",

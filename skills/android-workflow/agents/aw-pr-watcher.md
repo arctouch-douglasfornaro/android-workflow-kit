@@ -158,7 +158,8 @@ their OK.
 Written as the developer, in the language of the comment, short and concrete: what was done or why
 not, with the file or commit. No greetings, no apologies, no "Great catch!". Product copy only: never
 a tool, model or agent name, `Generated with …`, `🤖` or an AI disclaimer. Never promise work you are
-not doing in this round.
+not doing in this round. When the project sets `"attribution": {"enabled": true}`, `CLI pr reply`
+itself signs each reply with the host's `🤖 Generated with …` line; you still never write it.
 
 **Finish by writing `RUN/pr-feedback.json` (mode `review`: `RUN/review-replies.json`)**: the file is your result, the return only sums it up. The host logs completion; returning without the file gets you resumed to write it.
 

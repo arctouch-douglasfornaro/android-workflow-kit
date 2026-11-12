@@ -148,9 +148,9 @@ head and proposes resolving the addressed ones). A run of that PR on disk also g
 ## What the CLI decides (change it in `android_workflow/review.py`)
 
 - **Attribution**: off by default. With `"attribution": {"enabled": true}` in `.ai/android-workflow.json`
-  (`"review": false` turns it off for reviews only), the draft carries the host's `🤖 Generated with …`
-  line under the review body, shown in `review-draft.md` and posted with it; never on inline comments or
-  thread replies. Agents never write it themselves.
+  (`"review": false` turns it off for reviews only), the draft carries the host's line (`🤖 Generated with
+  Claude Code`, no link) under the review body, every inline comment and every thread reply, shown in
+  `review-draft.md` and posted with it. Off, the CLI drops any such line before posting. Agents never write it.
 - **Ticket**: every Jira key in the title, body or branch is read into `RUN/ticket/` before the
   Planner; the Planner and the Reviewer both read it.
 - **Run**: the change set is the PR's diff (no ticket-text Localizer), and nothing is implemented: no

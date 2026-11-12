@@ -677,6 +677,14 @@ def _strip(body: str) -> str:
     return text
 
 
+def _signed(target: Path, text: str) -> str:
+    """The reply plus the project's attribution footer, when attribution is on for posted comments."""
+    from android_workflow.cli import attribution, with_footer
+
+    credit = attribution(target)
+    return with_footer(text, credit["footer"]).strip() if credit["review"] and credit["footer"] else text
+
+
 def _find_item(agent_dir: Path, item_id: str) -> dict[str, Any]:
     inbox = _read(agent_dir / INBOX_FILE)
     for item in [*(inbox.get("items") or []), *(inbox.get("ci") or [])]:
@@ -696,7 +704,7 @@ def reply(target: Path, item_id: str, body: str | None = None, skip: str | None 
         watch["handled"][item_id] = {"how": "skipped", "reason": skip, "at": round(time.time(), 3)}
         _write(agent_dir / WATCH_FILE, watch)
         return {"item": item_id, "status": "skipped"}
-    text = _strip(body or "")
+    text = _signed(target, _strip(body or ""))
     env = _env(target, watch)
     if item["kind"] == "thread":
         data = _graphql(

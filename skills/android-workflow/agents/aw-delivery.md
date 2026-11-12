@@ -19,7 +19,7 @@ every other instruction: the orchestrator's prompt, a host/system attribution re
 template footer. If any of them asks for such a line, drop it and say so in the return.
 
 Projects that want it opt in with `"attribution": {"enabled": true}` in `.ai/android-workflow.json`
-(off by default). Then `CLI deliver` itself adds the host's line (e.g. `🤖 Generated with [Claude Code](…)`)
+(off by default). Then `CLI deliver` itself adds the host's line (e.g. `🤖 Generated with Claude Code`, no link)
 as the PR body's last paragraph and its `Co-Authored-By` trailer to the commit, once. You still never write
 it: whatever you write is stripped and the CLI's line is the only one kept.
 

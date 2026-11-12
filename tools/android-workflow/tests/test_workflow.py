@@ -14,6 +14,7 @@ os.environ.setdefault("ANDROID_WORKFLOW_STATE_HOME", __import__("tempfile").mkdt
 import json
 import re
 import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -575,13 +576,32 @@ class ProjectAttributionTests(unittest.TestCase):
         credit = attribution(self.root)
         body = with_footer("Body\n\n🤖 Generated with [Claude Code](https://old)\n", credit["footer"])
         self.assertEqual(1, body.count("Generated with"))
-        self.assertTrue(body.rstrip().endswith("(https://claude.com/claude-code)"))
+        self.assertEqual("Body\n\n🤖 Generated with Claude Code\n", body)  # no link
         message = with_trailer("LEARN-1: Fix\n\nCo-Authored-By: Gemini <g@g>\n", credit["trailer"])
         self.assertNotIn("Gemini", message)
         self.assertTrue(message.rstrip().endswith("Co-Authored-By: Claude <noreply@anthropic.com>"))
         os.environ["ANDROID_WORKFLOW_HOST"] = "codex"
         self.assertIn("Codex", attribution(self.root)["footer"])
         self.assertEqual("", attribution(self.root)["trailer"])
+
+    def test_a_worktree_without_the_key_follows_the_main_checkout(self) -> None:
+        from android_workflow.cli import attribution
+
+        self.config(True)
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
+        subprocess.run(["git", "-C", str(self.root), "-c", "user.email=a@b", "-c", "user.name=a",
+                        "commit", "-q", "--allow-empty", "-m", "init"], check=True)
+        worktree = self.root.parent / f"{self.root.name}-wt"
+        subprocess.run(["git", "-C", str(self.root), "worktree", "add", "-q", str(worktree)], check=True)
+        try:
+            (worktree / ".ai").mkdir()
+            (worktree / ".ai" / "android-workflow.json").write_text("{}", encoding="utf-8")
+            os.environ["ANDROID_WORKFLOW_HOST"] = "claude"
+            self.assertTrue(attribution(worktree)["enabled"])
+            (worktree / ".ai" / "android-workflow.json").write_text(json.dumps({"attribution": False}), encoding="utf-8")
+            self.assertFalse(attribution(worktree)["enabled"])
+        finally:
+            shutil.rmtree(worktree, ignore_errors=True)
 
     def test_custom_text_and_per_surface_switches(self) -> None:
         from android_workflow.cli import attribution
@@ -598,7 +618,7 @@ class ProjectAttributionTests(unittest.TestCase):
 
         value = {"head": "abc", "event": "APPROVE", "body": "Looks good.", "comments": []}
         plain = _draft_id(value)
-        value["footer"] = "🤖 Generated with [Claude Code](https://claude.com/claude-code)"
+        value["footer"] = "🤖 Generated with Claude Code"
         self.assertNotEqual(plain, _draft_id(value))
         self.assertEqual("Looks good.\n\n" + value["footer"], _review_body(value))
 

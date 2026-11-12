@@ -1894,11 +1894,20 @@ def _draft_id(value: dict[str, Any]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
 
 
+def _signed(text: str, footer: str | None) -> str:
+    """Text as posted: no attribution an agent wrote, then the project's footer (when set) as its last
+    paragraph. Blank lines are kept as they are, so a suggestion block is posted untouched."""
+    from android_workflow.cli import AGENT_ATTRIBUTION_PATTERN
+
+    kept = "\n".join(line for line in (text or "").splitlines() if not AGENT_ATTRIBUTION_PATTERN.search(line)).rstrip()
+    if not footer:
+        return kept
+    return f"{kept}\n\n{footer}" if kept else footer
+
+
 def _review_body(value: dict[str, Any]) -> str:
     """The body as posted: the draft's text, then the project's attribution footer when it has one."""
-    from android_workflow.cli import with_footer
-
-    return with_footer(value.get("body") or "", value["footer"]).strip() if value.get("footer") else value.get("body") or ""
+    return _signed(value.get("body") or "", value.get("footer"))
 
 
 def _save_draft(agent_dir: Path, value: dict[str, Any]) -> dict[str, Any]:
@@ -1920,13 +1929,14 @@ def _save_draft(agent_dir: Path, value: dict[str, Any]) -> dict[str, Any]:
     for comment in value["comments"]:
         where = (f"{comment['start_line']}-{comment['line']}" if comment.get("start_line") else str(comment["line"]))
         tag = " · suggestion" if comment.get("suggestion") else ""
-        md += [f"### {comment['id']} · `{comment['path']}:{where}` · {comment['severity']}{tag}", "", comment["body"], ""]
+        md += [f"### {comment['id']} · `{comment['path']}:{where}` · {comment['severity']}{tag}", "",
+               _signed(comment["body"], value.get("footer")), ""]
     if value.get("thread_replies"):
         md += [f"## Replies in others' threads ({len(value['thread_replies'])})", "",
                "Posted as replies after the review; never resolved (drop one: `edit --drop R1`).", ""]
         for item in value["thread_replies"]:
             md += [f"### {item['id']} · `{item.get('path')}:{item.get('line')}` · {item['author']}'s thread · "
-                   f"{item['stance']}", "", item["body"], ""]
+                   f"{item['stance']}", "", _signed(item["body"], value.get("footer")), ""]
     if value.get("resolve"):
         md += [f"## Threads to resolve {'on the OK' if value.get('quiet') else 'after posting'} ({len(value['resolve'])})", "",
                "Our earlier comments the new commits addressed (keep one open: `edit --keep-open T1`).", ""]
@@ -2058,7 +2068,8 @@ def post(target: Path, draft_id: str) -> dict[str, Any]:
     if any(item.get("draft_id") == draft_id for item in state.get("posted") or []):
         # A retry finishes the resolutions the first run could not do; nothing is posted twice.
         resolved, failed = _resolve_threads(env, state, [t["thread"] for t in value.get("resolve") or []])
-        replied, reply_failed = _post_thread_replies(env, state, value.get("thread_replies") or [])
+        replied, reply_failed = _post_thread_replies(env, state, value.get("thread_replies") or [],
+                                                     value.get("footer"))
         _write(agent_dir / STATE_FILE, state)
         return {"status": "already_posted", "posted": state["posted"][-1], "resolved": resolved, "resolve_failed": failed or None,
                 "thread_replies": replied or None, "thread_replies_failed": reply_failed or None}
@@ -2079,7 +2090,8 @@ def post(target: Path, draft_id: str) -> dict[str, Any]:
         _log_posted(agent_dir, f"no new review (already approved); {len(resolved)} thread(s) resolved")
         return {"status": "posted", **entry, "resolved": resolved, "resolve_failed": failed or None}
     payload = {"commit_id": value["head"], "event": value["event"], "body": _review_body(value),
-               "comments": [{"path": c["path"], "line": c["line"], "side": c.get("side", "RIGHT"), "body": c["body"],
+               "comments": [{"path": c["path"], "line": c["line"], "side": c.get("side", "RIGHT"),
+                             "body": _signed(c["body"], value.get("footer")),
                              **({"start_line": c["start_line"], "start_side": c.get("side", "RIGHT")}
                                 if c.get("start_line") else {})}
                             for c in value["comments"]]}
@@ -2094,7 +2106,8 @@ def post(target: Path, draft_id: str) -> dict[str, Any]:
     _write(agent_dir / STATE_FILE, state)
     resolved, failed = _resolve_threads(env, state, [t["thread"] for t in value.get("resolve") or []])
     _write(agent_dir / STATE_FILE, state)
-    replied, reply_failed = _post_thread_replies(env, state, value.get("thread_replies") or [])
+    replied, reply_failed = _post_thread_replies(env, state, value.get("thread_replies") or [],
+                                                 value.get("footer"))
     _write(agent_dir / STATE_FILE, state)
     entry = {**entry, "resolved": resolved, "resolve_failed": failed or None,
              "thread_replies": replied or None, "thread_replies_failed": reply_failed or None}
@@ -2138,7 +2151,7 @@ RESOLVE_MUTATION = "mutation($thread: ID!) { resolveReviewThread(input: {threadI
 
 
 def _post_thread_replies(env: dict[str, str], state: dict[str, Any],
-                         replies_: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+                         replies_: list[dict[str, Any]], footer: str | None = None) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     """Replies in other people's threads, each recorded as it lands (a retry never posts one twice).
     A failure is reported per reply, never fatal: the review already landed."""
     from android_workflow.watch import _graphql
@@ -2153,7 +2166,7 @@ def _post_thread_replies(env: dict[str, str], state: dict[str, Any],
         try:
             data = _graphql(env, "mutation($thread: ID!, $body: String!) { addPullRequestReviewThreadReply("
                                  "input: {pullRequestReviewThreadId: $thread, body: $body}) { comment { id url } } }",
-                            thread=item["thread"], body=item["body"])
+                            thread=item["thread"], body=_signed(item["body"], footer))
             comment = data["addPullRequestReviewThreadReply"]["comment"]
         except Exception as error:  # noqa: BLE001 - reported per reply
             failed.append({"id": item["id"], "error": str(error)[-300:]})
@@ -2493,8 +2506,11 @@ def reply(target: Path, draft_id: str) -> dict[str, Any]:
     _, repo = _remote(target)
     env = github_env(target)
     posted, failed = [], []
+    from android_workflow.watch import _signed as _with_project_footer
+
     for item_id, text in value["replies"].items():
         item = items[item_id]
+        text = _with_project_footer(target, text)
         if item["comment"] in handled:
             continue
         try:
