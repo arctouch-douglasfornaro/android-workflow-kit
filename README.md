@@ -372,7 +372,43 @@ It only wakes up for:
 | `watch.max_hours` passed | Tells you and stops; run `/android-review` again to keep following it. |
 
 It never resolves another reviewer's thread, never posts or resolves without your OK, and never
-merges. The watch lives in the Claude Code session: closing the session stops it. Details: [`skills/android-review/SKILL.md`](skills/android-review/SKILL.md) and the design in
+merges. The watch lives in the Claude Code session: closing the session stops it.
+
+### Listening for review requests
+
+```text
+/android-review            # no PR, from the app's main checkout
+```
+
+With no PR, `/android-review` reviews nothing itself. It listens for open PRs in this repository
+that request **your** review and opens each one in a new Terminal.app or iTerm tab running
+`claude -n "review PR-N" "/android-review N"`. Each tab is an ordinary review: it stops at the draft
+and posts only after your OK **in that tab**. With Terminal One, the listener also adds one task per PR
+to the board.
+
+- It picks up direct review requests, plus PRs assigned to you. Team requests are off by default.
+- It reports drafts, forks, bots (dependabot, renovate, github-actions) and authors outside
+  `OWNER`/`MEMBER`/`COLLABORATOR` once and never launches them, because launching builds the PR's code
+  on your machine. Start one by hand with `/android-review N`.
+- At most 2 reviews run at once (`review.inbox.max_parallel`). Others queue until a slot frees up.
+  A session that only watches its PR after the post does not count.
+- A PR that asks for your review again after you reviewed it is launched again only when its old
+  session has ended (a live session already follows the PR).
+- The listener stops when you close its session or say stop. Tabs it launched keep running.
+
+The `review.inbox.*` keys in `.ai/android-workflow.json` change what counts and how tabs open
+(`terminal`, `iterm`, or your own `command`); see the
+[CLI reference](tools/android-workflow/README.md).
+
+### Were my comments addressed?
+
+Ask "were my comments addressed on PR 22307?" (or "tudo foi addressado?"). The review skill runs
+`android-workflow review status`, a read-only check that needs no worktree and works after the
+reviewing session is gone. For each thread you opened it reports `addressed`, `open`, `resolved`,
+or `resolved_without_change_or_reply` (flagged), plus the commits since your last reviewed head.
+With new commits it offers `/android-review 22307` for a delta round. It posts and resolves nothing.
+
+Details: [`skills/android-review/SKILL.md`](skills/android-review/SKILL.md) and the design in
 [`docs/android-review-design.md`](docs/android-review-design.md).
 
 ## Tests

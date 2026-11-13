@@ -1,6 +1,6 @@
 # Android Review — design
 
-Status: implemented — `skills/android-review/SKILL.md`, `android_workflow/review.py`, agent `aw-media`, tests in `tests/test_review.py`.
+Status: implemented — `skills/android-review/SKILL.md`, `android_workflow/review.py`, `android_workflow/review_inbox.py`, agent `aw-media`, tests in `tests/test_review.py` and `tests/test_review_inbox.py`.
 
 A second mode of the kit: review someone else's GitHub PR end to end and post one review after the
 developer's OK.
@@ -8,6 +8,7 @@ developer's OK.
 ```text
 /android-review 22307            # PR number, in the app's folder
 /android-review https://github.com/org/app/pull/22307
+/android-review                  # no PR: listen for PRs requesting our review (see Inbox)
 ```
 
 ## Decisions
@@ -83,6 +84,29 @@ flowchart TD
    limit are shared with the PR Watcher of our own PRs (`watch.poll`, `watch.over_max_hours`,
    config `watch.max_hours`); only the decision of what to do differs.
 
+## Inbox (no PR given)
+
+`review_inbox.py`, tests in `tests/test_review_inbox.py`. The listener never reviews: it launches
+one ordinary `/android-review N` session per PR, each in its own terminal tab, so every draft and OK
+stays in that PR's session.
+
+| Topic | Decision |
+| --- | --- |
+| What counts | Open PRs of this repository requesting the viewer's review directly. `review.inbox.assigned` (on) adds PRs assigned to us; `review.inbox.team_requests` (off) adds team requests. |
+| Never launched | Drafts (`review.inbox.drafts`), forks, bots and `review.inbox.skip_authors`, authors outside `review.inbox.author_associations` (`OWNER`, `MEMBER`, `COLLABORATOR`). Launching builds the PR's code locally, so these are reported once and left to the developer. |
+| Re-requests | A PR re-requested after our review launches again only when its previous session is no longer alive (the launcher records its PID); a live session already follows the PR with `review wait`. |
+| Parallelism | At most `review.inbox.max_parallel` (2) sessions still reviewing; the rest are `queued`. A session only watching its PR does not count. |
+| Launch | `CLI review launch --pr N` writes `_cache/review-launch/PR-<n>.sh` (records its PID, then `exec`s `review.inbox.agent_command`, default `claude -n {name} {prompt}`) and opens it in Terminal.app or iTerm (`review.inbox.terminal`) or via `review.inbox.command`. |
+| Polling | `CLI review inbox --wait` uses the `pr wait` polling (`watch.poll`). |
+| Untrusted input | The listener reads no PR title, body or code; only the launched session does, under the usual rules. |
+
+## Were my comments addressed?
+
+`CLI review status --pr N` (number, URL or branch): read-only, no worktree, independent of the session
+that posted. Lists each thread we opened as `addressed` (line or file changed since our reviewed head,
+or someone replied), `open`, `resolved` or `resolved_without_change_or_reply`, plus commits since our
+last reviewed head; with new commits the next step is a delta round with `/android-review N`.
+
 ## UI-change rule (code, not prose)
 
 Device runs when the diff touches any of: `@Composable` functions, `res/layout|drawable|values*`
@@ -102,7 +126,7 @@ upgrade a skip to "device" with a reason; it never downgrades.
 | Re-review | `CLI delta` |
 | Live view | `office.py` (Planner, Reviewer, Device desks; the Media analyst has no desk yet) |
 
-New: `review.py` (intake, next, CI, draft, post), `aw-media` agent, `skills/android-review/SKILL.md`, review modes in `aw-planner` and `aw-reviewer`. `decide.py` is reused (device lease, late before), not changed.
+New: `review.py` (intake, next, CI, draft, post, status), `review_inbox.py` (inbox, launch), `aw-media` agent, `skills/android-review/SKILL.md`, review modes in `aw-planner` and `aw-reviewer`. `decide.py` is reused (device lease, late before), not changed.
 
 ## Security and privacy
 
