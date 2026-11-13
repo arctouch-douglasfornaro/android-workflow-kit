@@ -2716,6 +2716,15 @@ def dispatch(target: Path, args: Any) -> tuple[dict[str, Any], int]:
         return replies(target, drop=args.drop, set_text=args.set, keep_open=getattr(args, "keep_open", None)), 0
     if action == "status":
         return status(target, args.pr), 0
+    if action in {"inbox", "launch"}:
+        from android_workflow import review_inbox
+
+        if action == "inbox":
+            return review_inbox.inbox(target, wait=args.wait, timeout=args.timeout), 0
+        if not args.pr:
+            raise ValueError("launch requires --pr")
+        result = review_inbox.launch(target, args.pr, dry_run=args.dry_run)
+        return result, 0 if result["status"] in {"launched", "running", "dry_run"} else 1
     if action == "reply":
         result = reply(target, args.draft_id)
         return result, 0 if result["status"] == "posted" else 1
