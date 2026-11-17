@@ -45,12 +45,27 @@ player notices:
 - Use the app's own feature names in each language (look them up in the app's string files, e.g.
   `Localization.kt`, `strings.xml`, `Localizable.strings`), so the notes match the UI.
 
-## 3. Locales
+## 3. Locales (detected, never guessed)
 
-Write every locale the project ships in the stores. Find them in the store metadata file (keys like
-`en-US`, `pt-BR`, `es-ES`) or `fastlane/metadata/{android,ios}/<locale>`. If none is found, use the
-app's UI languages and say so. Write each language natively (not word-for-word): Brazilian
-Portuguese for pt-BR, Spain Spanish for es-ES, US English for en-US.
+The script in step 1 prints them; `--locales` prints only them:
+
+```bash
+python3 ~/.ai/skills/release-notes/scripts/release_changes.py --locales
+```
+
+- **Store locales** come first: the keys of the store metadata file (`STORE_METADATA.json`
+  `localizations`) or the folders under `fastlane/metadata/android` / `fastlane/metadata`. These are
+  the languages the store listing already has, so write exactly these.
+- **App languages** come from the app itself: Android `res/values-*/strings.xml`, Compose
+  `composeResources/values-*`, iOS `*.lproj`, or a `Language` enum with ISO codes in Kotlin/Swift.
+  Bare codes get the store's default region (`pt` → `pt-BR`, `es` → `es-ES`, `en` → `en-US`). The
+  default `values/` folder has no code: the script can't tell its language, so assume en-US unless
+  the strings say otherwise.
+- If the app has a language the store texts don't, the script says so: ask once whether to add it.
+  With no store file, write every app language. Nothing found at all: ask the user.
+
+Write each language natively (not word-for-word): Brazilian Portuguese for pt-BR, Spain Spanish for
+es-ES, Latin American Spanish for es-419, US English for en-US, and so on.
 
 ## 4. Texts and limits
 
@@ -68,8 +83,9 @@ Check the limits with the script (it counts characters the way the stores do):
 python3 ~/.ai/skills/release-notes/scripts/release_changes.py --check <notes.json>
 ```
 
-where `notes.json` is `{"en-US": {"whatsNew": "...", "promotionalText": "..."}, ...}`. Shorten and
-re-check until every locale passes; never cut a line in the middle.
+where `notes.json` is `{"en-US": {"whatsNew": "...", "promotionalText": "..."}, ...}` (write it in a
+temp/scratch folder, not in the project). It also fails when a detected locale is missing. Shorten
+and re-check until every locale passes; never cut a line in the middle.
 
 ## 5. Save (only with `save`, or when the user asks)
 
@@ -79,6 +95,26 @@ unless asked. If the project has no such file, don't create one; just show the t
 
 ## Output
 
-For each locale, a heading, then the What's New and the Promotional Text in separate code blocks
-(easy to copy), each with its character count and limit. After that, one line with the baseline
-used and one line listing what was left out on purpose (e.g. economy changes, ads, analytics).
+1. **Google Play** — one code block with every locale's What's New, in the exact format the Play
+   Console release notes field takes, so it is pasted once. Generate it with
+   `release_changes.py --play <notes.json>` (locales sorted by tag, each wrapped in its own tag, no
+   blank lines between them):
+
+   ```
+   <en-US>
+   • ...
+   </en-US>
+   <es-ES>
+   • ...
+   </es-ES>
+   <pt-BR>
+   • ...
+   </pt-BR>
+   ```
+
+2. **App Store** — for each locale, a heading, then the What's New and the Promotional Text in
+   separate code blocks (App Store Connect takes them one field and one locale at a time), each with
+   its character count and limit.
+
+After that, one line with the baseline used and one line listing what was left out on purpose
+(e.g. economy changes, ads, analytics).

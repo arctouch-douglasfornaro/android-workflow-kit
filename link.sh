@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One-time setup after cloning this kit to ~/.ai: point every coding tool at it.
 #
-# Each tool reads its own folder in your home (~/.claude, ~/.codex, ~/.cursor, ~/.gemini, ~/.agents).
+# Each tool reads its own folder in your home (~/.claude, ~/.codex, ~/.cursor, ~/.gemini, ~/.gemini/antigravity for Antigravity, ~/.agents).
 # This creates links from those folders to the matching folder in this kit, so every tool reads the
 # same source of truth, and allows the workflow's own commands in Claude Code. Edits to the kit apply at once; re-run only after the kit adds or removes an
 # agent or skill. Safe to run again.
@@ -14,7 +14,7 @@ if [ "$KIT" != "$HOME/.ai" ]; then
 fi
 BACKUP="$HOME/.ai-backup/$(date +%Y%m%d-%H%M%S)"
 
-for host in .claude .codex .cursor .gemini .agents; do
+for host in .claude .codex .cursor .gemini .gemini/antigravity .agents; do
   for kind in skills agents; do
     src="$KIT/$host/$kind"
     [ -d "$src" ] || continue
