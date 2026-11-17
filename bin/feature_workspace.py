@@ -276,6 +276,28 @@ def bootstrap_worktree(source, path, timeout=300):
     return report
 
 
+def existing_ticket_branch(ticket, username, repo_root):
+    """This user's branch for the ticket that exists only on origin (`<username>/<TICKET>-…`), newest first.
+
+    Recreating a worktree after the worktree and its local branch were deleted built the name again
+    from the title, so a title that changed meanwhile created a second branch beside the PR's own. A
+    local branch of the ticket is only reported (`other_ticket_branches`): a second run is a choice."""
+    if not is_valid_ticket(ticket) or not username:
+        return None
+    marker = f"{username}/{ticket}".lower()
+    if other_ticket_branches(ticket, "", repo_root):
+        return None
+    listed = git(["for-each-ref", "--sort=-committerdate", "--format=%(refname)", "refs/remotes/origin"],
+                 repo_root, check=False)
+    for ref in listed.split():
+        name = ref.removeprefix("refs/remotes/origin/")
+        lower = name.lower()
+        if ref.endswith("/HEAD") or not (lower == marker or lower.startswith(marker + "-")):
+            continue
+        return name
+    return None
+
+
 def other_ticket_branches(ticket, branch, repo_root):
     """Local branches already carrying this ticket id, so a second run of it is a choice, not an accident."""
     listed = git(["for-each-ref", "refs/heads", "--format=%(refname:short)"], repo_root, check=False)
@@ -377,12 +399,22 @@ def main(argv=None):
     feature_id = build_feature_id(args.ticket, args.title, stamp)
     branch = build_branch_name(username, feature_id)
     current = current_branch(repo_root)
+    reused = None
+    if is_valid_ticket(args.ticket) and not local_branch_exists(branch, repo_root):
+        if not args.dry_run:
+            git(["fetch", "origin"], repo_root, check=False)
+        if not remote_branch_exists(branch, repo_root):
+            reused = existing_ticket_branch(args.ticket, username, repo_root)
+            if reused:
+                branch, feature_id = reused, reused.split("/", 1)[1]
 
     result = {
         "base_branch": base, "username": username, "username_source": source,
         "feature_id": feature_id, "branch": branch, "current_branch": current,
         "worktree_path": "-",
     }
+    if reused:
+        result["reused_ticket_branch"] = reused
 
     use_worktree = args.worktree is not None
     if use_worktree:

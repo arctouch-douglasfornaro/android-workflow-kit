@@ -2434,7 +2434,9 @@ def wait(target: Path, timeout: float = 540, interval: float = 60) -> dict[str, 
         _record_manual(agent_dir, pr, state)
         if pr.get("state") != "OPEN":
             _finish_run(target, str(pr.get("state")).lower())
-            return True, {"status": str(pr.get("state")).lower(), "next": "stop: the PR is over"}, ""
+            return True, {"status": str(pr.get("state")).lower(),
+                          "next": f"the PR is over: `CLI cleanup --target {state.get('main') or target} --pr "
+                                  f"{context['number']} --force` removes its review worktree (run it last); stop"}, ""
         items = _write_inbox(agent_dir, pr, state)
         if pr.get("headRefOid") != context.get("head"):
             return True, {"status": "new_commits", "head": pr.get("headRefOid"), "replies_pending": len(items),

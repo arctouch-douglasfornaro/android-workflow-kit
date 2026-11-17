@@ -3928,11 +3928,15 @@ def run(target: Path, ticket: dict[str, Any], take_over: bool = False,
     agent_dir = run_dir(target, ticket_id)
     if not take_over:
         claim_checkout(target, ticket_id)
+    from android_workflow.cleanup import restore_run
+
+    restored = restore_run(target, ticket_id)  # a worktree `cleanup` removed while its PR was open
     agent_dir.mkdir(parents=True, exist_ok=True)
     set_current(target, ticket_id)
     mark_moved_copies(target, ticket_id)
     if review_files is None and resumable(agent_dir):
-        return resume_run(target, agent_dir, ticket, no_device=no_device)
+        resumed = resume_run(target, agent_dir, ticket, no_device=no_device)
+        return {**resumed, "restored_from_archive": True} if restored else resumed
     spec = keep_planner_decisions(agent_dir, spec, ticket)
     if review_files is not None:
         spec["review_files"] = list(review_files)
@@ -4267,6 +4271,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                                               "unit | render | device | both")
     list_parser = subparsers.add_parser("list")
     list_parser.add_argument("--target", required=True, type=Path)
+    cleanup_parser = subparsers.add_parser(
+        "cleanup", help="remove the workflow's worktrees whose PR is merged or closed (--all: every one; open "
+                        "PRs' runs are archived in the main checkout first)")
+    cleanup_parser.add_argument("--target", required=True, type=Path)
+    cleanup_parser.add_argument("--all", action="store_true", help="every worktree, not only merged/closed PRs")
+    cleanup_parser.add_argument("--pr", type=int, help="only the worktree of this PR")
+    cleanup_parser.add_argument("--base", action="store_true", help="also remove the base-build checkout")
+    cleanup_parser.add_argument("--dry-run", action="store_true", help="say what would go; remove nothing")
+    cleanup_parser.add_argument("--force", action="store_true",
+                                help="also a worktree a session touched in the last 15 min (the session asking for it)")
     clean_parser = subparsers.add_parser("clean")
     clean_parser.add_argument("--target", required=True, type=Path)
     clean_parser.add_argument("--ticket", help="delete only this ticket's run; without it every run is deleted")
@@ -4537,6 +4551,12 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
         runs = list_runs(target)
         current = next((item["ticket_id"] for item in runs if item["current"]), None)
         return {"runs": runs, "current": current}, 0
+    if args.command == "cleanup":
+        from android_workflow.cleanup import cleanup
+
+        result = cleanup(target, scope="all" if args.all else "merged", base=args.base, dry_run=args.dry_run,
+                         pr=args.pr, force=args.force)
+        return result, 1 if result["failed"] else 0
     if args.command == "clean":
         from android_workflow.live import stop_watcher
 

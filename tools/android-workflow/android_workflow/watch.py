@@ -1242,7 +1242,8 @@ def next_step(decision: dict[str, Any], target: Path) -> str:
     if action == "needs_user":
         return "tell the developer why; stop"
     if action in {"merged", "closed"}:
-        return "log the PR Watcher completed; stop"
+        return ("log the PR Watcher completed, then `python3 ~/.ai/bin/android-workflow cleanup --target "
+                f"{target} --pr {decision.get('pr')} --force` (removes this PR's worktree; run it last); stop")
     return again
 
 

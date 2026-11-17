@@ -319,5 +319,8 @@ In `RUN`: `pr-context.json` (with `copies`), `ticket/<KEY>.md`, `copy-diff/*.dif
 
 The review is posted (or the developer said stop). Show: PR URL, event, inline comment count, the
 posted review URL, `RUN/review-draft.md`, and the absolute `media/before` / `media/after` paths
-when the device ran. Remove the worktree only when the developer asks
-(`git -C MAIN worktree remove WT`).
+when the device ran. The worktree stays while the PR is open.
+When the watch says the PR is over, run `CLI cleanup --target MAIN --pr N --force` last. "Delete the worktrees",
+"apague os worktrees" → `CLI cleanup --target MAIN` (merged and closed PRs; `--all` for every one,
+open PRs' runs archived first; `--base` also the base-build checkout; `--dry-run` to list). Never
+`git worktree remove` or `rm -rf` by hand: submodules make git refuse, and an open PR's run is lost.

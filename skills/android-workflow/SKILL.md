@@ -150,6 +150,7 @@ CLI render run|verdict|route --target T          (render RUN/render-request.json
 CLI render prefer --target T --mode auto|device|render   CLI render design --target T --skip "why"
 CLI device scaffold|build|install|release --target T [--serial S]   (flow templates from the plan's recipe; the current APK with no device held; it installed on the device; give the device back)
 CLI status|list --target T                          CLI clean --target T [--ticket ID | --stale [HOURS]]
+CLI cleanup --target T [--all] [--pr N] [--base] [--dry-run]   (worktrees of merged/closed PRs; --all archives open runs first)
 ```
 
 ## Execute
@@ -339,7 +340,9 @@ CLI status|list --target T                          CLI clean --target T [--tick
     cancelled/timed-out job) is re-run once by `pr wait` itself (`wait` for `re-run of …`, logged).
     The rest reach `aw-pr-watcher` with a `hint` (`ours` when the log names a file this PR changed).
     - `merged` / `closed` → `CLI log --stage "PR Watcher" --status completed --note "<merged|closed>"`,
-      stop. `needs_user` (too many rounds, or watched for `watch.max_hours`) → tell the developer and stop.
+      then, last, `CLI cleanup --target TARGET --pr N --force` (removes this PR's worktree), stop. Asked to
+      delete worktrees → `CLI cleanup` (never `git worktree remove` or `rm -rf` by hand: an open PR's
+      run is archived by it and `start` in a recreated worktree resumes it). `needs_user` (too many rounds, or watched for `watch.max_hours`) → tell the developer and stop.
     Merge rule: the PR is approved (GitHub's review decision) and nobody may still be asking for
     changes; a reviewer still requested who has not answered does not hold an approved PR back
     (`watch.wait_for_requested_reviewers: true` waits for them all). Without any approval it waits

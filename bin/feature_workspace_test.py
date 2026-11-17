@@ -117,6 +117,23 @@ class TestStartPoint(RepoCase):
         self.assertEqual(remote_sha, run(self.dir, "rev-parse", "HEAD"))
         self.assertTrue(os.path.exists(os.path.join(self.dir, "w.txt")))
 
+    def test_a_remote_branch_of_the_ticket_is_reused_although_the_title_changed(self) -> None:
+        run(self.dir, "checkout", "-q", "-b", "me/MF-98-old-title", "master")
+        with open(os.path.join(self.dir, "x.txt"), "w") as f:
+            f.write("pr work\n")
+        run(self.dir, "add", "x.txt")
+        run(self.dir, "commit", "-qm", "pr work")
+        run(self.dir, "push", "-q", "-u", "origin", "me/MF-98-old-title")
+        run(self.dir, "checkout", "-q", "master")
+        run(self.dir, "branch", "-qD", "me/MF-98-old-title")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = fw.main(["--ticket", "MF-98", "--title", "a new title", "--username", "me",
+                          "--repo-root", self.dir])
+        self.assertEqual(0, rc)
+        self.assertEqual("me/MF-98-old-title", run(self.dir, "rev-parse", "--abbrev-ref", "HEAD"))
+        self.assertTrue(os.path.exists(os.path.join(self.dir, "x.txt")))
+
     def test_new_branch_starts_from_base(self) -> None:
         base_sha = run(self.dir, "rev-parse", "master")
         rc = fw.main(["--ticket", "MF-1", "--title", "fresh", "--username", "me",
