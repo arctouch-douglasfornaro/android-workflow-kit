@@ -221,11 +221,13 @@ def inbox(target: Path, wait: bool = False, timeout: float = 540, interval: floa
 
     target = target.resolve()
     _, repo = _remote(target)
-    env = github_env(target)
     config = inbox_config(target)
+    resolved: dict[str, dict[str, str]] = {}
 
     def step() -> tuple[bool, dict[str, Any], str]:
-        found = scan(target, search(env, repo, config), config)
+        if "env" not in resolved:
+            resolved["env"] = github_env(target)  # retried by the poll while GitHub is unreachable
+        found = scan(target, search(resolved["env"], repo, config), config)
         news = bool(found["launch"] or found["skipped"])
         return news, found, json.dumps([found["running"], [q["pr"] for q in found["queued"]]])
 
@@ -234,6 +236,9 @@ def inbox(target: Path, wait: bool = False, timeout: float = 540, interval: floa
     else:
         _, result, _ = step()
         timed_out = False
+    if result.get("status") == "offline":
+        return {"status": "offline", "repo": repo, "error": (result.get("waiting_for") or [""])[0],
+                "next": "GitHub is unreachable (network, not a login problem): CLI review inbox --wait again"}
     commands = [f"CLI review launch --target {target} --pr {item['pr']}" for item in result["launch"]]
     status = "new" if result["launch"] else "skipped" if result["skipped"] else "timed_out" if timed_out else "idle"
     if commands:

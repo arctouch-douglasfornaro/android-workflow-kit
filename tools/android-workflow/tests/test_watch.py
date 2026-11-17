@@ -785,6 +785,35 @@ class ResumeDeliveredTests(unittest.TestCase):
             self.assertFalse(resumable(agent_dir))
 
 
+class OfflineTests(unittest.TestCase):
+    def test_a_network_failure_is_waited_out_and_never_called_a_login_problem(self) -> None:
+        calls = {"n": 0}
+
+        def step():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise watch.GitHubUnreachable("GitHub is unreachable (network): dial tcp: i/o timeout")
+            return True, {"action": "respond"}, "k"
+
+        with mock.patch.object(watch.time, "sleep"):
+            result, timed_out = watch.poll(step, timeout=600, interval=15)
+        self.assertEqual((result, timed_out, calls["n"]), ({"action": "respond"}, False, 2))
+
+    def test_github_env_tells_network_from_login(self) -> None:
+        offline = subprocess.CompletedProcess([], 1, "", "error connecting to api.github.com")
+        with AndroidProject() as root, \
+                mock.patch.object(watch, "_remote", return_value=("github.com", "o/r")), \
+                mock.patch.object(watch, "_accounts", return_value=[]), \
+                mock.patch.object(watch, "_gh", return_value=offline), \
+                mock.patch.dict("os.environ", {"GH_TOKEN": "", "GITHUB_TOKEN": ""}):
+            with self.assertRaises(watch.GitHubUnreachable):
+                watch.github_env(root)
+            with mock.patch.object(watch, "_gh", return_value=subprocess.CompletedProcess([], 1, "", "HTTP 404")):
+                with self.assertRaises(ValueError) as login:
+                    watch.github_env(root)
+        self.assertIn("gh auth login", str(login.exception))
+
+
 class AccountTests(unittest.TestCase):
     def test_the_pr_authors_account_is_used_even_when_another_is_active(self) -> None:
         tokens = {"work": "t-work", "personal": "t-personal"}

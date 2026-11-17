@@ -124,6 +124,26 @@ class SetupAdoptionTests(unittest.TestCase):
         self.assertEqual(again["status"], "ready")
         self.assertNotIn("adopted_setup", again)  # set up now: nothing to adopt
 
+    def test_added_dependencies_and_version_bumps_still_adopt_the_setup(self) -> None:
+        from android_workflow.cli import run_setup
+
+        with GitProject() as root, tempfile.TemporaryDirectory() as other:
+            self.set_up_main(root)
+            worktree = Path(other).resolve() / "wt"
+            git(root, "worktree", "add", "-q", str(worktree), "-b", "wt")
+            build = worktree / "app/build.gradle.kts"
+            build.write_text(build.read_text(encoding="utf-8")
+                             + '\ndependencies {\n    implementation("com.example:lib:2.0")\n    testImplementation(libs.junit)\n}\n',
+                             encoding="utf-8")
+            catalog = worktree / "gradle/libs.versions.toml"
+            catalog.parent.mkdir(parents=True, exist_ok=True)
+            source_catalog = root / "gradle/libs.versions.toml"
+            source_catalog.parent.mkdir(parents=True, exist_ok=True)
+            source_catalog.write_text('[versions]\nkotlin = "2.0.0"\n[libraries]\na = "x:y:1"\n', encoding="utf-8")
+            catalog.write_text('[versions]\nkotlin = "2.1.0"\n[libraries]\na = "x:y:2"\nb = "x:z:1"\n', encoding="utf-8")
+            result = run_setup(worktree, source_repo=root)
+        self.assertEqual(result["adopted_setup"], {"adopted": True, "from": str(root)}, result)
+
     def test_a_worktree_whose_build_files_differ_still_needs_the_setup_agent(self) -> None:
         from android_workflow.cli import run_setup
 

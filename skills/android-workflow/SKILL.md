@@ -72,9 +72,11 @@ Keep log notes neutral (`--note "writing the PR description"`), never a list of 
 Record `TARGET`, `RUN` and `CLI` in the first chat message, and end that message with the office
 the user opens to watch the agents: `office_message` from the `start` output, copied as is, on its
 own line (a bold `Office:` label and a `file://` link that one click, Cmd+click in a terminal, opens
-at this run; `status` prints it too). Never reword it, build that link yourself or read that page. If the ticket id looks like a
-Jira key and this host has a Jira tool (MCP server or connector), fetch the issue body and
-pass it to the Planner.
+at this run; `status` prints it too). Never reword it, build that link yourself or read that page. Fetch the ticket and pass it to the Planner:
+a key whose prefix is in `tickets.linear_prefixes` (`.ai/android-workflow.json`, default `["LT"]`)
+or a linear.app link → the Linear tool (`get_issue`, then `list_comments`); any other key → the Jira
+tool (`getJiraIssue`). A Jira ticket that says it moved to Linear → read the Linear issue too. The
+acceptance criteria come from the issue and its comments.
 
 ## Agents
 

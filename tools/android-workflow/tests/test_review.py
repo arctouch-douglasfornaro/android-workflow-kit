@@ -117,6 +117,9 @@ class PureRuleTests(unittest.TestCase):
         self.assertEqual([(i["text"], i["checked"]) for i in items],
                          [("Tests added", True), ("Dark mode", False), ("Screenshots", True)])
         self.assertEqual(review.jira_keys("APP-12 fix", "see MOB-3 and APP-12"), ["APP-12", "MOB-3"])
+        self.assertEqual(review.jira_keys("NOTICKET-0 tweak", "LT-578 follow-up"), ["LT-578"])
+        config = {"linear_prefixes": ["LT"]}
+        self.assertEqual([review.ticket_source(key, config) for key in ("LT-578", "LEARN-4021")], ["linear", "jira"])
 
     def test_only_github_attachment_urls_are_media(self) -> None:
         body = ("![a](https://github.com/user-attachments/assets/1a2b-3c) "
@@ -161,7 +164,11 @@ class PureRuleTests(unittest.TestCase):
                                         {}, True)[0], "APPROVE")
         self.assertEqual(review.verdict([], {"status": "pending"}, {}, "blocked", [], {}, True)[0], "COMMENT")
         self.assertEqual(review.verdict([], {"status": "none"}, {"status": "passed"}, "blocked", [], {}, True)[0], "APPROVE")
-        self.assertEqual(review.verdict([], ci_ok, {}, None, [{"status": "unverified"}], {}, True)[0], "COMMENT")
+        # an unproven claim with CI green is listed in the body, never a reason to withhold the approval
+        self.assertEqual(review.verdict([], ci_ok, {}, None, [{"status": "unverified"}], {}, True)[0], "APPROVE")
+        self.assertEqual(review.verdict([], {"status": "failed_optional"}, {}, None, [{"status": "unverified"}], {}, True)[0],
+                         "COMMENT")
+        self.assertEqual(review.verdict([], ci_ok, {}, None, [{"status": "follow_up"}], {}, True)[0], "APPROVE")
         self.assertEqual(review.verdict([], ci_ok, {}, None, [{"status": "unmet"}], {}, True)[0], "REQUEST_CHANGES")
         # only what the PR itself introduces blocks: a template item, a failure the base has too, an open question
         template = {"status": "unmet", "source": "template"}
@@ -176,10 +183,10 @@ class PureRuleTests(unittest.TestCase):
         self.assertEqual(review.verdict([nit], ci_ok, {}, None, [], {}, True, max_event="COMMENT")[0], "APPROVE")
         self.assertEqual(review.verdict([], ci_ok, {}, None, [], {}, False)[0], "COMMENT")
         self.assertEqual(review.verdict([blocking], ci_ok, {}, None, [], {"own_pr": True}, True)[0], "COMMENT")
-        # approve_with_concerns: concerns ride along an approval; an unproven claim still comments
+        # approve_with_concerns: concerns ride along an approval, unproven claims too while CI is green
         self.assertEqual(review.verdict([concern, nit], ci_ok, {}, None, [], {}, True, True), ("APPROVE", []))
         self.assertEqual(review.verdict([concern], ci_ok, {}, None, [{"status": "unverified"}], {}, True, True)[0],
-                         "COMMENT")
+                         "APPROVE")
         # CI still running holds the approval, unless the change cannot affect the build
         pending = {"status": "pending"}
         self.assertEqual(review.verdict([], pending, {}, None, [], {}, True)[0], "COMMENT")
@@ -775,7 +782,7 @@ class DraftEditTests(unittest.TestCase):
     def test_an_event_override_rewrites_the_headline_and_is_logged(self) -> None:
         with Project(FlowTests.CHANGE) as project:
             worktree = FlowTests().run_to_draft(project, {"status": "approved", "blocking": [], "acceptance": [
-                {"id": "AC1", "status": "unverified"}], "concerns": [{"id": "C1", "file": REPO, "line": 5, "problem": "p"}]})
+                {"id": "AC1", "status": "open", "question": "q?"}], "concerns": [{"id": "C1", "file": REPO, "line": 5, "problem": "p"}]})
             agent_dir = review.agent_dir_for(worktree)
             drafted = review.draft(worktree)
             self.assertEqual(drafted["event"], "COMMENT")
@@ -787,7 +794,7 @@ class DraftEditTests(unittest.TestCase):
             edits = [json.loads(line)["edit"] for line in (agent_dir / "review-decisions.jsonl").read_text().splitlines()
                      if "edit" in json.loads(line)]
         self.assertEqual((edits[0]["event"]["from"], edits[0]["event"]["to"]), ("COMMENT", "APPROVE"))
-        self.assertIn("1 claim(s) without evidence", edits[0]["event"]["computed"])
+        self.assertIn("1 acceptance criterion/criteria waiting for an answer", edits[0]["event"]["computed"])
         self.assertEqual((edits[0]["rewritten"][0]["before"], edits[0]["rewritten"][0]["after"]), ("p", "shorter"))
         self.assertIn("+Approving, thanks!", edits[1]["body"]["diff"])
 
@@ -1138,6 +1145,27 @@ class RenderRouteTests(unittest.TestCase):
         self.assertIn("_(in a JVM render)_", body)
 
 
+class FollowUpTests(unittest.TestCase):
+    def test_an_ac_left_to_a_follow_up_is_listed_and_never_blocks(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as folder:
+            agent_dir = Path(folder)
+            (agent_dir / review.SPEC_FILE).write_text(json.dumps({"acceptance": [
+                {"id": "AC7", "text": "icons per mode", "follow_up": "LT-990 adds the icons"},
+                {"id": "AC1", "text": "highlight"}]}), encoding="utf-8")
+            (agent_dir / "review.json").write_text(json.dumps({"acceptance": [
+                {"id": "AC7", "status": "unmet"}, {"id": "AC1", "status": "met"}]}), encoding="utf-8")
+            (agent_dir / review.MEDIA_FILE).write_text(json.dumps({"findings": [
+                {"severity": "blocking", "ac": "AC7", "problem": "no icons in the video"},
+                {"severity": "blocking", "ac": ["AC1"], "problem": "wrong highlight"}]}), encoding="utf-8")
+            rows = review._acceptance(agent_dir)
+            findings = review._findings(agent_dir)
+        self.assertEqual([(row["id"], row["status"]) for row in rows], [("AC7", "follow_up"), ("AC1", "met")])
+        self.assertEqual(rows[0]["follow_up"], "LT-990 adds the icons")
+        self.assertEqual([item["severity"] for item in findings], ["concern", "blocking"])
+
+
 class SignalTests(unittest.TestCase):
     CHANGE = FlowTests.CHANGE
 
@@ -1148,6 +1176,8 @@ class SignalTests(unittest.TestCase):
             write_profile(worktree)
             fetch = review.next_action(worktree)
             self.assertEqual((fetch["next"], fetch["keys"]), ("fetch_ticket", ["APP-12"]))
+            self.assertEqual(fetch["sources"], {"APP-12": "jira"})
+            self.assertIn("get_issue", fetch["how"])
             ticket_file = Path(result["run"]) / review.TICKET_DIR / "APP-12.md"
             ticket_file.parent.mkdir(exist_ok=True)
             ticket_file.write_text("# APP-12\n", encoding="utf-8")

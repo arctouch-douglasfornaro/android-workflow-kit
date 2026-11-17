@@ -133,6 +133,15 @@ def _accounts(host: str) -> list[str]:
     return re.findall(r"account (\S+)", status.stdout + status.stderr)
 
 
+NETWORK_ERROR = re.compile(
+    r"could not resolve host|no such host|network is unreachable|connection (?:refused|reset|timed out)|"
+    r"i/o timeout|dial tcp|tls handshake|error connecting to|timed out|temporary failure in name resolution", re.I)
+
+
+class GitHubUnreachable(ValueError):
+    """GitHub could not be reached (network, DNS, VPN): retry later; never a login problem."""
+
+
 def github_env(target: Path, prefer: str | None = None) -> dict[str, str]:
     """The `gh` environment for this repository: the logged-in account that can see it.
 
@@ -163,11 +172,15 @@ def github_env(target: Path, prefer: str | None = None) -> dict[str, str]:
             if token.returncode != 0 or not token.stdout.strip():
                 continue
             env = {"GH_TOKEN": token.stdout.strip()}
-        if _gh(["api", f"repos/{repo}", "--jq", ".full_name"], env=env).returncode == 0:
+        probe = _gh(["api", f"repos/{repo}", "--jq", ".full_name"], env=env)
+        if probe.returncode == 0:
             if login and login != remembered:
                 cache.parent.mkdir(parents=True, exist_ok=True)
                 cache.write_text(json.dumps({repo: login}), encoding="utf-8")
             return env
+        if NETWORK_ERROR.search(probe.stderr or probe.stdout or ""):
+            raise GitHubUnreachable(f"GitHub is unreachable (network, not a login problem): "
+                                    f"{(probe.stderr or probe.stdout).strip()[-200:]}")
     raise ValueError(f"no logged-in `gh` account can see {repo}; run `gh auth login`")
 
 
@@ -177,7 +190,10 @@ def _graphql(env: dict[str, str], query: str, **variables: Any) -> dict[str, Any
         args += ["-F" if isinstance(value, int) else "-f", f"{key}={value}"]
     result = _gh(args, env=env)
     if result.returncode != 0:
-        raise ValueError(f"GitHub query failed: {(result.stderr or result.stdout).strip()[-600:]}")
+        error = (result.stderr or result.stdout).strip()
+        if NETWORK_ERROR.search(error):
+            raise GitHubUnreachable(f"GitHub is unreachable (network): {error[-300:]}")
+        raise ValueError(f"GitHub query failed: {error[-600:]}")
     data = json.loads(result.stdout)
     if data.get("errors"):
         raise ValueError(f"GitHub query failed: {data['errors'][0].get('message')}")
@@ -649,7 +665,11 @@ def poll(step: Callable[[], tuple[bool, dict[str, Any], str]], timeout: float = 
     delay = max(interval, 15)
     last = None
     while True:
-        done, result, key = step()
+        try:
+            done, result, key = step()
+        except GitHubUnreachable as error:
+            # A network blip (VPN, sleep, DNS) is waited out, never reported as a login problem.
+            done, result, key = False, {"status": "offline", "action": "wait", "waiting_for": [str(error)]}, "offline"
         if done:
             return result, False
         if time.monotonic() + delay > deadline:

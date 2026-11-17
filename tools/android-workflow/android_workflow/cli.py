@@ -658,6 +658,7 @@ def bootstrap(target: Path, override_path: Path | None = None) -> tuple[dict[str
 
 
 SETUP_HELPER = Path.home() / ".ai" / "bin" / "feature_setup.py"
+KIT_BIN = SETUP_HELPER.parent
 PROFILE_FILE = Path(".ai") / "project-profile.md"
 PROFILE_REQUIRED_SECTIONS = ("Build commands", "Lint engine", "Tests", "Code patterns")
 
@@ -726,6 +727,58 @@ def _accepted_setup(root: Path) -> bool:
                 and hashlib.sha256(profile.read_bytes()).hexdigest() == state.get("profile_digest"))
 
 
+DEPENDENCY_LINE = re.compile(
+    r"^\s*(?:\w*(?:[Ii]mplementation|Api|api|[Cc]ompileOnly|[Rr]untimeOnly)|ksp\w*|kapt\w*|annotationProcessor|"
+    r"coreLibraryDesugaring|lintChecks|detektPlugins|platform|enforcedPlatform)\s*[(\s\"']")
+CATALOG_LIBRARY_SECTIONS = {"versions", "libraries", "bundles"}
+
+
+def setup_shape(path: Path) -> bytes | None:
+    """A build file as the Setup profile sees it: plugins, modules, flavors and tasks stay; dependency
+    versions, dependency declarations and the catalog's libraries go (they never change the gate). None
+    when the file is missing."""
+    if not path.is_file():
+        return None
+    data = path.read_bytes()
+    try:
+        if str(KIT_BIN) not in sys.path:
+            sys.path.insert(0, str(KIT_BIN))
+        from feature_setup import structural_text  # type: ignore[import-not-found]
+
+        data = structural_text(path.name, data)
+    except Exception:  # noqa: BLE001 - without the helper the exact bytes decide
+        pass
+    if not path.name.endswith((".toml", ".gradle", ".gradle.kts")):
+        return data
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data
+    kept, section, depth = [], "", 0
+    for line in text.splitlines():
+        if depth:  # inside a `dependencies { … }` block: what the module depends on, never how it builds
+            depth += line.count("{") - line.count("}")
+            continue
+        header = re.match(r"^\s*\[([^\]]+)\]\s*$", line) if path.name.endswith(".toml") else None
+        if header:
+            section = header.group(1).strip()
+        elif path.name.endswith(".toml") and section in CATALOG_LIBRARY_SECTIONS:
+            continue
+        elif re.match(r"^\s*dependencies\s*\{", line):
+            depth = max(line.count("{") - line.count("}"), 0)
+            continue
+        elif DEPENDENCY_LINE.match(line):
+            continue
+        if line.strip():
+            kept.append(line.rstrip())
+    return "\n".join(kept).encode()
+
+
+def same_setup_shape(mine: Path, theirs: Path) -> bool:
+    ours = setup_shape(mine)
+    return ours is not None and ours == setup_shape(theirs)
+
+
 def adopt_setup(target: Path, source: Path) -> dict[str, Any] | None:
     """A worktree of a checkout already set up: copy and accept its profile and `.ai/android-workflow.json`
     when that setup was accepted and no build file differs between the two trees. None when TARGET is set
@@ -737,7 +790,8 @@ def adopt_setup(target: Path, source: Path) -> dict[str, Any] | None:
     if not _accepted_setup(source):
         return {"adopted": False, "from": str(source), "reason": "the source checkout's setup is not accepted"}
     mine, theirs = build_files(target), build_files(source)
-    differ = sorted(path for path in set(mine) | set(theirs) if mine.get(path) != theirs.get(path))
+    differ = sorted(path for path in set(mine) | set(theirs) if mine.get(path) != theirs.get(path)
+                    and not same_setup_shape(target / path, source / path))
     if differ:
         return {"adopted": False, "from": str(source),
                 "reason": "build files differ from the source checkout: " + ", ".join(differ[:5])
@@ -3478,7 +3532,13 @@ def device_pass_unproven(target: Path, agent_dir: Path) -> str | None:
         # "the last replay failed" over a replay that had passed).
         return ("replay.json is newer than device-report.md: update the report (Status, Not verified, "
                 "Anomalies) with the last replay, then log again")
-    if recorded_verdict(agent_dir, "T7") not in {"pass", "partial"} or MAESTRO_UNAVAILABLE.search(text):
+    verdict = recorded_verdict(agent_dir, "T7")
+    if verdict not in {"pass", "partial"} or MAESTRO_UNAVAILABLE.search(text):
+        return None
+    spec_file = agent_dir / "ticket-spec.json"
+    if verdict == "partial" and spec_file.is_file() and "review_files" in read_json(spec_file):
+        # Reviewing someone else's PR: a hand-driven PARTIAL is what the device could show, and it never
+        # holds the approval. Asking for replayable flows first only added a round (PR-23021, PR-22964).
         return None
     from android_workflow.render import PROOF_LINE
 

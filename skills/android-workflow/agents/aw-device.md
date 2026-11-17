@@ -125,7 +125,10 @@ the behavior only a running app shows.
    (device-driving §9) write the line `Maestro: unavailable — <the failure>` in the report: it is the
    one way a PASS is recorded without a replay, and the PR says so.
 3. Launch and follow the navigation recipe (express level has none: derive it from the
-   profile's Device rows and the NavHost/intent code for the changed screen) with a Maestro flow saved in
+   profile's Device rows and the NavHost/intent code for the changed screen). When it names a project
+   skill (`.ai/skills/<name>/SKILL.md`, e.g. how to cold-launch with feature-flag pins) read and follow
+   it before the first launch; a flag that does not take effect is a launch problem to fix that way, not
+   a reason to report BLOCKED. Then run it with a Maestro flow saved in
    `RUN/media/flows/<name>.yaml` following the Flow contract. Assert the target screen was reached
    (text/testTag) before judging anything. Recipe wrong → fix the flow, not the app. In `before`, this is
    the whole job: write, run and fix each flow until it passes on the base build.
