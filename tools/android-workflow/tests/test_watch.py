@@ -203,11 +203,19 @@ class AssessTests(unittest.TestCase):
 
     def test_without_reviewers_it_merges_only_after_the_pr_has_been_open_a_while(self) -> None:
         nobody = {"latestOpinionatedReviews": {"nodes": []}, "reviewDecision": None}
-        young = decide(pull_request(createdAt=stamp(300), **nobody))
+        young = decide(pull_request(createdAt=stamp(300), **nobody), require_review=False)
         self.assertEqual(young["action"], "wait")
         self.assertIn("a reviewer may still be added", young["waiting_for"][0])
-        self.assertEqual(decide(pull_request(createdAt=stamp(3600), **nobody))["action"], "merge")
-        self.assertEqual(decide(pull_request(**nobody), require_review=True)["action"], "wait")
+        self.assertEqual(decide(pull_request(createdAt=stamp(3600), **nobody), require_review=False)["action"], "merge")
+        unreviewed = decide(pull_request(createdAt=stamp(3600), **nobody))  # the default waits for an approval
+        self.assertEqual(unreviewed["action"], "wait")
+        self.assertIn("an approving review (watch.require_review)", unreviewed["waiting_for"])
+
+    def test_a_stacked_pr_never_merges_into_the_lower_branch(self) -> None:
+        stacked = decide(pull_request(baseRefName="ana/lower-pr"), fresh_watch(default_branch="main"))
+        self.assertEqual(stacked["action"], "wait")
+        self.assertIn("the lower PR merges first", stacked["waiting_for"][0])
+        self.assertEqual(decide(pull_request(), fresh_watch(default_branch="main"))["action"], "merge")
 
     def test_the_repository_rules_still_decide(self) -> None:
         self.assertEqual(decide(pull_request(mergeStateStatus="BLOCKED"))["action"], "wait")
@@ -703,6 +711,78 @@ class KeepDeviceTests(unittest.TestCase):
         self.assertIsNone(state["draft"])
         self.assertEqual(state["stages"]["T7"]["status"], "skipped")
         self.assertIn("nothing visible on the device", state["stages"]["T7"]["reason"])
+
+
+class PrCommandTests(unittest.TestCase):
+    def watched(self, root: Path, **pr: object) -> Path:
+        finished_run(root)
+        agent_dir = run_dir(root)
+        watch._write(agent_dir / "pr-watch.json", {"pr": {"number": 5, "repo": "o/r", "author": ME, "base": "main",
+                                                          "url": "https://github.com/o/r/pull/5", **pr},
+                                                   "handled": {"C_1": {"how": "replied", "reply": "R_1"}},
+                                                   "posted": ["R_1"]})
+        watch._write(agent_dir / "pr-inbox.json", {"items": [{"id": "C_1", "kind": "thread", "thread": "T_1",
+                                                              "author": "ana", "body": "why?"}]})
+        return agent_dir
+
+    def test_edit_rewrites_the_reply_already_posted(self) -> None:
+        with AndroidProject() as root:
+            self.watched(root)
+            calls: list[dict] = []
+
+            def fake(_env, query, **variables):
+                calls.append({"query": query, **variables})
+                return {"updatePullRequestReviewComment": {"pullRequestReviewComment": {"url": "https://x/r1"}}}
+
+            with mock.patch.object(watch, "_graphql", side_effect=fake), \
+                    mock.patch.object(watch, "_env", return_value={}):
+                result = watch.reply(root, "C_1", body="Because of the cache.", edit=True)
+                with self.assertRaises(ValueError):
+                    watch.reply(root, "C_9", body="x", edit=True)
+        self.assertEqual(result["status"], "edited")
+        self.assertEqual(calls[0]["id"], "R_1")
+        self.assertIn("updatePullRequestReviewComment", calls[0]["query"])
+
+    def test_base_retargets_the_pr_and_the_gate_follows_it(self) -> None:
+        from android_workflow.cli import pr_base_ref
+
+        with AndroidProject() as root:
+            agent_dir = self.watched(root)
+            git(root, "push", "-q", "origin", "HEAD:refs/heads/ana/lower")
+            ran: list[list[str]] = []
+            with mock.patch.object(watch, "_gh", side_effect=lambda args, **_: ran.append(args) or
+                                   subprocess.CompletedProcess(args, 0, "", "")), \
+                    mock.patch.object(watch, "_env", return_value={}):
+                result = watch.set_base(root, "origin/ana/lower")
+            recorded = watch.load_watch(agent_dir)["pr"]["base"]
+            ref = pr_base_ref(root)
+        self.assertEqual(ran[0], ["pr", "edit", "5", "--base", "ana/lower"])
+        self.assertEqual((result["base"], result["was"], recorded, ref), ("ana/lower", "main", "ana/lower", "origin/ana/lower"))
+
+    def test_gh_runs_with_the_pr_authors_account(self) -> None:
+        with AndroidProject() as root:
+            self.watched(root)
+            with mock.patch.object(watch, "_gh", return_value=subprocess.CompletedProcess([], 0, "{}", "")) as gh, \
+                    mock.patch.object(watch, "_env", return_value={"GH_TOKEN": "t"}):
+                result, code = watch.gh_passthrough(root, ["--", "pr", "view", "5"])
+        self.assertEqual((code, result["stdout"]), (0, "{}"))
+        self.assertEqual(gh.call_args.args[0], ["pr", "view", "5"])
+        self.assertEqual(gh.call_args.kwargs["env"], {"GH_TOKEN": "t"})
+
+
+class ResumeDeliveredTests(unittest.TestCase):
+    def test_start_on_a_delivered_run_with_an_open_pr_keeps_its_state(self) -> None:
+        from android_workflow.cli import delivered_pr_open, read_json, resumable, save_state, load_state
+
+        with AndroidProject() as root:
+            finished_run(root)
+            agent_dir = run_dir(root)
+            self.assertFalse(resumable(agent_dir))  # completed, no PR: a new start is a new run
+            watch._write(agent_dir / "pr-watch.json", {"pr": {"number": 5}})
+            self.assertTrue(delivered_pr_open(agent_dir))
+            self.assertTrue(resumable(agent_dir))
+            watch._write(agent_dir / "pr-watch.json", {"pr": {"number": 5}, "ended": "merged"})
+            self.assertFalse(resumable(agent_dir))
 
 
 class AccountTests(unittest.TestCase):

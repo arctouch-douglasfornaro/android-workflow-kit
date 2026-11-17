@@ -3931,7 +3931,20 @@ def resumable(agent_dir: Path) -> bool:
     path = agent_dir / "run-state.json"
     if not path.is_file() or not (agent_dir / "ticket-spec.json").is_file():
         return False
-    return read_json(path).get("status") not in (None, "completed", "moved")
+    status = read_json(path).get("status")
+    if status == "completed":
+        return delivered_pr_open(agent_dir)
+    return status not in (None, "moved")
+
+
+def delivered_pr_open(agent_dir: Path) -> bool:
+    """The run opened a PR that is not known to be merged or closed: a new `start` is one more round on
+    it (PR feedback, a sync), so its render mode, --no-device and accepted checks must carry over."""
+    watch = read_json(agent_dir / "pr-watch.json") if (agent_dir / "pr-watch.json").is_file() else {}
+    if watch.get("ended"):
+        return False
+    delivery = read_json(agent_dir / "delivery.json") if (agent_dir / "delivery.json").is_file() else {}
+    return bool((watch.get("pr") or {}).get("number") or delivery.get("url") or (delivery.get("pr") or {}).get("url"))
 
 
 def _ac_key(text: str) -> str:
@@ -4255,7 +4268,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                                help="drop runs whose app or run folder is gone (a removed worktree, a clean)")
     office_parser.add_argument("--days", type=float, help="with --prune: also drop past runs idle this many days")
     pr_parser = subparsers.add_parser("pr", help="PR Watcher: follow the open PR until it is merged")
-    pr_parser.add_argument("action", choices=("status", "wait", "reply", "rerequest", "ci", "sync", "merge", "feedback", "body"))
+    pr_parser.add_argument("action", choices=("status", "wait", "reply", "rerequest", "ci", "sync", "merge", "feedback",
+                                              "body", "base", "gh"))
     pr_parser.add_argument("--target", required=True, type=Path)
     pr_parser.add_argument("--pr", type=int, help="PR number (default: the one this run opened, else the branch's)")
     pr_parser.add_argument("--timeout", type=float, default=540.0, help="wait: give up after this many seconds")
@@ -4263,6 +4277,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     pr_parser.add_argument("--item", help="reply: the comment id from pr-inbox.json")
     pr_parser.add_argument("--body", help="reply: the answer to post")
     pr_parser.add_argument("--skip", metavar="REASON", help="reply: mark the comment handled without posting")
+    pr_parser.add_argument("--edit", action="store_true", help="reply: rewrite the answer already posted for --item")
+    pr_parser.add_argument("--set", dest="set_base", metavar="BRANCH", help="base: the PR's new base branch")
+
     pr_parser.add_argument("--reviewer", action="append", default=[], help="rerequest: a login (repeatable)")
     pr_parser.add_argument("--check", help="ci: the failing check's name")
     pr_parser.add_argument("--as", dest="verdict", help="ci: ours | unrelated | rerun")
@@ -4308,7 +4325,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     render_parser.add_argument("--module", help="probe: the Gradle module, e.g. :features:profile")
     render_parser.add_argument("--mode", choices=("auto", "device", "render"), help="prefer: how visible AC are proved")
     render_parser.add_argument("--skip", help="design: go on without the Figma design, and why")
-    return parser.parse_args(argv)
+    argv = list(sys.argv[1:] if argv is None else argv)
+    passthrough: list[str] = []
+    if argv[:2] == ["pr", "gh"] and "--" in argv:
+        # `pr gh --target T -- <gh arguments>`: everything after `--` goes to gh untouched.
+        cut = argv.index("--")
+        argv, passthrough = argv[:cut], argv[cut + 1:]
+    args = parser.parse_args(argv)
+    args.gh_args = passthrough
+    return args
 
 
 def _office(args: argparse.Namespace) -> tuple[Any, int]:

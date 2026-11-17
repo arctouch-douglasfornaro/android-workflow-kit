@@ -5,8 +5,8 @@ description: >-
   independent review, device verification with before/after evidence, PR, and a
   PR Watcher that answers review comments, fixes CI and merges when approved.
   Use when the user types /android-workflow, /Android Workflow, or asks to run
-  this workflow on an Android ticket or Jira id.
-disable-model-invocation: true
+  this workflow on an Android ticket, Jira or Linear id, or to watch or answer the
+  comments of a PR this workflow opened ("Use o Android Workflow", "PR Watcher").
 ---
 
 # Android Workflow
@@ -136,7 +136,8 @@ CLI log --target T --stage <Role> --status completed --note "…" [--file P]… 
 CLI log … --stage Implementer --slice S2 …           (one Implementer of a team)
 CLI office --target T                               (opens the office at this run; it updates itself)
 CLI pr status|wait|merge --target T [--pr N] [--timeout S]       CLI pr sync --target T [--continue]
-CLI pr reply --target T --item ID (--body "…" | --skip "why")     CLI pr rerequest --target T --reviewer LOGIN
+CLI pr reply --target T --item ID (--body "…" | --skip "why") [--edit]   CLI pr rerequest --target T --reviewer LOGIN
+CLI pr base --target T --set BRANCH   (stack on another PR / back to the default branch)   CLI pr gh --target T -- <gh args>
 CLI pr body --target T --section "<heading>" --file F.md   (replaces only that section of the open PR's description)
 CLI pr ci --target T --check NAME --as ours|unrelated|rerun --reason "…"
 CLI finish … [--keep-device "why nothing visible changed"]     CLI deliver … [--keep-body]
@@ -286,6 +287,12 @@ CLI status|list --target T                          CLI clean --target T [--tick
     changes) and returns as soon as there is something to do. Run it in the background where the
     host allows (Claude Code: `run_in_background` with `--timeout 3300`), else in the foreground
     with the default `--timeout 540` and a 10-minute command timeout; `timed_out` → run it again.
+    The loop never pauses for the developer: while an `ask_user` waits for an answer, `pr wait` keeps
+    running in the background, and every `pr reply` returns `then` with the next `pr wait`. The watch
+    ends only on `merged`, `closed`, `needs_user` or the developer saying stop.
+    Every GitHub call goes through the CLI, which picks the PR author's account: fix a posted answer
+    with `pr reply --edit`, stack or unstack the PR with `pr base --set`, and anything else with
+    `pr gh -- …`, never a bare `gh` or a hand-written `GH_TOKEN=…`.
     - `respond`: `CLI log --stage "PR Watcher" --status started --note "<n> comment(s), <m> check(s)"`,
       spawn `aw-pr-watcher` mode `triage`. It answers questions on the PR itself and returns the
       `changes`, `ask_user` and CI verdicts (`RUN/pr-feedback.json`). Then run
@@ -318,7 +325,9 @@ CLI status|list --target T                          CLI clean --target T [--tick
       commit being merged in while the merge is open), so the base branch's own files are never linted
       as ours and a merge that adds nothing keeps every verdict fresh. A PR that was merged or closed
       is never pushed to again: `deliver` refuses, and a new round needs a new branch.
-    - `merge`: with `auto_merge` (the default) → `CLI pr merge --target TARGET`; it reads the PR again,
+    - `merge` (only with an approval, `watch.require_review` being the default, and only into the
+      default branch: a stacked PR waits for the lower one): with `auto_merge` (the default) →
+      `CLI pr merge --target TARGET`; it reads the PR again,
       merges with the method the repository allows (squash first) only if still ready, and never
       bypasses branch protection. `not_ready` → wait again. Without `auto_merge` → tell the developer
       it is ready and stop.
@@ -331,9 +340,10 @@ CLI status|list --target T                          CLI clean --target T [--tick
       stop. `needs_user` (too many rounds, or watched for `watch.max_hours`) → tell the developer and stop.
     Merge rule: the PR is approved (GitHub's review decision) and nobody may still be asking for
     changes; a reviewer still requested who has not answered does not hold an approved PR back
-    (`watch.wait_for_requested_reviewers: true` waits for them all); without any reviewer, the PR merges once green and open for
-    `watch.unreviewed_merge_after_minutes` (default 30), so a reviewer added after it opened is not
-    raced; `watch.require_review: true` always waits for an approval. Required checks must pass; a
+    (`watch.wait_for_requested_reviewers: true` waits for them all). Without any approval it waits
+    (`watch.require_review`, on by default); only with `require_review: false` does a PR nobody was
+    asked to review merge once green and open for `watch.unreviewed_merge_after_minutes` (default 30).
+    A stacked PR (base is not the default branch) never merges: the lower PR goes first. Required checks must pass; a
     failing optional check blocks until the watcher calls it `unrelated`. Your own comments on the PR
     are a review too (you checking the PR): the watcher answers them like anyone else's (`own: true`),
     and never answers its own replies. Threads are answered, never resolved.

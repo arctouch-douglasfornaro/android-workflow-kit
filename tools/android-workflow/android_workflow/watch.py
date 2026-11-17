@@ -36,10 +36,10 @@ INBOX_FILE = "pr-inbox.json"
 CI_LOG_DIR = "pr-ci"
 DEFAULT_WATCH = {
     "auto_merge": True,
-    # Without any reviewer requested, wait this long before merging, so a reviewer added right after the
-    # PR opened is not raced. `require_review: true` always waits for an approval.
+    # `require_review` (the default) waits for an approval before merging. Turned off, a PR nobody was asked
+    # to review merges once it has been open this long, so a reviewer added right after it opened is not raced.
     "unreviewed_merge_after_minutes": 30,
-    "require_review": False,
+    "require_review": True,
     # An approved PR merges although another requested reviewer has not answered yet; true waits for them all.
     "wait_for_requested_reviewers": False,
     # A check that is not required and still pending stops blocking this long after the last push.
@@ -71,7 +71,7 @@ QUERY = """
 query($owner: String!, $repo: String!, $number: Int!) {
   viewer { login }
   repository(owner: $owner, name: $repo) {
-    squashMergeAllowed mergeCommitAllowed rebaseMergeAllowed
+    squashMergeAllowed mergeCommitAllowed rebaseMergeAllowed defaultBranchRef { name }
     pullRequest(number: $number) {
       id number url title state isDraft mergeable mergeStateStatus reviewDecision createdAt
       headRefName headRefOid baseRefName author { login }
@@ -392,6 +392,11 @@ def assess(pr: dict[str, Any], viewer: str, watch: dict[str, Any], config: dict[
             waiting.append("an approving review (watch.require_review)")
         elif age < minutes * 60:
             waiting.append(f"a reviewer may still be added (no reviewer yet; merging after {int(minutes)} min open)")
+    default = watch.get("default_branch")
+    if default and pr.get("baseRefName") and pr["baseRefName"] != default:
+        # A stacked PR: merging it would land in the lower PR's branch, not in `default`.
+        waiting.append(f"the base is `{pr['baseRefName']}`, not `{default}`: the lower PR merges first "
+                       f"(then `CLI pr base --set {default}` if GitHub did not retarget it)")
     if not waiting and merge_state not in MERGEABLE_STATES:
         waiting.append(f"GitHub does not allow the merge yet ({merge_state.lower()})")
     if waiting:
@@ -491,6 +496,7 @@ def status(target: Path, number: int | None = None, record: bool = True) -> dict
         watch["started_at"] = now
     watch["pr"] = {"number": number, "url": pr.get("url"), "repo": repo, "node": pr.get("id"), "author": _login(pr),
                    "head_branch": pr.get("headRefName"), "base": pr.get("baseRefName"), "title": pr.get("title")}
+    watch["default_branch"] = (data["repository"].get("defaultBranchRef") or {}).get("name") or watch.get("default_branch")
     watch["merge_methods"] = [method for method, allowed in (
         ("squash", data["repository"].get("squashMergeAllowed")), ("merge", data["repository"].get("mergeCommitAllowed")),
         ("rebase", data["repository"].get("rebaseMergeAllowed"))) if allowed]
@@ -701,13 +707,17 @@ def _find_item(agent_dir: Path, item_id: str) -> dict[str, Any]:
     raise ValueError(f"{item_id} is not in {INBOX_FILE}; run `CLI pr status` first")
 
 
-def reply(target: Path, item_id: str, body: str | None = None, skip: str | None = None) -> dict[str, Any]:
-    """Answer one comment (a thread reply, or a PR comment that quotes it) or mark it handled with a reason."""
+def reply(target: Path, item_id: str, body: str | None = None, skip: str | None = None,
+          edit: bool = False) -> dict[str, Any]:
+    """Answer one comment (a thread reply, or a PR comment that quotes it) or mark it handled with a reason.
+    `edit` rewrites the answer already posted for that comment instead of adding another one."""
     agent_dir = run_dir(target)
     watch = load_watch(agent_dir)
     item = _find_item(agent_dir, item_id)
     if item.get("kind") not in {"thread", "comment", "review"}:
         raise ValueError(f"{item_id} is a check; use `CLI pr ci`")
+    if edit:
+        return _edit_reply(target, agent_dir, watch, item_id, item, body or "")
     if skip is not None:
         watch["handled"][item_id] = {"how": "skipped", "reason": skip, "at": round(time.time(), 3)}
         _write(agent_dir / WATCH_FILE, watch)
@@ -734,6 +744,75 @@ def reply(target: Path, item_id: str, body: str | None = None, skip: str | None 
     watch["handled"][item_id] = {"how": "replied", "reply": comment["id"], "at": round(time.time(), 3)}
     _write(agent_dir / WATCH_FILE, watch)
     return {"item": item_id, "status": "replied", "url": comment.get("url")}
+
+
+def _edit_reply(target: Path, agent_dir: Path, watch: dict[str, Any], item_id: str, item: dict[str, Any],
+                body: str) -> dict[str, Any]:
+    posted = (watch["handled"].get(item_id) or {}).get("reply")
+    if not posted:
+        raise ValueError(f"nothing was posted for {item_id}: `CLI pr reply --item {item_id} --body …` first")
+    text = _signed(target, _strip(body))
+    env = _env(target, watch)
+    if item["kind"] == "thread":
+        data = _graphql(env, "mutation($id: ID!, $body: String!) { updatePullRequestReviewComment(input: "
+                             "{pullRequestReviewCommentId: $id, body: $body}) { pullRequestReviewComment { url } } }",
+                        id=posted, body=text)
+        url = data["updatePullRequestReviewComment"]["pullRequestReviewComment"].get("url")
+    else:
+        quote = next((line for line in item["body"].splitlines() if line.strip()), "")[:160]
+        data = _graphql(env, "mutation($id: ID!, $body: String!) { updateIssueComment(input: {id: $id, body: $body}) "
+                             "{ issueComment { url } } }",
+                        id=posted, body=f"> {quote}\n\n@{item['author']} {text}")
+        url = data["updateIssueComment"]["issueComment"].get("url")
+    watch["handled"][item_id]["edited_at"] = round(time.time(), 3)
+    _write(agent_dir / WATCH_FILE, watch)
+    return {"item": item_id, "status": "edited", "url": url}
+
+
+def set_base(target: Path, branch: str) -> dict[str, Any]:
+    """Point the PR at another base branch (stack it on a teammate's PR, or back to the default branch
+    once that one merged), with the PR author's account; the gate measures against it from now on."""
+    from android_workflow.cli import append_stage_log
+
+    agent_dir = run_dir(target)
+    watch = load_watch(agent_dir)
+    if not (watch.get("pr") or {}).get("number"):
+        raise ValueError("no PR is watched in this run yet: `CLI pr status` first")
+    branch = branch.removeprefix("origin/")
+    fetched = _git(target, "fetch", "--no-recurse-submodules", "origin", branch)
+    if fetched.returncode != 0:
+        raise ValueError(f"`{branch}` is not a branch on origin: {fetched.stderr.strip()[-300:]}")
+    env = _env(target, watch)
+    result = _gh(["pr", "edit", str(watch["pr"]["number"]), "--base", branch], env=env, cwd=target)
+    if result.returncode != 0:
+        raise ValueError(f"could not change the base: {(result.stderr or result.stdout).strip()[-400:]}")
+    old = watch["pr"].get("base")
+    watch["pr"]["base"] = branch
+    _write(agent_dir / WATCH_FILE, watch)
+    append_stage_log(agent_dir, "T10", "base", "cli", f"PR base `{old}` → `{branch}`")
+    behind = _git(target, "rev-list", "--count", f"HEAD..origin/{branch}").stdout.strip()
+    return {"status": "updated", "pr": watch["pr"]["number"], "base": branch, "was": old,
+            "behind": int(behind or 0),
+            "then": "`CLI pr sync --target TARGET` brings the new base in" if behind not in ("", "0") else
+                    f"`python3 ~/.ai/bin/android-workflow pr wait --target {target}`"}
+
+
+def gh_passthrough(target: Path, args: list[str]) -> tuple[dict[str, Any], int]:
+    """Any `gh` command run with the account that can see this repository (never the active one by
+    accident): `CLI pr gh --target T -- pr view 123 --json state`."""
+    agent_dir = None
+    try:
+        agent_dir = run_dir(target)
+    except FileNotFoundError:
+        pass
+    watch = load_watch(agent_dir) if agent_dir else {}
+    env = _env(target, watch) if watch.get("pr") else github_env(target)
+    args = args[1:] if args and args[0] == "--" else args
+    if not args:
+        raise ValueError("pr gh needs the gh arguments after `--`")
+    result = _gh(args, env=env, cwd=target, timeout=300)
+    return {"exit_code": result.returncode, "stdout": result.stdout[-20000:], "stderr": result.stderr[-4000:]}, \
+        (0 if result.returncode == 0 else 1)
 
 
 def rerequest(target: Path, logins: list[str]) -> dict[str, Any]:
@@ -1159,9 +1238,17 @@ def dispatch(target: Path, args: Any) -> tuple[dict[str, Any], int]:
             target, args.pr, timeout=args.timeout, interval=args.interval)
         return {**result, "then": next_step(result, target)}, 0
     if args.action == "reply":
-        if not args.item or (args.body is None) == (args.skip is None):
-            raise ValueError("reply needs --item and either --body or --skip")
-        return reply(target, args.item, body=args.body, skip=args.skip), 0
+        edit = bool(getattr(args, "edit", False))
+        if not args.item or (args.body is None) == (args.skip is None) or (edit and args.body is None):
+            raise ValueError("reply needs --item and either --body or --skip (--edit needs --body)")
+        result = reply(target, args.item, body=args.body, skip=args.skip, edit=edit)
+        return {**result, "then": "the other replies, then " + next_step({"action": "wait"}, target)}, 0
+    if args.action == "base":
+        if not getattr(args, "set_base", None):
+            raise ValueError("base needs --set BRANCH")
+        return set_base(target, args.set_base), 0
+    if args.action == "gh":
+        return gh_passthrough(target, list(getattr(args, "gh_args", None) or []))
     if args.action == "rerequest":
         if not args.reviewer:
             raise ValueError("rerequest needs --reviewer LOGIN")

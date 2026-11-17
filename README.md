@@ -258,11 +258,11 @@ branch is not checked out). It runs as long as the session is open, up to 72 hou
 `.ai/android-workflow.json`:
 
 ```json
-{"watch": {"auto_merge": true, "require_review": false, "unreviewed_merge_after_minutes": 30,
+{"watch": {"auto_merge": true, "require_review": true, "unreviewed_merge_after_minutes": 30,
            "merge_method": null, "max_rounds": 6, "max_hours": 72, "bots": []}}
 ```
 
-`require_review: true` always waits for an approval; `auto_merge: false` stops at "ready to merge";
+`require_review` (on by default) waits for an approval, and a PR whose base is not the default branch (stacked) never merges; with `require_review: false` a PR nobody was asked to review merges after `unreviewed_merge_after_minutes`; `auto_merge: false` stops at "ready to merge";
 `merge_method` forces `squash`, `merge` or `rebase`; `bots` lists bots whose top-level comments
 should be answered too (their inline comments always are).
 

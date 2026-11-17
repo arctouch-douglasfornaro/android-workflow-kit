@@ -71,8 +71,8 @@ Optional overrides read by the newer commands (all may be left out):
 | `team.max_parallel` | `3` (1–3) | `team`: how many Implementers may work at once |
 | `skills.max` | `4` (1–8) | `skills`: how many skills the Implementer reads |
 | `watch.auto_merge` | `true` | `pr`: merge when ready; `false` stops at "ready to merge" |
-| `watch.require_review` | `false` | `pr`: always wait for an approving review |
-| `watch.unreviewed_merge_after_minutes` | `30` | `pr`: with no reviewer requested, how long the PR stays open before it merges |
+| `watch.require_review` | `true` | `pr`: wait for an approving review before merging |
+| `watch.unreviewed_merge_after_minutes` | `30` | `pr`: with `require_review: false` and no reviewer requested, how long the PR stays open before it merges |
 | `watch.optional_check_grace_minutes` | `30` | `pr`: a pending check that is not required stops blocking this long after the last push |
 | `watch.merge_method` | first allowed of squash, merge, rebase | `pr merge` |
 | `watch.max_rounds` / `watch.max_hours` | `6` / `72` | `pr`: hand the PR to the developer after this many fix rounds or hours |
