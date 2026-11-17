@@ -133,14 +133,14 @@ def launch_dir(target: Path) -> Path:
     return cache_dir(target) / LAUNCH_DIR
 
 
-def pid_file(target: Path, number: int) -> Path:
-    return launch_dir(target) / f"PR-{number}.pid"
+def pid_file(target: Path, number: int, kind: str = "PR") -> Path:
+    return launch_dir(target) / f"{kind}-{number}.pid"
 
 
-def session_alive(target: Path, number: int) -> bool:
+def session_alive(target: Path, number: int, kind: str = "PR") -> bool:
     """The session launched for this PR still runs (its PID is alive and is still that launcher)."""
     try:
-        pid = int(pid_file(target, number).read_text(encoding="utf-8").strip())
+        pid = int(pid_file(target, number, kind).read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
         return False
     try:
@@ -259,11 +259,12 @@ def _shell() -> str:
     return shell if shell and Path(shell).is_file() else "/bin/zsh" if Path("/bin/zsh").is_file() else "/bin/bash"
 
 
-def agent_command(target: Path, number: int, config: dict[str, Any]) -> str:
+def agent_command(target: Path, number: int, config: dict[str, Any], name: str | None = None,
+                  prompt: str | None = None) -> str:
     template = str(config.get("agent_command") or DEFAULT_INBOX["agent_command"])
     return template.format(
-        name=shlex.quote(f"review PR-{number}"),
-        prompt=shlex.quote(f"/android-review {number} --target {target}"),
+        name=shlex.quote(name or f"review PR-{number}"),
+        prompt=shlex.quote(prompt or f"/android-review {number} --target {target}"),
         pr=number, target=shlex.quote(str(target)),
     )
 
@@ -277,18 +278,19 @@ def _env_lines(target: Path) -> list[str]:
     return [f"export {key}={shlex.quote(value)}" for key, value in env.items() if value]
 
 
-def write_script(target: Path, number: int, config: dict[str, Any]) -> Path:
+def write_script(target: Path, number: int, config: dict[str, Any], kind: str = "PR", name: str | None = None,
+                 prompt: str | None = None) -> Path:
     """The launcher: records its PID (kept by `exec`) and replaces itself with the agent session."""
-    script = launch_dir(target) / f"PR-{number}.sh"
+    script = launch_dir(target) / f"{kind}-{number}.sh"
     script.parent.mkdir(parents=True, exist_ok=True)
     script.write_text(
         "\n".join([
             f"#!{_shell()}",
-            f"# android-review inbox: review session for PR #{number}",
+            f"# android-workflow: {name or 'review'} session for PR #{number}",
             f"cd {shlex.quote(str(target))} || exit 1",
             *_env_lines(target),
-            f"echo $$ > {shlex.quote(str(pid_file(target, number)))}",
-            f"exec {agent_command(target, number, config)}",
+            f"echo $$ > {shlex.quote(str(pid_file(target, number, kind)))}",
+            f"exec {agent_command(target, number, config, name, prompt)}",
             "",
         ]),
         encoding="utf-8",
@@ -363,3 +365,54 @@ def launch(target: Path, pr_ref: str, dry_run: bool = False) -> dict[str, Any]:
     return {"status": "launched", "pr": number, "terminal": terminal_kind(config), "script": str(script),
             "tell": f"PR #{number}: review started in a new tab (session \"review PR-{number}\"); "
                     "it stops at the draft for your OK"}
+
+
+def launch_watch(target: Path, dry_run: bool = False) -> dict[str, Any]:
+    """Keep the PR Watcher of this run alive past the current session: a new terminal tab runs
+    `/android-workflow <ID> --watch --pr N` in this checkout, unless one already watches it."""
+    from android_workflow.paths import current_ticket_id, run_dir
+
+    target = target.resolve()
+    ticket = current_ticket_id(target)
+    if not ticket:
+        raise ValueError("no workflow run in this checkout: nothing to watch")
+    watch = _read(run_dir(target) / "pr-watch.json")
+    number = (watch.get("pr") or {}).get("number")
+    if not number:
+        raise ValueError("this run has no PR yet: `CLI pr status` first")
+    if watch.get("ended"):
+        return {"status": "ended", "pr": number, "next": f"nothing: the PR is {watch['ended']}"}
+    if session_alive(target, int(number), "WATCH"):
+        return {"status": "running", "pr": number, "next": "nothing: a session already watches this PR"}
+    config = inbox_config(target)
+    script = write_script(target, int(number), config, kind="WATCH", name=f"watch PR-{number}",
+                          prompt=f"/android-workflow {ticket} --watch --pr {number}")
+    command = open_command(script, config)
+    if dry_run:
+        return {"status": "dry_run", "pr": number, "script": str(script), "command": command}
+    opened = subprocess.run(command, text=True, capture_output=True, check=False, timeout=60)
+    if opened.returncode != 0:
+        return {"status": "failed", "pr": number, "script": str(script),
+                "error": (opened.stderr or opened.stdout).strip()[-400:],
+                "next": f"tell the developer; they can run {_shell()} -l {script} in a terminal"}
+    return {"status": "launched", "pr": number, "script": str(script),
+            "tell": f"PR #{number}: the PR Watcher keeps running in its own tab (session \"watch PR-{number}\")"}
+
+
+def inbox_once(target: Path) -> dict[str, Any]:
+    """A scheduled or unattended run: one look, every PR it finds launched now, and a summary to end on.
+    Never a loop: the next scheduled run looks again."""
+    found = inbox(target, wait=False)
+    launched = []
+    for item in found.get("launch") or []:
+        result = launch(target, str(item["pr"]))
+        launched.append({"pr": item["pr"], "status": result.get("status"), "tell": result.get("tell"),
+                         **({"error": result["error"]} if result.get("error") else {})})
+    skipped = [{"pr": item.get("pr"), "why": item.get("why")} for item in found.get("skipped") or []]
+    lines = [entry["tell"] or f"PR #{entry['pr']}: {entry['status']}" for entry in launched]
+    lines += [f"PR #{entry['pr']} not started: {entry['why']}" for entry in skipped]
+    return {"status": found.get("status"), "launched": launched, "skipped": skipped,
+            "queued": [item.get("pr") for item in found.get("queued") or []],
+            "summary": lines or ["no PR asks for your review right now"],
+            "next": "end the run with `summary` (2–3 lines); update or close the board task once, never one per PR "
+                    "poll, never left in progress. Do not loop: the next scheduled run looks again"}

@@ -100,6 +100,14 @@ def in_use(main: Path, path: Path, state: dict[str, Any]) -> str | None:
                 return "its review session is still running"
         except Exception:  # noqa: BLE001 - no launcher record: fall back to the files
             pass
+    if state.get("number") and not state.get("review"):
+        from android_workflow.review_inbox import session_alive as alive
+
+        try:
+            if alive(path, int(state["number"]), "WATCH"):
+                return "its PR Watcher session is still running"
+        except Exception:  # noqa: BLE001
+            pass
     root = path / WORKFLOW_ROOT
     newest = 0.0
     if root.is_dir():

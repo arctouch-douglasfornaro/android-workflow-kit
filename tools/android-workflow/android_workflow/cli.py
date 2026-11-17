@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -2293,6 +2294,29 @@ GRADLE_INFRA_PATTERNS = (
 )
 
 
+DISK_FULL = re.compile(r"No space left on device|not enough space on the disk|ENOSPC|disk quota exceeded", re.I)
+MIN_FREE_GB = 3.0
+
+
+def free_gb(path: Path) -> float:
+    try:
+        return round(shutil.disk_usage(path).free / 1024 ** 3, 1)
+    except OSError:
+        return -1.0
+
+
+def disk_full_failure(target: Path, steps: list[dict[str, Any]]) -> str | None:
+    """A failed step whose log says the disk is full: not the change, and no retry can fix it."""
+    for step in steps:
+        if step_passes(step):
+            continue
+        log = step.get("log")
+        text = text_if_exists(Path(log)) if log else ""
+        if DISK_FULL.search(text) or DISK_FULL.search(" ".join(step.get("output_excerpt") or [])):
+            return f"the disk is full ({free_gb(target)} GB free)"
+    return None
+
+
 def gradle_infra_failure(steps: list[dict[str, Any]]) -> str | None:
     """The line of a failed step's log that shows Gradle's own failure, or None (a real failure)."""
     failed = [step for step in steps if not step_passes(step)]
@@ -2326,8 +2350,22 @@ def run_gate_rounds(
     """One gate attempt; a red gate goes back to the Implementer, not to a retry loop here. Only a Gradle
     infrastructure failure (`GRADLE_INFRA_PATTERNS`) is retried, once, and recorded in `extras["infra"]`."""
     started = time.monotonic()
+    free = free_gb(target)
+    if 0 <= free < MIN_FREE_GB:
+        # A build on a nearly full disk fails late and looks like the change's fault (G1–G3 "not run").
+        reason = f"only {free} GB free on the disk (the gate needs at least {MIN_FREE_GB:g} GB)"
+        if extras is not None:
+            extras["disk_full"] = reason
+        step = {"command": "disk space check", "exit_code": 1, "outcome": "failed", "output_excerpt": [reason],
+                "duration_seconds": 0}
+        return [step], [reason], round(time.monotonic() - started, 3)
     with worktree_build_lock(target):
         steps, warnings = gate_attempt(target, config, change_set, needs_device, 1, run_number, extras)
+        full = disk_full_failure(target, steps)
+        if full:
+            if extras is not None:
+                extras["disk_full"] = full
+            return steps, warnings, round(time.monotonic() - started, 3)
         infra = gradle_infra_failure(steps)
         if infra:
             append_stage_log(run_dir(target), "T5", "retry", "cli", f"Gradle infrastructure failure, retried once: {infra}")
@@ -2658,6 +2696,16 @@ def source_fingerprint(target: Path) -> str:
     return digest.hexdigest()[:16]
 
 
+def record_no_code_round(target: Path, why: str) -> None:
+    """A round with nothing to implement still leaves notes: the reason, under the earlier decisions."""
+    path = run_dir(target) / "implementation-notes.md"
+    text = text_if_exists(path)
+    if not text.strip() or "Host has not implemented yet." in text:
+        text = "# Decisions\n\n"
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    path.write_text(text.rstrip() + f"\n\n# Round without code ({stamp})\n\n{why.strip()}\n", encoding="utf-8")
+
+
 def implementation_errors(target: Path) -> list[str]:
     errors: list[str] = []
     notes = text_if_exists(run_dir(target) / "implementation-notes.md")
@@ -2817,7 +2865,7 @@ def run_quality_gate(target: Path) -> dict[str, Any]:
         "secret_scan": scan,
         "prior_runs": prior_runs[-3:],
         # Gradle failing by itself is not a red gate of the change: the streak stays where it was.
-        "red_streak": int(previous.get("red_streak") or 0) if gate_status == "failed" and extras.get("infra")
+        "red_streak": int(previous.get("red_streak") or 0) if gate_status == "failed" and (extras.get("infra") or extras.get("disk_full"))
         else (int(previous.get("red_streak") or (1 if previous.get("status") == "failed" else 0)) + 1)
         if gate_status == "failed" else 0,
         "prohibitions_respected": True,
@@ -4101,21 +4149,31 @@ def keep_planner_decisions(agent_dir: Path, spec: dict[str, Any], ticket: dict[s
     return kept
 
 
-def resume(target: Path, question_id: str, answer: str) -> dict[str, Any]:
+def resume(target: Path, question_id: str, answer: str, correct: bool = False) -> dict[str, Any]:
+    """Record the developer's answer to one business question. Any open question can be answered, in
+    any order (answers given together are recorded one by one, each by its own id); `correct` replaces
+    an answer recorded earlier while the run is still paused. The result echoes the question with its
+    answer, so a wrong pairing shows at once."""
     agent_dir = run_dir(target)
     state_path = agent_dir / "run-state.json"
     state = read_json(state_path)
     if state["status"] != "paused":
         raise ValueError("the workflow is not paused")
-    pending = state.get("pending_question") or {}
-    if pending.get("id") != question_id:
-        raise ValueError(f"pending question is {pending.get('id')!r}, not {question_id!r}")
-    state["answers"][question_id] = answer
     spec = read_json(agent_dir / "ticket-spec.json")
-    for question in spec["business_questions"]:
-        if question["id"] == question_id:
-            question["answer"] = answer
+    questions = {str(item.get("id")): item for item in spec.get("business_questions") or []}
+    question = questions.get(question_id)
+    if question is None:
+        listed = "; ".join(f"{key}: {item.get('question') or item.get('text')}" for key, item in questions.items())
+        raise ValueError(f"no question {question_id!r}; the questions are {listed}")
+    answers = state.setdefault("answers", {})
+    if question_id in answers and not correct:
+        raise ValueError(f"{question_id} is already answered ({answers[question_id]!r}); "
+                         "`--correct` replaces it while the run is paused")
+    answers[question_id] = answer
+    question["answer"] = answer
     write_json(agent_dir / "ticket-spec.json", spec)
+    state["last_answer"] = {"id": question_id, "question": question.get("question") or question.get("text"),
+                            "answer": answer}
     next_question = pending_question(spec, state["answers"])
     if next_question:
         state.update({"pending_question": next_question, "updated_at": int(time.time())})
@@ -4171,6 +4229,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     resume_parser.add_argument("--target", required=True, type=Path)
     resume_parser.add_argument("--question-id", required=True)
     resume_parser.add_argument("--answer", required=True)
+    resume_parser.add_argument("--correct", action="store_true", help="replace an answer recorded earlier (run still paused)")
     status_parser = subparsers.add_parser("status")
     status_parser.add_argument("--target", required=True, type=Path)
     setup_parser = subparsers.add_parser("setup")
@@ -4195,6 +4254,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     log_parser.add_argument(
         "--wait-seconds", type=float, dest="wait_seconds",
         help="time inside this stage spent waiting on the human; excluded from the stage's work time",
+    )
+    log_parser.add_argument(
+        "--no-code", dest="no_code", metavar="WHY",
+        help="Implementer: a round that changed no code on purpose (environment, merge conflict kept as is, "
+             "rebuild); recorded in implementation-notes.md instead of the Implementer's own notes",
     )
     log_parser.add_argument(
         "--slice", dest="slice_id",
@@ -4291,8 +4355,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     device_parser = subparsers.add_parser(
         "device", help="Maestro flows by code: replay them, scaffold them from the plan, install the current build",
     )
-    device_parser.add_argument("action", choices=("replay", "scaffold", "build", "install", "release"),
+    device_parser.add_argument("action", choices=("replay", "scaffold", "build", "install", "release", "launch"),
                                help="build: the current APK with no device held (RUN/after-build.json), reused by install and replay")
+    device_parser.add_argument("--pins", help='launch: feature-flag pins as JSON, e.g. \'{"android":{"flag":true}}\'')
+    device_parser.add_argument("--link", help="launch: deep link opened once the app runs (the app's own scheme)")
     device_parser.add_argument("--target", required=True, type=Path)
     device_parser.add_argument("--serial")
     device_parser.add_argument("--phase", choices=("before", "after"), default="after",
@@ -4343,7 +4409,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     office_parser.add_argument("--days", type=float, help="with --prune: also drop past runs idle this many days")
     pr_parser = subparsers.add_parser("pr", help="PR Watcher: follow the open PR until it is merged")
     pr_parser.add_argument("action", choices=("status", "wait", "reply", "rerequest", "ci", "sync", "merge", "feedback",
-                                              "body", "base", "gh"))
+                                              "body", "base", "gh", "launch"))
     pr_parser.add_argument("--target", required=True, type=Path)
     pr_parser.add_argument("--pr", type=int, help="PR number (default: the one this run opened, else the branch's)")
     pr_parser.add_argument("--timeout", type=float, default=540.0, help="wait: give up after this many seconds")
@@ -4372,6 +4438,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     review_parser.add_argument("--dry-run", action="store_true", dest="dry_run")
     review_parser.add_argument("--wait", action="store_true",
                                help="ci: poll until the checks finish; inbox: poll until a PR asks for our review")
+    review_parser.add_argument("--once", action="store_true",
+                               help="inbox: a scheduled run: look once, launch what it finds, return a summary")
     review_parser.add_argument("--timeout", type=float, default=540)
     review_parser.add_argument("--drop", action="append", default=[], help="edit: a comment id to drop (repeatable)")
     review_parser.add_argument("--set", action="append", nargs=2, metavar=("ID", "TEXT"), default=[],
@@ -4449,13 +4517,25 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
         if args.overrides:
             configure(target, args.overrides)
         result = run(target, ticket_from_flags(args), take_over=args.take_over, no_device=args.no_device)
+        if args.id:
+            from android_workflow.review import TICKET_HOW, jira_keys, ticket_source, tickets_config
+
+            key = next(iter(jira_keys(str(args.id))), None)
+            if key and isinstance(result, dict):
+                # Where the ticket lives, so the host reads it (AC, comments) from the right tracker.
+                result = {**result, "ticket_source": {"key": key, "tracker": ticket_source(key, tickets_config(target)),
+                                                      "how": TICKET_HOW}}
         from android_workflow.skills import refresh as refresh_skills
 
         refresh_skills(target)  # which Android skills this ticket needs, from the ticket and its likely files
         return result, 0
     if args.command == "resume":
-        return resume(target, args.question_id, args.answer), 0
+        return resume(target, args.question_id, args.answer, correct=args.correct), 0
     if args.command == "log":
+        if getattr(args, "no_code", None):
+            if resolve_stage(args.stage)[0] not in {"T4", "T4L"} or args.status != "completed":
+                raise ValueError("--no-code is for `log --stage Implementer --status completed`")
+            record_no_code_round(target, args.no_code)
         result = log_stage(
             target, args.stage, args.status, args.note, args.actor, args.files, args.tokens, args.seconds,
             args.wait_seconds, args.slice_id,
@@ -4482,6 +4562,7 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
             report = run_quality_gate(target)
         except BaseException:
             mark_gate_interrupted(target)
+            sys.stderr.write(f"the gate did not finish: run `CLI next --target {target}` now and tell the developer\n")
             raise
         finally:
             for sig, handler in previous_handlers.items():
@@ -4585,6 +4666,14 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
 
             result = build_current(target)
             return result, 0 if result["status"] in {"passed", "no_build_command", "no_apk"} else 1
+        if args.action == "launch":
+            from android_workflow.replay import launch_app
+
+            serial = args.serial or connected_device(target)
+            if not serial:
+                return {"status": "no_device"}, 1
+            result = launch_app(target, serial, pins=args.pins, link=args.link)
+            return result, 0 if result["status"] == "launched" else 1
         if args.action == "install":
             from android_workflow.replay import install_current
 
@@ -4688,7 +4777,9 @@ def main(argv: list[str] | None = None) -> int:
             result = {**result, "office_url": url, "office_message": office_message(url)}
             banner = office_banner(url, current_ticket_id(target) if target else None)
         print(json.dumps(role_view(result), indent=2, ensure_ascii=False))
-        if banner:
+        # Only for a person at a terminal: an agent reads `office_message` from the JSON, and the banner on
+        # its `2>&1` broke `json.load` of every piped `status`/`gate` (ANDROID_WORKFLOW_BANNER=1 forces it).
+        if banner and (sys.stderr.isatty() or os.environ.get("ANDROID_WORKFLOW_BANNER") == "1"):
             sys.stdout.flush()
             # On stderr: the JSON stays parseable, and the link is the last thing the command prints.
             print(banner, file=sys.stderr)

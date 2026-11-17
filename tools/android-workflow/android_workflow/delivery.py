@@ -414,7 +414,12 @@ def deliver(
         return result
 
     if paths:
-        added = git(target, "add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul", stdin="\0".join(paths))
+        # A deletion already staged (`git rm`) is gone from disk and from the index: naming it again
+        # makes `git add` fail with "pathspec did not match", so only the rest is added.
+        staged_deleted = set(git(target, "diff", "--cached", "--name-only", "--diff-filter=D").stdout.splitlines())
+        to_add = [path for path in paths if path not in staged_deleted]
+        added = git(target, "add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul", stdin="\0".join(to_add)) \
+            if to_add else subprocess.CompletedProcess([], 0, "", "")
         if added.returncode != 0:
             raise ValueError(f"git add failed: {tail(added.stderr, 6)}")
         staged = set(git(target, "diff", "--cached", "--name-only").stdout.splitlines())

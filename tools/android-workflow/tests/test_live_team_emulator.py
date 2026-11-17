@@ -1050,3 +1050,60 @@ class EmulatorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ExplicitAvdTests(unittest.TestCase):
+    def pick(self, avd, running=(), booting=()):
+        from unittest import mock
+
+        from android_workflow import emulator
+
+        pool = [{"avd": name, "serial": f"emulator-{index}"} for index, name in enumerate(running)]
+        with mock.patch.object(emulator, "list_avds", return_value=["Pixel_Tablet", "MF2380_api29"]), \
+                mock.patch.object(emulator, "_read_pool", return_value=pool), \
+                mock.patch.object(emulator, "devices", return_value=[]), \
+                mock.patch.object(emulator, "_running_avds", return_value=set()), \
+                mock.patch.object(emulator, "_failures", return_value={}), \
+                mock.patch.object(emulator, "_overrides", return_value={}), \
+                mock.patch.object(emulator, "_booted", side_effect=lambda _adb, serial: serial not in {
+                    f"emulator-{running.index(name)}" for name in booting}):
+            return emulator._pick_avd(Path("/app"), "adb", "emulator", avd)
+
+    def test_an_avd_asked_for_by_name_is_never_swapped(self) -> None:
+        self.assertEqual(self.pick("Pixel_Tablet")[:2], ("Pixel_Tablet", False))
+        self.assertEqual(self.pick("Pixel_Tablet", running=("Pixel_Tablet",))[:2], ("Pixel_Tablet", True))
+        self.assertIsNone(self.pick("Pixel_Tablet", running=("Pixel_Tablet",), booting=("Pixel_Tablet",))[0])
+
+
+class DeviceLaunchTests(unittest.TestCase):
+    def test_pins_launch_cold_then_open_the_link(self) -> None:
+        import json
+        import subprocess
+        import tempfile
+        from unittest import mock
+
+        from android_workflow import replay
+
+        calls = []
+
+        def fake(args, **_):
+            calls.append(args[3:])
+            out = "Applied pins: flag=true" if args[3:5] == ["logcat", "-d"] else "Status: ok"
+            return subprocess.CompletedProcess(args, 0, out, "")
+
+        with tempfile.TemporaryDirectory() as folder:
+            target = Path(folder)
+            (target / ".ai").mkdir()
+            (target / ".ai/android-workflow.json").write_text(json.dumps({"device": {
+                "application_id": "com.app", "launch_activity": "com.app.Root", "pins_extra": "featureFlagPins",
+                "pins_log_tag": "FeatureFlagPins"}}), encoding="utf-8")
+            with mock.patch.object(replay, "device_budget_stop", return_value=None), \
+                    mock.patch("android_workflow.emulator.adb_path", return_value="adb"), \
+                    mock.patch.object(replay.subprocess, "run", side_effect=fake), \
+                    mock.patch.object(replay.time, "sleep"):
+                result = replay.launch_app(target, "emu-1", pins='{"android":{"flag":true}}', link="app://set/1")
+        self.assertEqual(result["status"], "launched")
+        self.assertEqual(calls[0], ["shell", "am", "force-stop", "com.app"])
+        self.assertIn("--es featureFlagPins", calls[2][1])
+        self.assertIn("-d app://set/1 com.app", calls[-1][1])
+        self.assertEqual(result["pins"], "Applied pins: flag=true")

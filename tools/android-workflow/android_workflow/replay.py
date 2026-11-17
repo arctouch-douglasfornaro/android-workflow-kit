@@ -297,6 +297,9 @@ def install_current(target: Path, serial: str) -> dict[str, Any]:
     """`CLI device install`: the current build on `serial`. The APK is built first with no device held
     (`build_current`), then installed with `adb install` inside the device's lease, with its sha256 so
     the report can prove what it judged. The Device agent never runs Gradle."""
+    spent = device_budget_stop(target)
+    if spent:
+        return spent
     from android_workflow.base import find_apks
     from android_workflow.cli import read_json
     from android_workflow.locks import device_lease
@@ -392,6 +395,9 @@ def replay(target: Path, serial: str | None = None, phase: str = "after", instal
     A flow that passed on this very build (same source, same APK, same flow files) and whose captures are
     still filed is not run again (`reused`); `fresh` runs every flow. `only` runs just those flows (names
     with or without the extension) and keeps every other flow's last result."""
+    spent = device_budget_stop(target)
+    if spent:
+        return spent
     from android_workflow.emulator import status as device_status
     from android_workflow.locks import device_lease
 
@@ -607,3 +613,87 @@ def _replay(target: Path, serial: str, phase: str, install_base_apk: bool | None
                                       if phase == "after" else "")
     append_stage_log(agent_dir, "T7", "replayed" if phase == "after" else "flows_ready", "cli", note)
     return result
+
+
+def launch_app(target: Path, serial: str, pins: str | None = None, link: str | None = None,
+               wait_seconds: float = 20) -> dict[str, Any]:
+    """`CLI device launch`: a cold start of the app on `serial`, with feature-flag pins when given, then the
+    deep link on the running process. Pins only apply on a cold start and a deep link in the same intent
+    left the root screen blank, so: force-stop, launch with the pins, confirm them in logcat, then the link.
+
+    `device` in `.ai/android-workflow.json`: `application_id`, `launch_activity`, and for pins
+    `pins_extra` (the string extra that carries the JSON) and `pins_log_tag` (the logcat tag that confirms)."""
+    spent = device_budget_stop(target)
+    if spent:
+        return spent
+    from android_workflow.cli import read_json
+    from android_workflow.emulator import adb_path
+
+    config_path = cache_dir(target) / "project-config.json"
+    device = {**((read_json(config_path) if config_path.is_file() else {}).get("device") or {}),
+              **(read_json(target / ".ai" / "android-workflow.json").get("device") or {}
+                 if (target / ".ai" / "android-workflow.json").is_file() else {})}
+    app, activity = device.get("application_id"), device.get("launch_activity")
+    adb = adb_path(target)
+    if not adb or not app:
+        return {"status": "unavailable", "reason": "no adb or no device.application_id in .ai/android-workflow.json"}
+    if pins:
+        try:
+            json.loads(pins)
+        except ValueError as error:
+            raise ValueError(f"--pins is not valid JSON: {error}") from error
+        if not device.get("pins_extra"):
+            raise ValueError("--pins needs device.pins_extra (the launch extra that carries them) in .ai/android-workflow.json")
+
+    def shell(*args: str, timeout: float = 60) -> subprocess.CompletedProcess[str]:
+        return subprocess.run([adb, "-s", serial, *args], text=True, capture_output=True, check=False, timeout=timeout)
+
+    shell("shell", "am", "force-stop", app)
+    shell("logcat", "-c")
+    component = f"{app}/{activity}" if activity else None
+    start = ["am", "start", "-W"] + (["-n", component] if component else ["-a", "android.intent.action.MAIN",
+                                                                         "-c", "android.intent.category.LAUNCHER", app])
+    if pins:
+        start += ["--es", device["pins_extra"], shlex.quote(pins)]
+    launched = shell("shell", " ".join(start))
+    result: dict[str, Any] = {"status": "launched", "serial": serial, "app": app,
+                              "output": (launched.stdout or launched.stderr).strip()[-300:]}
+    if launched.returncode != 0 or "Error" in launched.stdout:
+        return {**result, "status": "failed"}
+    tag = device.get("pins_log_tag")
+    if pins and tag:
+        deadline = time.monotonic() + wait_seconds
+        applied = ""
+        while time.monotonic() < deadline and not applied:
+            applied = shell("logcat", "-d", "-s", str(tag)).stdout.strip()
+            if not applied:
+                time.sleep(1)
+        result["pins"] = applied.splitlines()[-1] if applied else None
+        if not applied:
+            result["status"] = "pins_not_confirmed"
+            result["reason"] = (f"no {tag} line in logcat after {int(wait_seconds)}s: the pins did not arrive "
+                                "(API < 29, a misspelled extra, or the app was already running)")
+            return result
+    if link:
+        time.sleep(2)
+        opened = shell("shell", f"am start -W -a android.intent.action.VIEW -d {shlex.quote(link)} {app}")
+        result["link"] = (opened.stdout or opened.stderr).strip()[-300:]
+        if opened.returncode != 0 or "Error" in opened.stdout:
+            result["status"] = "link_failed"
+    return result
+
+def device_budget_stop(target: Path) -> dict[str, Any] | None:
+    """Mid-round: once the run spent `device.budget_minutes` on the device, every device command answers
+    this instead of driving it, so a round that keeps trying cannot run past the budget."""
+    try:
+        from android_workflow.decide import device_stop
+
+        stop = device_stop(target, run_dir(target))
+    except (FileNotFoundError, OSError, ValueError):
+        return None
+    if not stop:
+        return None
+    return {"status": "budget_spent", "reason": stop,
+            "next": "stop driving the device: write device-report.md now with what was verified (PARTIAL or "
+                    "BLOCKED, `Not verified` lists the rest) and log the Device stage. The developer can raise "
+                    "device.budget_minutes in .ai/android-workflow.json for more time"}

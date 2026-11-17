@@ -939,3 +939,45 @@ class CiTriageTests(unittest.TestCase):
         self.assertEqual(result["action"], "respond")
         self.assertNotIn("hint", result["ci"][0])
         self.assertFalse(any(args[:2] == ["run", "rerun"] for args in calls))
+
+
+class StringsUnionTests(unittest.TestCase):
+    BASE = '<resources>\n    <string name="a">A</string>\n</resources>\n'
+
+    def conflicted(self, ours: str, theirs: str) -> Path:
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
+        g = ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main"]
+        run = lambda *args: subprocess.run(["git", "-C", str(root), *g, *args], capture_output=True, text=True)
+        run("init", "-q")
+        path = root / "app/src/main/res/values/strings.xml"
+        path.parent.mkdir(parents=True)
+        path.write_text(self.BASE, encoding="utf-8")
+        run("add", "-A"); run("commit", "-qm", "base")
+        run("checkout", "-qb", "feature")
+        path.write_text(self.BASE.replace("</resources>", ours + "</resources>"), encoding="utf-8")
+        run("commit", "-qam", "ours")
+        run("checkout", "-q", "main")
+        path.write_text(self.BASE.replace("</resources>", theirs + "</resources>"), encoding="utf-8")
+        run("commit", "-qam", "theirs")
+        run("checkout", "-q", "feature")
+        self.assertNotEqual(run("merge", "main").returncode, 0)
+        return root
+
+    def test_both_sides_adding_their_own_strings_merge_by_code(self) -> None:
+        root = self.conflicted('    <string name="b">B</string>\n', '    <string name="c">C</string>\n')
+        self.assertTrue(watch._union_strings(root, "app/src/main/res/values/strings.xml"))
+        text = (root / "app/src/main/res/values/strings.xml").read_text(encoding="utf-8")
+        self.assertEqual([name for name in ("a", "b", "c") if f'name="{name}"' in text], ["a", "b", "c"])
+        self.assertNotIn("<<<<<<<", text)
+
+    def test_the_same_name_on_both_sides_stays_a_conflict(self) -> None:
+        root = self.conflicted('    <string name="b">B</string>\n', '    <string name="b">Other</string>\n')
+        self.assertFalse(watch._union_strings(root, "app/src/main/res/values/strings.xml"))
+
+
+class CoverageCheckTests(unittest.TestCase):
+    def test_a_patch_coverage_failure_is_ours_and_never_annotated_away(self) -> None:
+        hint = watch.classify_ci({"name": "codecov/patch", "conclusion": "FAILURE"}, "", [])
+        self.assertEqual(hint["verdict"], "ours")
+        self.assertIn("never add a coverage-ignore", hint["fix"])

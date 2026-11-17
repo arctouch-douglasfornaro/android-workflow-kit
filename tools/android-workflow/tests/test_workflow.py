@@ -217,6 +217,22 @@ class RoutingTests(unittest.TestCase):
             persisted_spec["business_questions"][0]["answer"], "Users with an active contract"
         )
 
+    def test_answers_go_to_their_own_question_in_any_order_and_can_be_corrected(self) -> None:
+        with AndroidProject() as root:
+            run(root, {"id": "APP-3", "title": "Apply eligibility", "type": "feature", "business_questions": [
+                {"id": "q1", "question": "Which users?"}, {"id": "q2", "question": "Which screen?"}]})
+            second = resume(root, "q2", "Set page")
+            self.assertEqual(second["last_answer"], {"id": "q2", "question": "Which screen?", "answer": "Set page"})
+            self.assertEqual(second["pending_question"]["id"], "q1")
+            with self.assertRaises(ValueError):
+                resume(root, "q2", "Home")  # already answered
+            corrected = resume(root, "q2", "Home", correct=True)
+            self.assertEqual(corrected["answers"]["q2"], "Home")
+            done = resume(root, "q1", "Teachers")
+        self.assertEqual(done["status"], "awaiting_host")
+        self.assertEqual(done["answers"], {"q1": "Teachers", "q2": "Home"})
+
+
 class HostDrivenTests(unittest.TestCase):
     def test_finish_rejects_stub_without_source_diff(self) -> None:
         with AndroidProject() as root:

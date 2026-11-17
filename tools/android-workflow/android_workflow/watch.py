@@ -436,11 +436,19 @@ def _ci_log(target: Path, agent_dir: Path, env: dict[str, str], item: dict[str, 
     return str(path.relative_to(agent_dir))
 
 
+COVERAGE_CHECK = re.compile(r"codecov/patch|coverage/patch|\bpatch coverage\b|codecov.*patch", re.I)
+
+
 def classify_ci(item: dict[str, Any], log_text: str, touched: list[str]) -> dict[str, Any] | None:
     """What a failing check most likely is, from evidence only: `rerun` when the runner or the
     network failed, `ours` when its log names a file this PR changed. None: the agent reads it."""
     if str(item.get("conclusion") or "").upper() in INFRA_CONCLUSIONS:
         return {"verdict": "rerun", "evidence": f"conclusion {item.get('conclusion')}"}
+    if COVERAGE_CHECK.search(str(item.get("name") or "")):
+        # The changed lines lack tests: always ours, and never fixed by annotating production code.
+        return {"verdict": "ours", "evidence": "patch coverage below the target",
+                "fix": "add unit tests that run the uncovered changed lines (the check's link lists them); never "
+                       "add a coverage-ignore annotation or exclusion to implementation code to pass it"}
     error_lines = "\n".join(line for line in log_text.splitlines() if ERROR_LINE.match(line))
     named = sorted({
         path for path in touched
@@ -1036,6 +1044,50 @@ def _git(target: Path, *args: str, timeout: int = 900) -> subprocess.CompletedPr
     return git(target, *args, timeout=timeout)
 
 
+STRINGS_XML = re.compile(r"(^|/)res/values[^/]*/strings[^/]*\.xml$")
+STRING_NAME = re.compile(r"<(?:string|plurals|string-array)\b[^>]*\bname=\"([^\"]+)\"")
+
+
+def _union_strings(target: Path, path: str) -> bool:
+    """A conflict in a string resource file where both sides only added entries: keep both, when the
+    result is valid XML with no name twice. Anything else (an edited string, a clash) stays a conflict."""
+    import xml.etree.ElementTree as ElementTree
+
+    if not STRINGS_XML.search(path):
+        return False
+    stages = {}
+    for number in (1, 2, 3):
+        shown = _git(target, "show", f":{number}:{path}")
+        if shown.returncode != 0:
+            return False
+        stages[number] = shown.stdout
+    base_names = set(STRING_NAME.findall(stages[1]))
+    ours, theirs = set(STRING_NAME.findall(stages[2])), set(STRING_NAME.findall(stages[3]))
+    if not base_names <= ours or not base_names <= theirs or (ours - base_names) & (theirs - base_names):
+        return False  # a side removed or renamed a string, or both added the same name
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as folder:
+        files = []
+        for number in (2, 1, 3):
+            file = Path(folder) / f"{number}.xml"
+            file.write_text(stages[number], encoding="utf-8")
+            files.append(str(file))
+        merged = subprocess.run(["git", "merge-file", "-p", "--union", *files], text=True, capture_output=True,
+                                check=False)
+    text = merged.stdout
+    names = STRING_NAME.findall(text)
+    try:
+        ElementTree.fromstring(text.encode("utf-8"))
+    except ElementTree.ParseError:
+        return False
+    if len(names) != len(set(names)) or set(names) != ours | theirs:
+        return False
+    (target / path).write_text(text, encoding="utf-8")
+    _git(target, "add", "--", path)
+    return True
+
+
 def sync(target: Path, resume: bool = False) -> tuple[dict[str, Any], int]:
     """Bring the PR's own new commits and then the base branch into the local branch, and push.
 
@@ -1092,7 +1144,15 @@ def sync(target: Path, resume: bool = False) -> tuple[dict[str, Any], int]:
             if not conflicted:
                 _git(target, "merge", "--abort")
                 raise ValueError(f"git merge failed: {(merged.stdout + merged.stderr)[-600:]}")
-            return {"status": "conflict", "files": conflicted, "base": pr["base"]}, 1
+            resolved = [path for path in conflicted if _union_strings(target, path)]
+            left = [path for path in conflicted if path not in resolved]
+            if left:
+                return {"status": "conflict", "files": left, "base": pr["base"],
+                        **({"auto_resolved": resolved} if resolved else {})}, 1
+            # Only string resources, each side adding its own names: merged by code, no fix round.
+            committed = _git(target, "commit", "--no-edit", "--cleanup=strip")
+            if committed.returncode != 0:
+                raise ValueError(f"git commit failed (hooks run here): {committed.stdout[-800:]}{committed.stderr[-800:]}")
     ahead = int(_git(target, "rev-list", "--count", f"origin/{pr['head_branch']}..HEAD").stdout.strip() or 0)
     if not ahead:
         return {"status": "up_to_date"}, 0
@@ -1264,6 +1324,10 @@ def dispatch(target: Path, args: Any) -> tuple[dict[str, Any], int]:
             raise ValueError("reply needs --item and either --body or --skip (--edit needs --body)")
         result = reply(target, args.item, body=args.body, skip=args.skip, edit=edit)
         return {**result, "then": "the other replies, then " + next_step({"action": "wait"}, target)}, 0
+    if args.action == "launch":
+        from android_workflow.review_inbox import launch_watch
+
+        return launch_watch(target), 0
     if args.action == "base":
         if not getattr(args, "set_base", None):
             raise ValueError("base needs --set BRANCH")

@@ -361,6 +361,13 @@ def _pick_avd(target: Path, adb: str, emulator: str, avd: str | None) -> tuple[s
     if configured and configured not in avds:
         warnings.append(f"AVD {configured!r} not found; set device.avd in .ai/android-workflow.json to one of {avds}")
         configured = None
+    if avd and avd in avds:
+        # Asked for by name (`--avd`): that AVD or nothing, never another one in its place.
+        if avd not in running:
+            return avd, False, warnings
+        if avd in booting:
+            return None, False, [f"{avd} is still booting: a second copy starts -read-only once it has booted"]
+        return avd, True, [*warnings, f"{avd} is already running: starting a -read-only copy of it"]
     idle = [name for name in avds if name not in running]
     fresh = [name for name in idle if name not in failed]
     if configured and configured in fresh:

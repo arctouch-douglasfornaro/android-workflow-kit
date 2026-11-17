@@ -128,7 +128,10 @@ the behavior only a running app shows.
    profile's Device rows and the NavHost/intent code for the changed screen). When it names a project
    skill (`.ai/skills/<name>/SKILL.md`, e.g. how to cold-launch with feature-flag pins) read and follow
    it before the first launch; a flag that does not take effect is a launch problem to fix that way, not
-   a reason to report BLOCKED. Then run it with a Maestro flow saved in
+   a reason to report BLOCKED: `CLI device launch --target TARGET --serial S --pins '<json>' --link <uri>`
+   cold-starts with the pins (when the project sets `device.pins_extra`), confirms them in logcat and then
+   opens the link. A device command that answers `budget_spent` ends the round: write the report with
+   what was verified and log it. Then run it with a Maestro flow saved in
    `RUN/media/flows/<name>.yaml` following the Flow contract. Assert the target screen was reached
    (text/testTag) before judging anything. Recipe wrong → fix the flow, not the app. In `before`, this is
    the whole job: write, run and fix each flow until it passes on the base build.

@@ -2767,6 +2767,8 @@ def dispatch(target: Path, args: Any) -> tuple[dict[str, Any], int]:
         from android_workflow import review_inbox
 
         if action == "inbox":
+            if getattr(args, "once", False):
+                return review_inbox.inbox_once(target), 0
             return review_inbox.inbox(target, wait=args.wait, timeout=args.timeout), 0
         if not args.pr:
             raise ValueError("launch requires --pr")

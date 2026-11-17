@@ -161,9 +161,9 @@ and posts nothing without the developer's OK in that tab.
    - `idle` / `timed_out`: wait again silently.
    - `offline`: GitHub is unreachable (network, VPN, sleep), not a login problem: wait again silently.
    A scheduled or unattended run (its prompt says so, e.g. Terminal One's "Android review inbox") is
-   one pass, never the loop: `CLI review inbox --target MAIN` once, launch what it returns, close or
-   update the board task it created (never one per poll, never left in progress), end with its 2–3
-   line summary.
+   one pass, never the loop: `CLI review inbox --target MAIN --once` (it launches what it finds and
+   returns `summary`), update or close the board task once (never one per poll, never left in
+   progress), end with that summary.
 3. The listener ends with this session or when the developer says stop. A launched session keeps
    running on its own; a re-request after our review launches a new session only when the old one has
    ended (a live session follows its PR with `review wait`).

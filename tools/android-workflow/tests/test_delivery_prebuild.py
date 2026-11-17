@@ -143,6 +143,27 @@ class DeliverTests(unittest.TestCase):
         self.assertFalse(result["pushed"])
         self.assertNotIn("user/D-1-change", refs)
 
+    def test_a_deletion_already_staged_is_delivered(self) -> None:
+        with AndroidProject() as root:
+            fake_gradle_project(root, {})
+            with_remote(root, root.parent / f"{root.name}-remote.git")
+            gone = "app/src/main/java/com/example/Old.kt"
+            (root / gone).write_text("package com.example\nclass Old\n", encoding="utf-8")
+            git(root, "add", gone)
+            git(root, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "old file")
+            git(root, "push", "-q", "origin", "HEAD")
+            run(root, {"id": "D-2", "title": "Change ProfileScreen", "type": "chore"})
+            implement(root)
+            git(root, "rm", "-q", gone)
+            assert main(["gate", "--target", str(root)]) == 0
+            assert approve_review(root) == 0
+            finish_run(root)
+            (run_dir(root) / "pr-description.md").write_text(BODY, encoding="utf-8")
+            result = deliver(root, no_pr=True)
+            shipped = git(root, "show", "--name-status", "--format=", "HEAD")
+        self.assertTrue(result["committed"])
+        self.assertIn(f"D\t{gone}", shipped)
+
     def test_rerun_after_a_partial_delivery_reuses_the_commit(self) -> None:
         with AndroidProject() as root:
             finished_run(root)

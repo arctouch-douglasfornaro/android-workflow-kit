@@ -94,3 +94,6 @@ Commit, push, touch `.ai/workflow/` except the notes, reset or restore user file
 `connected*AndroidTest`, or paste Gradle logs. Never write outside `TARGET`: the workflow toolkit
 (`~/.ai`, where the toolkit lives) and other worktrees are off limits. When the gate
 itself is wrong (a finding misclassified, a waiver missed), return `TOOLKIT_DEFECT: <what>` and stop.
+Never add a coverage-ignore annotation or exclusion (e.g. `@IgnoreCodeCoverage`, a Kover/Jacoco
+exclude) to implementation code to pass a coverage check: a `codecov/patch` failure is fixed with tests
+that run the uncovered changed lines.

@@ -192,8 +192,13 @@ class HubTests(unittest.TestCase):
     def test_start_prints_one_office_line_and_a_banner_after_the_json(self) -> None:
         with GitProject() as root:
             out, err = io.StringIO(), io.StringIO()
-            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                    mock.patch.dict("os.environ", {"ANDROID_WORKFLOW_BANNER": "1"}):
                 code = main(["start", "--target", str(root), "--id", "M-1", "--title", "Change ProfileScreen", "--type", "chore"])
+            piped = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(piped):
+                main(["status", "--target", str(root)])
+            self.assertNotIn("OFFICE", piped.getvalue())  # piped (`2>&1`): JSON only
             logged, _ = quiet("log", "--target", str(root), "--stage", "Planner", "--status", "started")
         result = json.loads(out.getvalue())  # the banner never breaks the JSON
         self.assertEqual(code, 0)

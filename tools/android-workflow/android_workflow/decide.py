@@ -10,6 +10,7 @@ Implementer, a draft PR), never a guess that skips a check.
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -193,6 +194,21 @@ def owner_of(path: str, owners: dict[str, str]) -> str | None:
 
 # --- the next action -------------------------------------------------------------------------
 
+def _process_alive(pid: Any) -> bool:
+    """True when `pid` runs, or when there is no pid to check (an older record: trust its status)."""
+    try:
+        number = int(pid)
+    except (TypeError, ValueError):
+        return True
+    try:
+        os.kill(number, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 def _answer(next_step: str, why: str, **fields: Any) -> dict[str, Any]:
     return {"next": next_step, "why": why, **{key: value for key, value in fields.items() if value not in (None, [], {})}}
 
@@ -373,7 +389,13 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
         kept = _keep_review_if_formatting_only(target, agent_dir, state, record)
         if kept:
             review_now = True
-    gate_running = (stages.get("T5") or {}).get("status") == "running"
+    gate_stage = stages.get("T5") or {}
+    gate_running = gate_stage.get("status") == "running" and _process_alive(gate_stage.get("pid"))
+    if gate_stage.get("status") == "running" and not gate_running and record:
+        # Killed without a word (SIGKILL, a closed terminal, a host timeout): never "wait" for it forever.
+        from android_workflow.cli import mark_gate_interrupted
+
+        mark_gate_interrupted(target)
     reviewer_running = review_state.get("status") == "started"
     if gate_now and gate.get("status") == "blocked":
         return _draft("the quality gate is blocked: " + str(gate.get("reason") or "see gate-report.json"), state)
@@ -412,6 +434,13 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
     findings: list[str] = []
     gate_failed = gate.get("status") == "failed"
     review_failed = review_verdict == "changes_requested"
+    if gate_failed and gate.get("disk_full"):
+        # Not the change, and no fix round or Gradle retry helps: the developer frees space.
+        return _answer("ask_user", "the gate could not run: " + str(gate["disk_full"]),
+                       question=f"{gate['disk_full']}. Free some space (e.g. `CLI cleanup --target MAIN`, "
+                                "`./gradlew --stop`, old emulators), then run the gate again?",
+                       options={"again": "CLI gate --target TARGET, then CLI next --target TARGET",
+                                "cleanup": "CLI cleanup --target MAIN --base, then CLI gate --target TARGET"})
     if gate_failed and gate.get("infra"):
         # Gradle failed by itself, twice (the gate already retried): the code is not at fault, no fix round.
         return _answer("ask_user", "the gate failed twice for a Gradle infrastructure reason: " + str(gate["infra"]),

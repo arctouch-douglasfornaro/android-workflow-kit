@@ -72,7 +72,8 @@ Keep log notes neutral (`--note "writing the PR description"`), never a list of 
 Record `TARGET`, `RUN` and `CLI` in the first chat message, and end that message with the office
 the user opens to watch the agents: `office_message` from the `start` output, copied as is, on its
 own line (a bold `Office:` label and a `file://` link that one click, Cmd+click in a terminal, opens
-at this run; `status` prints it too). Never reword it, build that link yourself or read that page. Fetch the ticket and pass it to the Planner:
+at this run; `status` prints it too). Never reword it, build that link yourself or read that page. Fetch the ticket and pass it to the Planner
+(`start` returns `ticket_source`: the key and its tracker, `linear` or `jira`):
 a key whose prefix is in `tickets.linear_prefixes` (`.ai/android-workflow.json`, default `["LT"]`)
 or a linear.app link → the Linear tool (`get_issue`, then `list_comments`); any other key → the Jira
 tool (`getJiraIssue`). A Jira ticket that says it moved to Linear → read the Linear issue too. The
@@ -140,6 +141,8 @@ CLI office --target T                               (opens the office at this ru
 CLI pr status|wait|merge --target T [--pr N] [--timeout S]       CLI pr sync --target T [--continue]
 CLI pr reply --target T --item ID (--body "…" | --skip "why") [--edit]   CLI pr rerequest --target T --reviewer LOGIN
 CLI pr base --target T --set BRANCH   (stack on another PR / back to the default branch)   CLI pr gh --target T -- <gh args>
+CLI pr launch --target T   (the PR Watcher continues in its own terminal tab after this session)
+CLI log … --stage Implementer --status completed --no-code "why"   (a round that changed no code on purpose)
 CLI pr body --target T --section "<heading>" --file F.md   (replaces only that section of the open PR's description)
 CLI pr ci --target T --check NAME --as ours|unrelated|rerun --reason "…"
 CLI finish … [--keep-device "why nothing visible changed"]     CLI deliver … [--keep-body]
@@ -148,6 +151,7 @@ CLI device replay --target T [--serial S] [--phase before|after] [--install-base
 CLI render probe --target T --module :mod        (Setup: does a JVM render work in this module, and how fast)
 CLI render run|verdict|route --target T          (render RUN/render-request.json; record RUN/render-review.json; the route)
 CLI render prefer --target T --mode auto|device|render   CLI render design --target T --skip "why"
+CLI device launch --target T [--serial S] [--pins JSON] [--link URI]   (cold start with feature-flag pins, confirmed in logcat, then the deep link)
 CLI device scaffold|build|install|release --target T [--serial S]   (flow templates from the plan's recipe; the current APK with no device held; it installed on the device; give the device back)
 CLI status|list --target T                          CLI clean --target T [--ticket ID | --stale [HOURS]]
 CLI cleanup --target T [--all] [--pr N] [--base] [--dry-run]   (worktrees of merged/closed PRs; --all archives open runs first)
@@ -184,7 +188,10 @@ CLI cleanup --target T [--all] [--pr N] [--base] [--dry-run]   (worktrees of mer
    re-derive what it decided (level, team or single, which checks to run, fix round or draft,
    device or skip): those rules live in the CLI, not in your reading of this file. When it hands a
    stage to an agent it already logged that stage `started` (`logged`), so do not log it again; a
-   repeated `next` while the agent works says `wait`.
+   repeated `next` while the agent works says `wait`. Every background command that ends (the gate,
+   `device build`, `pr wait`, an emulator), passed, failed or killed, is followed in that same turn by
+   `CLI next` and one line to the developer: a session never goes quiet while the run waits on
+   nothing. A gate whose process died is marked not finished by `next`, which runs it again.
    - `choose_level`: the rules allow express; only the ticket text can say whether it fits (`rule`).
      Run the `express` or the `standard` command it gives (`CLI next --level …`). The CLI refuses
      express for a bug, an open question or risk above low, and picks `full` itself.
@@ -292,7 +299,10 @@ CLI cleanup --target T [--all] [--pr N] [--base] [--dry-run]   (worktrees of mer
     with the default `--timeout 540` and a 10-minute command timeout; `timed_out` → run it again.
     The loop never pauses for the developer: while an `ask_user` waits for an answer, `pr wait` keeps
     running in the background, and every `pr reply` returns `then` with the next `pr wait`. The watch
-    ends only on `merged`, `closed`, `needs_user` or the developer saying stop.
+    ends only on `merged`, `closed`, `needs_user` or the developer saying stop. When this session is
+    about to end with the watch still open (the developer leaves, "fica ouvindo", "keep watching"), run
+    `CLI pr launch --target TARGET`: the watch continues in its own terminal tab
+    (`/android-workflow <ID> --watch --pr N`), never twice for the same PR.
     Every GitHub call goes through the CLI, which picks the PR author's account: fix a posted answer
     with `pr reply --edit`, stack or unstack the PR with `pr base --set`, and anything else with
     `pr gh -- …`, never a bare `gh` or a hand-written `GH_TOKEN=…`.

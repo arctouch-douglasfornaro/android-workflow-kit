@@ -314,3 +314,30 @@ class WatchLogKeyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DiskAndDeadGateTests(unittest.TestCase):
+    def test_a_full_disk_is_named_and_never_retried_or_counted_as_a_red_gate(self) -> None:
+        from unittest import mock
+
+        from android_workflow import cli
+
+        with tempfile.TemporaryDirectory() as folder:
+            log = Path(folder) / "g1.log"
+            log.write_text("e: java.io.IOException: No space left on device\n", encoding="utf-8")
+            reason = cli.disk_full_failure(Path(folder), [{"exit_code": 1, "outcome": "failed", "log": str(log)}])
+            self.assertIn("the disk is full", reason)
+            extras: dict = {}
+            with mock.patch.object(cli, "free_gb", return_value=1.2):
+                steps, warnings, _ = cli.run_gate_rounds(Path(folder), {}, {}, False, extras=extras)
+        self.assertIn("only 1.2 GB free", extras["disk_full"])
+        self.assertEqual(steps[0]["command"], "disk space check")
+
+    def test_a_gate_whose_process_died_is_not_waited_for(self) -> None:
+        from android_workflow.decide import _process_alive
+
+        self.assertTrue(_process_alive(os.getpid()))
+        self.assertTrue(_process_alive(None))  # an older record without a pid
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        self.assertFalse(_process_alive(dead.pid))
