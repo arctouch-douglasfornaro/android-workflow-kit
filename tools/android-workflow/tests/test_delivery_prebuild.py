@@ -346,6 +346,54 @@ class DeliverTests(unittest.TestCase):
         self.assertEqual(left_out, [])
 
 
+    def test_a_docs_and_config_change_ships_tracked_ai_files_but_not_run_state(self) -> None:
+        from android_workflow.cli import implementation_errors
+
+        with AndroidProject() as root:
+            (root / ".ai/skills/demo").mkdir(parents=True)
+            (root / ".ai/skills/demo/SKILL.md").write_text("old\n", encoding="utf-8")
+            (root / "tool.json").write_text("{}\n", encoding="utf-8")
+            git(root, "init", "-q")
+            git(root, "add", "-A")
+            git(root, "commit", "-qm", "docs")
+            run(root, {"id": "D-2", "title": "Drop a tool", "type": "chore", "surfaces": ["domain"]})
+            (root / ".ai/skills/demo/SKILL.md").write_text("new\n", encoding="utf-8")
+            git(root, "rm", "-q", "tool.json")
+            (run_dir(root) / "implementation-notes.md").write_text("# Decisions\n\nDropped the tool.\n", encoding="utf-8")
+            include, _ = stage_plan(root)
+            errors = implementation_errors(root)
+        self.assertEqual(include, [".ai/skills/demo/SKILL.md", "tool.json"])
+        self.assertEqual(errors, [])
+
+    def test_stages_a_tracked_file_under_a_locally_excluded_folder(self) -> None:
+        with AndroidProject() as root:
+            git(root, "init", "-q")
+            (root / ".agent/skills").mkdir(parents=True)
+            (root / ".agent/skills/SKILL.md").write_text("old\n", encoding="utf-8")
+            git(root, "add", "-A")
+            git(root, "commit", "-qm", "base")
+            (root / ".git/info/exclude").write_text(".agent/\n", encoding="utf-8")
+            (root / ".agent/skills/SKILL.md").write_text("new\n", encoding="utf-8")
+            (root / "app/src/main/java/com/example/Added.kt").write_text("class Added\n", encoding="utf-8")
+            from android_workflow.delivery import git as delivery_git
+            include, _ = stage_plan(root)
+            for mode, group in (("-u", [".agent/skills/SKILL.md"]), ("-A", ["app/src/main/java/com/example/Added.kt"])):
+                self.assertEqual(delivery_git(root, "add", mode, "--", *group).returncode, 0)
+        self.assertIn(".agent/skills/SKILL.md", include)
+
+    def test_no_diff_outside_run_state_is_still_incomplete(self) -> None:
+        from android_workflow.cli import implementation_errors
+
+        with AndroidProject() as root:
+            git(root, "init", "-q")
+            git(root, "add", "-A")
+            git(root, "commit", "-qm", "base")
+            run(root, {"id": "D-3", "title": "Nothing", "type": "chore", "surfaces": ["domain"]})
+            (run_dir(root) / "implementation-notes.md").write_text("# Decisions\n\nNone.\n", encoding="utf-8")
+            errors = implementation_errors(root)
+        self.assertEqual(errors, ["no diff outside workflow artifact dirs"])
+
+
 class PrebuildTests(unittest.TestCase):
     def prepared(self, root: Path, command: str, surfaces: str = "ui") -> None:
         fake_gradle_project(root, {})

@@ -57,7 +57,7 @@ def base_branch(target: Path, override: str | None) -> str:
 
 def stage_plan(target: Path) -> tuple[list[str], list[str]]:
     """`(paths to stage, untracked paths left out)` from `git status`, minus what never ships."""
-    from android_workflow.cli import git_status_paths
+    from android_workflow.cli import git_status_paths, is_workflow_file
 
     include: list[str] = []
     left_out: list[str] = []
@@ -65,7 +65,7 @@ def stage_plan(target: Path) -> tuple[list[str], list[str]]:
     for name in git_status_paths(target):
         path = Path(name)
         if (
-            name.startswith(EXCLUDED_PREFIXES)
+            (name.startswith(EXCLUDED_PREFIXES) and is_workflow_file(name, tracked_changes))
             or path.name in EXCLUDED_NAMES
             or name.endswith(EXCLUDED_SUFFIXES)
             or BASELINE_NAME_PATTERN.search(name)
@@ -418,10 +418,15 @@ def deliver(
         # makes `git add` fail with "pathspec did not match", so only the rest is added.
         staged_deleted = set(git(target, "diff", "--cached", "--name-only", "--diff-filter=D").stdout.splitlines())
         to_add = [path for path in paths if path not in staged_deleted]
-        added = git(target, "add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul", stdin="\0".join(to_add)) \
-            if to_add else subprocess.CompletedProcess([], 0, "", "")
-        if added.returncode != 0:
-            raise ValueError(f"git add failed: {tail(added.stderr, 6)}")
+        # A tracked file under a path the developer's own excludes ignore (`.git/info/exclude`) makes a plain
+        # `git add` fail; update mode stages tracked files without the ignore check.
+        tracked = set(git(target, "diff", "--name-only", "HEAD").stdout.splitlines())
+        for mode, group in (("-u", [p for p in to_add if p in tracked]), ("-A", [p for p in to_add if p not in tracked])):
+            if not group:
+                continue
+            added = git(target, "add", mode, "--pathspec-from-file=-", "--pathspec-file-nul", stdin="\0".join(group))
+            if added.returncode != 0:
+                raise ValueError(f"git add failed: {tail(added.stderr, 6)}")
         staged = set(git(target, "diff", "--cached", "--name-only").stdout.splitlines())
         stray = sorted(staged - set(paths))
         if stray:

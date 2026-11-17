@@ -15,7 +15,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Collection
 
 from android_workflow.paths import (
     KIT_ROOT,
@@ -2665,6 +2665,19 @@ def source_changes(target: Path) -> list[str]:
     return sorted(changed)
 
 
+WORKFLOW_AI_ENTRIES = frozenset({"workflow", "android-workflow.json", "project-profile.md"})
+
+
+def is_workflow_file(name: str, tracked: Collection[str]) -> bool:
+    """The workflow's own files (run state, its config, the profile) never ship; another `.ai/` path is the
+    repo's own (its skills, its rules) only when git tracks it."""
+    parts = Path(name).parts
+    if ".ai" not in parts:
+        return False
+    rest = parts[parts.index(".ai") + 1:]
+    return bool(rest and rest[0] in WORKFLOW_AI_ENTRIES) or name not in tracked
+
+
 def fingerprint_paths(target: Path) -> list[str]:
     """The code changes plus every other file git tracks as changed or the Implementer recorded (a
     README, a doc). A fix round that edits only docs is still a change the Reviewer must see; a stray
@@ -2677,7 +2690,7 @@ def fingerprint_paths(target: Path) -> list[str]:
     recorded = [str(item) for item in read_json(recorded_file).get("files", [])] if recorded_file and recorded_file.exists() else []
     kept = set(source_changes(target))
     for name in set(tracked) | set(recorded):
-        if ".ai" in Path(name).parts:
+        if is_workflow_file(name, tracked):
             continue
         if BASELINE_NAME_PATTERN.search(name) and name not in tracked:
             continue
@@ -2711,8 +2724,8 @@ def implementation_errors(target: Path) -> list[str]:
     notes = text_if_exists(run_dir(target) / "implementation-notes.md")
     if "Host has not implemented yet." in notes or not notes.strip():
         errors.append("implementation-notes.md is still the Implementer stub")
-    if not source_changes(target):
-        errors.append("no source diff (.kt/.java/.xml/.kts/.gradle) outside workflow artifact dirs")
+    if not fingerprint_paths(target):
+        errors.append("no diff outside workflow artifact dirs")
     return errors
 
 
