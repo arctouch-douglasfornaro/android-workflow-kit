@@ -483,6 +483,26 @@ class SyncTests(unittest.TestCase):
         self.assertTrue(message.startswith("Merge "), message)
         self.assertNotIn("# Conflicts", message)  # git's commented hints never reach the commit
 
+    def test_continue_commits_the_rounds_fix_to_a_file_without_a_conflict(self) -> None:
+        with AndroidProject() as root:
+            remote = self.prepare(root, "package com.example\n\nfun ProfileScreen() = 42\n")
+            watch.sync(root)
+            path = root / "app/src/main/java/com/example/ProfileScreen.kt"
+            path.write_text("package com.example\n\nfun ProfileScreen() = 42\n", encoding="utf-8")
+            other = next(name for name in git(root, "ls-files").splitlines()
+                         if not name.startswith(".ai/") and name != "app/src/main/java/com/example/ProfileScreen.kt")
+            (root / other).write_text((root / other).read_text(encoding="utf-8") + "\n// fixed by the round\n",
+                                      encoding="utf-8")
+            (root / "app/src/main/java/com/example/NewTest.kt").write_text("class NewTest\n", encoding="utf-8")
+            refused, code = watch.sync(root, resume=True)
+            self.assertEqual((code, refused["status"]), (1, "untracked"), refused)
+            self.assertIn("app/src/main/java/com/example/NewTest.kt", refused["files"])
+            (root / "app/src/main/java/com/example/NewTest.kt").unlink()
+            done, code = watch.sync(root, resume=True)
+            shipped = git(remote, "show", f"user/D-1-change:{other}")
+        self.assertEqual((code, done["status"]), (0, "synced"), done)
+        self.assertIn("// fixed by the round", shipped)
+
     def test_uncommitted_work_is_never_merged_over(self) -> None:
         with AndroidProject() as root:
             self.prepare(root, "package com.example\n\nfun ProfileScreen() = 1\n")
@@ -655,6 +675,34 @@ class KeepDeviceTests(unittest.TestCase):
         self.assertEqual(state["status"], "completed")
         self.assertEqual(state["stages"]["T7"]["kept"], "renamed a private function")
         self.assertIn("earlier PASS kept: renamed a private function", log)
+
+
+    def test_a_pr_round_without_visible_changes_ships_without_an_earlier_device_pass(self) -> None:
+        import json
+
+        from android_workflow.cli import run
+        from tests.test_workflow import approve_review, finish_verified, implement
+
+        with AndroidProject() as root:
+            run(root, {"id": "V-8", "title": "Change ProfileScreen button", "type": "chore"})
+            implement(root)
+            approve_review(root)
+            finish_verified(root, draft="the device check never ran")  # opened as a draft, no device PASS
+            implement(root, "fun empty() = 3\n")
+            approve_review(root)
+            feedback = run_dir(root) / "pr-feedback.json"
+            feedback.write_text(json.dumps({"changes": [{"id": "PR-1", "what": "rename", "items": ["t1"],
+                                                         "device": True}]}), encoding="utf-8")
+            with self.assertRaises(ValueError) as visible:
+                finish_verified(root, keep_device="renamed a private function")
+            feedback.write_text(json.dumps({"changes": [{"id": "PR-1", "what": "rename", "items": ["t1"],
+                                                         "device": False}]}), encoding="utf-8")
+            state = finish_verified(root, keep_device="renamed a private function")
+        self.assertIn("PR-1 have `device: true`", str(visible.exception))
+        self.assertEqual(state["status"], "completed")
+        self.assertIsNone(state["draft"])
+        self.assertEqual(state["stages"]["T7"]["status"], "skipped")
+        self.assertIn("nothing visible on the device", state["stages"]["T7"]["reason"])
 
 
 class AccountTests(unittest.TestCase):

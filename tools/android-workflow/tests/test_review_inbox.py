@@ -118,6 +118,8 @@ class LaunchTest(unittest.TestCase):
         self.assertIn(f"cd {shlex.quote(str(self.target))}", text)
         self.assertIn("PR-42.pid", text)
         self.assertIn("exec claude -n 'review PR-42' '/android-review 42 --target", text)
+        self.assertIn("export PATH=", text)
+        self.assertLess(text.index("export PATH="), text.index("exec claude"))
 
     def test_a_running_session_is_not_launched_twice_and_the_pid_is_checked(self) -> None:
         path = inbox.pid_file(self.target, 42)

@@ -111,9 +111,15 @@ def _remote(target: Path) -> tuple[str, str]:
 
 def _gh(args: list[str], env: dict[str, str] | None = None, stdin: str | None = None, timeout: int = 120,
         cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+    from android_workflow.toolenv import extra_path_dirs, find_gh
+
+    gh = find_gh()
+    if gh is None:
+        raise ValueError("`gh` is not on PATH (also looked in " + ", ".join(extra_path_dirs())
+                         + "); install the GitHub CLI or add its folder to PATH")
     try:
         return subprocess.run(
-            ["gh", *args], text=True, capture_output=True, input=stdin, timeout=timeout, check=False,
+            [gh, *args], text=True, capture_output=True, input=stdin, timeout=timeout, check=False,
             env={**os.environ, **(env or {}), "GH_PROMPT_DISABLED": "1"}, cwd=cwd,
         )
     except FileNotFoundError as error:
@@ -450,7 +456,9 @@ def _local(target: Path, head: str | None, branch: str | None) -> dict[str, Any]
         return subprocess.run(["git", "-C", str(target), *args], text=True, capture_output=True, check=False).stdout.strip()
 
     local_head = git("rev-parse", "HEAD")
-    dirty = [line[3:] for line in git("status", "--porcelain").splitlines() if not line[3:].startswith(".ai/")]
+    porcelain = subprocess.run(["git", "-C", str(target), "status", "--porcelain"], text=True, capture_output=True,
+                               check=False).stdout  # unstripped: the first line's status column starts with a space
+    dirty = [line[3:] for line in porcelain.splitlines() if line.strip() and not line[3:].startswith(".ai/")]
     return {"branch": git("rev-parse", "--abbrev-ref", "HEAD"), "on_pr_branch": git("rev-parse", "--abbrev-ref", "HEAD") == branch,
             "matches_pr": bool(head) and local_head == head, "uncommitted": dirty[:10]}
 
@@ -952,8 +960,17 @@ def sync(target: Path, resume: bool = False) -> tuple[dict[str, Any], int]:
         markers = [path for path in conflicted if re.search(r"^(<{7}|>{7}) ", (target / path).read_text(errors="ignore"), re.M)]
         if markers:
             return {"status": "conflict", "files": markers, "reason": "conflict markers are still in these files"}, 1
+        untracked = [line[3:] for line in _git(target, "status", "--porcelain", "--untracked-files=all").stdout.splitlines()
+                     if line.startswith("?? ") and not line[3:].startswith(".ai/")]
+        if untracked:
+            return {"status": "untracked", "files": untracked[:20],
+                    "reason": "new files the merge round created are not staged: `git add` the ones that belong "
+                              "to the change (never workflow files), then `CLI pr sync --continue` again"}, 1
         if conflicted:
             _git(target, "add", "--", *conflicted)
+        # The round may fix files that had no conflict (a test the merge broke): the gate ran on them, so
+        # they go into the merge commit too. Workflow files never do.
+        _git(target, "add", "-u", "--", ".", ":(exclude).ai")
         # `strip`: git's `# Conflicts:` hints in MERGE_MSG never reach the commit message.
         committed = _git(target, "commit", "--no-edit", "--cleanup=strip")
         if committed.returncode != 0:
@@ -964,7 +981,7 @@ def sync(target: Path, resume: bool = False) -> tuple[dict[str, Any], int]:
         dirty = [line for line in _git(target, "status", "--porcelain").stdout.splitlines() if not line[3:].startswith(".ai/")]
         if dirty:
             raise ValueError("uncommitted changes in the checkout; deliver or stash them before syncing")
-        fetched = _git(target, "fetch", "origin", pr["base"], pr["head_branch"])
+        fetched = _git(target, "fetch", "--no-recurse-submodules", "origin", pr["base"], pr["head_branch"])
         if fetched.returncode != 0:
             raise ValueError(f"git fetch failed: {fetched.stderr[-400:]}")
         forward = _git(target, "merge", "--ff-only", f"origin/{pr['head_branch']}")

@@ -512,16 +512,28 @@ def merge_head(target: Path) -> str | None:
     return result.stdout.strip() or None if result.returncode == 0 else None
 
 
+def pr_base_ref(target: Path) -> str | None:
+    """`origin/<base>` of the PR this run delivers or watches (a stacked PR's base is another branch)."""
+    try:
+        watch = read_json(run_dir(target) / "pr-watch.json")
+    except (FileNotFoundError, OSError, ValueError):
+        return None
+    base = ((watch.get("pr") or {}) if isinstance(watch, dict) else {}).get("base")
+    return f"origin/{base}" if base else None
+
+
 def diff_base(target: Path) -> str | None:
     """The commit this change is measured against.
 
     While a merge of the base branch is in progress, that is the commit being merged (MERGE_HEAD): the
     change is what this branch adds on top of it, never the base branch's own files.
 
-    The pinned `base_commit` is HEAD when the run started. Merging the default branch in afterwards
-    would make every file that branch brought look changed (a whole-repo gate, waivers on files
-    nobody touched), so once the pinned base is an ancestor of the merge-base with origin's default
-    branch, that merge-base is the base instead.
+    Otherwise it is the merge-base of HEAD with the PR's base branch (origin's default branch when there
+    is no PR yet) whenever the pinned `base_commit` is behind it, or is not on that branch at all. The
+    first: the base branch was merged in after the run started, and its files are not ours. The second:
+    the run was started (or recreated) on an existing PR branch, so the pin is a PR commit, and the PR
+    is everything since the merge-base. Either way a merge that adds nothing keeps the same file set,
+    so the fingerprint and every verdict stay fresh.
     """
     repo_map_path = cache_dir(target) / "repo-map.json"
     base = read_json(repo_map_path).get("base_commit") if repo_map_path.exists() else None
@@ -534,14 +546,21 @@ def diff_base(target: Path) -> str | None:
     def git_out(*args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(["git", "-C", str(target), *args], text=True, capture_output=True, check=False)
 
+    def ancestor(older: str, newer: str) -> bool:
+        return git_out("merge-base", "--is-ancestor", older, newer).returncode == 0
+
+    candidates: list[str] = []
+    pr_base = pr_base_ref(target)
+    if pr_base:
+        candidates.append(pr_base)
     head = git_out("symbolic-ref", "--short", "refs/remotes/origin/HEAD").stdout.strip()
-    candidates = [head] if head else [f"origin/{name}" for name in ("main", "master", "develop")]
-    for ref in candidates:
+    candidates += [head] if head else [f"origin/{name}" for name in ("main", "master", "develop")]
+    for ref in dict.fromkeys(candidates):
         merged = git_out("merge-base", "HEAD", ref)
         if merged.returncode != 0:
             continue
         upstream = merged.stdout.strip()
-        if upstream and upstream != base and git_out("merge-base", "--is-ancestor", base, upstream).returncode == 0:
+        if upstream and upstream != base and (ancestor(base, upstream) or not ancestor(base, ref)):
             return upstream
         break
     return base
@@ -3485,6 +3504,19 @@ def media_files(agent_dir: Path, phase: str) -> list[Path]:
         if folder.is_dir() else []
 
 
+def pr_round_device_changes(agent_dir: Path, state: dict[str, Any]) -> list[str] | None:
+    """In a PR feedback round (the run finished once), the ids of this round's `changes` marked
+    `device: true`; None outside a PR round or when the round has no `changes`."""
+    if not state.get("finished_fingerprint"):
+        return None
+    path = agent_dir / "pr-feedback.json"
+    feedback = read_json(path) if path.is_file() else {}
+    changes = [change for change in feedback.get("changes") or [] if isinstance(change, dict)]
+    if not changes:
+        return None
+    return [str(change.get("id")) for change in changes if change.get("device") is True]
+
+
 def verification_errors(
     target: Path,
     spec: dict[str, Any],
@@ -3609,10 +3641,21 @@ def finish_run(
     state = load_state(target)
     metrics = read_json(agent_dir / "stage-metrics.json")
     gate = read_json(agent_dir / "gate-report.json")
+    if keep_device and "T7" in spec["route"] and not skip_device and recorded_verdict(agent_dir, "T7") not in {"pass", "partial"}:
+        visible = pr_round_device_changes(agent_dir, state)
+        if visible is None and not state.get("no_device"):
+            raise ValueError("--keep-device needs an earlier device PASS in this run, or a PR round whose "
+                             "pr-feedback.json changes have no `device: true`; run the Device stage")
+        if visible:
+            raise ValueError(f"--keep-device: change(s) {', '.join(visible)} have `device: true`; run the Device stage")
+        # A PR round that changes nothing on screen, on a run that never had a device PASS (analytics, renders,
+        # no device): nothing to keep and nothing to check. Skipped, and said so in the PR.
+        skip_device = f"PR round with nothing visible on the device: {keep_device}"
+        keep_device = None
+    if keep_device and not accept_partial and recorded_verdict(agent_dir, "T7") == "partial" and state.get("device_partial"):
+        accept_partial = str(state["device_partial"])  # the developer accepted it in an earlier round
     if keep_device and "T7" in spec["route"] and not skip_device:
         device = state.get("stages", {}).get("T7", {})
-        if recorded_verdict(agent_dir, "T7") not in {"pass", "partial"}:
-            raise ValueError("--keep-device needs an earlier device PASS in this run; run the Device stage")
         device["fingerprint"] = source_fingerprint(target)
         device["kept"] = keep_device
         device["status"] = "completed"  # a Device `started` logged for this round never ran
@@ -4522,6 +4565,9 @@ def refresh_office(target: Path) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    from android_workflow import toolenv
+
+    toolenv.prepare(args.target.resolve() if getattr(args, "target", None) else None)
     try:
         result, code = _dispatch(args)
         if args.target:

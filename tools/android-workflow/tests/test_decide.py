@@ -621,6 +621,23 @@ class RunTests(unittest.TestCase):
             cli("finish", "--target", self.target, "--keep-device", "copy only")
             self.assertEqual(read_json(self.rundir / "run-state.json")["stages"]["T7"]["status"], "completed")
 
+    def test_a_pr_round_without_a_device_change_finishes_keeping_the_device(self) -> None:
+        self.visual_run()
+        with mock.patch("android_workflow.emulator.status", return_value={"status": "connected", "serial": "emu-1"}):
+            cli("finish", "--target", self.target, "--draft", "no device PASS yet")
+            self.implement("val a = 8")
+            self.gate("passed")
+            self.review("approved")
+            (self.rundir / "pr-feedback.json").write_text(json.dumps(
+                {"changes": [{"id": "PR-1", "what": "rename", "items": ["t1"], "device": False}]}), encoding="utf-8")
+            answer = self.next()
+            (self.rundir / "pr-feedback.json").write_text(json.dumps(
+                {"changes": [{"id": "PR-1", "what": "copy", "items": ["t1"], "device": True}]}), encoding="utf-8")
+            visible = self.next("--dry-run")
+        self.assertEqual(answer["next"], "finish")
+        self.assertIn("--keep-device", answer["command"])
+        self.assertEqual(visible.get("agent"), "aw-device")
+
     def test_a_dry_run_records_and_logs_nothing(self) -> None:
         self.start("--level", "express")
         cli("update-spec", "--target", self.target, "--acceptance", "a", "--surfaces", "domain")

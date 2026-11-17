@@ -34,6 +34,7 @@ import sys
 
 TICKET_RE = re.compile(r"^[A-Z][A-Z0-9]*-\d+$")
 MAX_SLUG = 60
+SSH_FAILURE = re.compile(r"Permission denied \(publickey\)|Host key verification failed|Could not read from remote repository|ssh: ")
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +245,10 @@ def bootstrap_worktree(source, path, timeout=300):
             sub = fields[1]
             reference = os.path.join(source, sub)
             done = run(["submodule", "update", "--init", "--reference", reference, "--", sub], path)
+            if done.returncode != 0 and SSH_FAILURE.search(done.stderr or ""):
+                # An SSH remote without a usable key: the same GitHub repository over HTTPS (gh's login).
+                done = run(["-c", "url.https://github.com/.insteadOf=git@github.com:",
+                            "submodule", "update", "--init", "--reference", reference, "--", sub], path)
             if done.returncode == 0 and os.path.isdir(os.path.join(path, sub)) and os.listdir(os.path.join(path, sub)):
                 report["submodules"][sub] = "initialised"
                 continue

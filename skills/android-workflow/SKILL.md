@@ -300,8 +300,11 @@ CLI status|list --target T                          CLI clean --target T [--tick
       author's request to answer reviewers.
       `changes` → a fix round on the same Implementer (IDs `PR-1`…, `RUN/pr-feedback.json`), then the
       gate and a delta Reviewer in parallel (`CLI next`, same limits), then Device `after` only when a
-      change has `device: true` (when `next` asks for the device and none has it, do not spawn it); otherwise `CLI finish --target TARGET --keep-device "<why nothing
-      visible changed>"` (a plain `finish` when the route has no device). Then, with no Delivery agent:
+      change has `device: true`; otherwise `next` answers `CLI finish --target TARGET --keep-device "<why nothing
+      visible changed>"`, which works even when the run never had a device PASS (analytics, renders,
+      a draft) and the PR says the device was not re-checked. A partial device check the developer
+      already accepted is accepted again without asking. Never commit or push with plain git: a
+      refused `finish` or `deliver` is a toolkit gap to report. Then, with no Delivery agent:
       `CLI deliver --target TARGET --subject "<ID>: <what this round changed>" --keep-body`. Then resume
       `aw-pr-watcher` mode `reply` with the pushed `sha` and the change IDs (`--keep-body` keeps the
       developer's edits; when the round changes what the description says, the watcher updates that
@@ -309,9 +312,12 @@ CLI status|list --target T                          CLI clean --target T [--tick
       red after its fix rounds: push nothing, tell the developer what is open, keep watching.
     - `sync` (`behind` or `conflict`): `CLI pr sync --target TARGET`. `synced` → wait again.
       `conflict` → the Implementer resolves the listed files (keeping both intents), the gate runs,
-      then `CLI pr sync --target TARGET --continue`. Never rebase or force-push. While the merge is open
-      the gate measures the change against the commit being merged in, so the base branch's own files
-      are never linted as ours.
+      then `CLI pr sync --target TARGET --continue`; it commits the resolved files and every other
+      tracked file the round fixed (new files: `git add` them first, it says which). Never rebase or
+      force-push. The gate measures the change against the merge-base with the PR's base branch (the
+      commit being merged in while the merge is open), so the base branch's own files are never linted
+      as ours and a merge that adds nothing keeps every verdict fresh. A PR that was merged or closed
+      is never pushed to again: `deliver` refuses, and a new round needs a new branch.
     - `merge`: with `auto_merge` (the default) → `CLI pr merge --target TARGET`; it reads the PR again,
       merges with the method the repository allows (squash first) only if still ready, and never
       bypasses branch protection. `not_ready` → wait again. Without `auto_merge` → tell the developer

@@ -129,6 +129,41 @@ def compare_url(remote: str, branch: str, base: str) -> str | None:
     return f"https://{host}/{repo}/compare/{base}...{branch}?expand=1"
 
 
+def ended_pull_request(target: Path, agent_dir: Path, branch: str) -> dict[str, Any] | None:
+    """The PR this run already opened, when it was merged or closed since: pushing again would reopen the
+    work as a new PR. None when the run never opened one, it is still open, or GitHub cannot be asked."""
+    recorded: dict[str, Any] = {}
+    for name in ("pr-watch.json", "delivery.json"):
+        path = agent_dir / name
+        if path.is_file():
+            try:
+                recorded = json.loads(path.read_text(encoding="utf-8"))
+            except ValueError:
+                continue
+            if (recorded.get("pr") or {}).get("number") or recorded.get("url"):
+                break
+            recorded = {}
+    if not recorded:
+        return None
+    try:
+        host, _ = remote_host(target)
+    except ValueError:
+        return None
+    if host != "github" or not shutil.which("gh"):
+        return None
+    from android_workflow.watch import github_env
+
+    try:
+        env = {**os.environ, **github_env(target)}
+        found = subprocess.run(["gh", "pr", "view", branch, "--json", "state,url"], cwd=target, text=True,
+                               capture_output=True, timeout=60, check=False, env=env)
+        data = json.loads(found.stdout) if found.returncode == 0 else {}
+    except (ValueError, OSError, subprocess.SubprocessError):
+        return None
+    state = str(data.get("state") or "").upper()
+    return {"state": state, "url": data.get("url")} if state in {"MERGED", "CLOSED"} else None
+
+
 def open_pull_request(
     target: Path, host: str, remote: str, branch: str, base: str, subject: str, body_file: Path,
     timeout: int, draft: bool = False, keep_body: bool = False,
@@ -336,6 +371,13 @@ def deliver(
 
     result: dict[str, Any] = {"branch": branch, "base": base_name, "subject": subject}
     warnings: list[str] = []
+    if not no_push and not no_pr:
+        ended = ended_pull_request(target, agent_dir, branch)
+        if ended:
+            raise ValueError(
+                f"PR {ended['url'] or branch} is {ended['state']}: nothing was committed or pushed. A new round "
+                f"needs a new branch from `{base_name}` (and a new PR); ask the developer before starting it"
+            )
 
     from android_workflow import pr_media
 

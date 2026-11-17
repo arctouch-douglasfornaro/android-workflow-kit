@@ -150,6 +150,49 @@ class DiffBaseTests(unittest.TestCase):
             self.assertNotIn("core/domain/Other.kt", source_changes(root))
             self.assertEqual(diff_base(root), git(root, "rev-parse", "MERGE_HEAD"))
 
+    def test_a_run_started_on_an_existing_pr_branch_measures_the_whole_pr_after_a_merge(self) -> None:
+        with AndroidProject() as root:
+            fake_gradle_project(root, {})
+            git(root, "branch", "-M", "main")
+            git(root, "update-ref", "refs/remotes/origin/main", "main")
+            git(root, "checkout", "-qb", "feature")
+            (root / SCREEN).write_text((root / SCREEN).read_text(encoding="utf-8") + "// pr\n", encoding="utf-8")
+            git(root, "add", "-A")
+            git(root, "commit", "-qm", "pr work before the run")
+            run(root, {"id": "M-4", "title": "Change ProfileScreen", "type": "chore"})  # pins the PR head
+            git(root, "checkout", "-q", "main")
+            (root / "core/domain/Other.kt").write_text("class Other\n", encoding="utf-8")
+            git(root, "add", "-A")
+            git(root, "commit", "-qm", "someone else's work")
+            git(root, "update-ref", "refs/remotes/origin/main", "main")
+            git(root, "checkout", "-q", "feature")
+            before = source_fingerprint(root)
+            git(root, "merge", "-q", "--no-edit", "main")
+
+            self.assertEqual(diff_base(root), git(root, "rev-parse", "main"))
+            self.assertEqual(source_changes(root), [SCREEN])
+            self.assertEqual(source_fingerprint(root), before)
+
+    def test_a_stacked_pr_is_measured_against_its_base_branch(self) -> None:
+        from android_workflow.paths import run_dir
+
+        with AndroidProject() as root:
+            fake_gradle_project(root, {})
+            git(root, "branch", "-M", "main")
+            git(root, "update-ref", "refs/remotes/origin/main", "main")
+            git(root, "checkout", "-qb", "lower")
+            (root / "core/domain/Lower.kt").write_text("class Lower\n", encoding="utf-8")
+            git(root, "add", "-A")
+            git(root, "commit", "-qm", "the lower PR")
+            git(root, "update-ref", "refs/remotes/origin/lower", "lower")
+            git(root, "checkout", "-qb", "upper")
+            run(root, {"id": "M-5", "title": "Change ProfileScreen", "type": "chore"})
+            (run_dir(root) / "pr-watch.json").write_text('{"pr": {"base": "lower"}}', encoding="utf-8")
+            implement(root)
+
+            self.assertEqual(diff_base(root), git(root, "rev-parse", "lower"))
+            self.assertNotIn("core/domain/Lower.kt", source_changes(root))
+
     def test_without_a_remote_the_pinned_base_is_kept(self) -> None:
         with AndroidProject() as root:
             fake_gradle_project(root, {})

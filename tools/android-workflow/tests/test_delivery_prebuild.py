@@ -204,6 +204,29 @@ class DeliverTests(unittest.TestCase):
         self.assertTrue(created[0].endswith("--draft"))
         self.assertFalse(created[1].endswith("--draft"))
 
+    def test_a_merged_pr_is_never_reopened_by_the_next_round(self) -> None:
+        from unittest import mock
+
+        from android_workflow import delivery, watch
+
+        with AndroidProject() as root:
+            bin_dir = root / "fakebin"
+            bin_dir.mkdir()
+            gh = bin_dir / "gh"
+            gh.write_text("#!/bin/sh\necho '{\"state\": \"MERGED\", \"url\": \"https://github.com/o/r/pull/7\"}'\n",
+                          encoding="utf-8")
+            gh.chmod(0o755)
+            agent_dir = root / "run"
+            agent_dir.mkdir()
+            patches = (mock.patch.dict("os.environ", {"PATH": f"{bin_dir}:/usr/bin:/bin"}),
+                       mock.patch.object(delivery, "remote_host", return_value=("github", "git@github.com:o/r.git")),
+                       mock.patch.object(watch, "github_env", return_value={}))
+            with patches[0], patches[1], patches[2]:
+                self.assertIsNone(delivery.ended_pull_request(root, agent_dir, "b"))  # no PR opened by this run
+                (agent_dir / "delivery.json").write_text('{"url": "https://github.com/o/r/pull/7"}', encoding="utf-8")
+                ended = delivery.ended_pull_request(root, agent_dir, "b")
+        self.assertEqual(ended, {"state": "MERGED", "url": "https://github.com/o/r/pull/7"})
+
     def test_redelivering_a_ready_run_marks_the_draft_pr_ready(self) -> None:
         from unittest import mock
 

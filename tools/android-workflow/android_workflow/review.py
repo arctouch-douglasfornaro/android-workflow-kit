@@ -624,7 +624,7 @@ def start(main_target: Path, pr_ref: str, worktree: Path | None = None, download
                 "next": "nothing to review: the PR is " + str(pr.get("state")).lower()}
 
     ref = f"refs/remotes/origin/aw-review/pr-{number}"
-    fetched = _git(main_target, "fetch", "--no-tags", "origin", f"+pull/{number}/head:{ref}", pr["baseRefName"])
+    fetched = _git(main_target, "fetch", "--no-tags", "--no-recurse-submodules", "origin", f"+pull/{number}/head:{ref}", pr["baseRefName"])
     if fetched.returncode != 0:
         raise ValueError(f"git fetch failed: {fetched.stderr.strip()[-400:]}")
     head = _git(main_target, "rev-parse", ref).stdout.strip()

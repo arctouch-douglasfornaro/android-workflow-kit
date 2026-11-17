@@ -263,6 +263,15 @@ def agent_command(target: Path, number: int, config: dict[str, Any]) -> str:
     )
 
 
+def _env_lines(target: Path) -> list[str]:
+    """PATH and JAVA_HOME as this CLI resolved them: a login shell or Terminal One never reads `.zshrc`."""
+    from android_workflow import toolenv
+
+    env = {"PATH": os.environ.get("PATH", ""), **({"JAVA_HOME": os.environ["JAVA_HOME"]} if "JAVA_HOME" in os.environ else {})}
+    toolenv.prepare(target, env)
+    return [f"export {key}={shlex.quote(value)}" for key, value in env.items() if value]
+
+
 def write_script(target: Path, number: int, config: dict[str, Any]) -> Path:
     """The launcher: records its PID (kept by `exec`) and replaces itself with the agent session."""
     script = launch_dir(target) / f"PR-{number}.sh"
@@ -272,6 +281,7 @@ def write_script(target: Path, number: int, config: dict[str, Any]) -> Path:
             f"#!{_shell()}",
             f"# android-review inbox: review session for PR #{number}",
             f"cd {shlex.quote(str(target))} || exit 1",
+            *_env_lines(target),
             f"echo $$ > {shlex.quote(str(pid_file(target, number)))}",
             f"exec {agent_command(target, number, config)}",
             "",

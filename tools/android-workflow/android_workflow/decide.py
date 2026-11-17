@@ -450,6 +450,13 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
         device_state = stages.get("T7") or {}
         device_verdict = recorded_verdict(agent_dir, "T7")
         device_now = device_state.get("fingerprint") == fingerprint and device_verdict in {"pass", "fail", "blocked", "partial"}
+        if not device_now and device_state.get("status") != "started":
+            from android_workflow.cli import pr_round_device_changes
+
+            if pr_round_device_changes(agent_dir, state) == []:
+                # A PR round whose changes alter nothing on screen: no Device agent, no question.
+                return _answer("finish", "PR round: no change has `device: true`, nothing to verify on the device",
+                               command='CLI finish --target TARGET --keep-device "<why nothing visible changed>"')
         if device_now and device_verdict in {"pass", "partial"}:
             late = _late_before(target, agent_dir, spec, state, record)
             if late:
@@ -473,6 +480,10 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
                                    command=f'CLI finish --target TARGET --accept-partial "{accepted}"')
                 return _finish(spec, skip=f"{UNREACHABLE_SKIP}: {unreachable}".replace('"', "'"))
         if device_now and device_verdict == "partial":
+            if state.get("finished_fingerprint") and state.get("device_partial"):
+                accepted = str(state["device_partial"]).replace('"', "'")
+                return _answer("finish", "the device check is partial again; the developer accepted it in an earlier round",
+                               command=f'CLI finish --target TARGET --accept-partial "{accepted}"')
             if state.get("finished_fingerprint"):  # a PR round: the developer decides, nothing is pushed yet
                 return _answer("ask_user", "the device check is partial (PR round)", question=PARTIAL_QUESTION,
                                options=_partial_options(again=not stop), then="CLI next --target TARGET")
