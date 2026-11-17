@@ -9,6 +9,12 @@ unchanged workflow: it stops at the draft and posts nothing without the develope
 State lives in `TARGET/.ai/workflow/_cache/review-inbox.json`; each launched session writes its PID to
 `_cache/review-launch/PR-<n>.pid` (the launcher script `exec`s the agent), so the listener knows
 whether a PR still has a live session and never starts a second one on the same worktree.
+The PR Watcher of `/android-workflow` (`CLI pr launch`) uses the same launcher with `WATCH-<n>`.
+
+`CLI review finish` / `CLI pr finish` end a PR whose story is over (merged or closed): they remove its
+worktree (`CLI cleanup --pr N --force`) and stop the session the launcher started for it. The PID is
+the agent's own process (the launcher `exec`s it), whichever agent `review.inbox.agent` names, so
+nothing needs to know which agent runs. A session started by hand has no PID file and is never stopped.
 
 Starting a review builds the PR's code on this machine, so only PRs from this repository (never a
 fork) by authors with a trusted association (owner, member, collaborator) are launched; anything
@@ -40,7 +46,19 @@ DEFAULT_INBOX = {
     "max_parallel": 2,               # sessions still reviewing (a session that only watches does not count)
     "terminal": "auto",              # auto | terminal | iterm | command
     "command": None,                 # terminal "command": a shell command with {script}, e.g. "open -a MyTerm {script}"
-    "agent_command": 'claude -n {name} {prompt}',  # the agent session started in the tab
+    "agent": "claude",               # claude | codex: the agent the tab runs, with its own prompt
+    "agent_command": None,           # overrides the agent's command, e.g. "claude -n {name} {prompt}"
+    "close_delay": 30,               # finish: seconds a session that ends itself keeps for its last message
+}
+
+# Each agent's command and how it is asked to run a skill. {name} and {prompt} are shell-quoted.
+AGENTS: dict[str, dict[str, str]] = {
+    "claude": {"command": "claude -n {name} {prompt}",
+               "review": "/android-review {pr} --target {target}",
+               "watch": "/android-workflow {ticket} --watch --pr {pr}"},
+    "codex": {"command": "codex {prompt}",
+              "review": "Use the android-review skill: /android-review {pr} --target {target}",
+              "watch": "Use the android-workflow skill: /android-workflow {ticket} --watch --pr {pr}"},
 }
 
 SEARCH_QUERY = """
@@ -81,7 +99,20 @@ def inbox_config(target: Path) -> dict[str, Any]:
         config["max_parallel"] = DEFAULT_INBOX["max_parallel"]
     config["author_associations"] = [str(a).upper() for a in config.get("author_associations") or []]
     config["skip_authors"] = [str(a).lower() for a in config.get("skip_authors") or []]
+    config["agent"] = str(config.get("agent") or "claude").lower()
+    if config["agent"] not in AGENTS and not config.get("agent_command"):
+        raise ValueError(f"review.inbox.agent {config['agent']!r} is not one of {', '.join(AGENTS)}: "
+                         "set review.inbox.agent_command for another agent")
+    try:
+        config["close_delay"] = max(0.0, float(config["close_delay"]))
+    except (TypeError, ValueError):
+        config["close_delay"] = DEFAULT_INBOX["close_delay"]
     return config
+
+
+def agent_prompt(config: dict[str, Any], kind: str, **values: Any) -> str:
+    """The first prompt of a launched session: `review` or `watch`, in the words its agent understands."""
+    return AGENTS.get(config.get("agent") or "claude", AGENTS["claude"])[kind].format(**values)
 
 
 def queries(repo: str, config: dict[str, Any]) -> list[tuple[str, str]]:
@@ -137,21 +168,46 @@ def pid_file(target: Path, number: int, kind: str = "PR") -> Path:
     return launch_dir(target) / f"{kind}-{number}.pid"
 
 
-def session_alive(target: Path, number: int, kind: str = "PR") -> bool:
-    """The session launched for this PR still runs (its PID is alive and is still that launcher)."""
+def _started_at(pid: int) -> float | None:
+    """When this process started (epoch seconds), or None when it no longer runs."""
+    shown = subprocess.run(["ps", "-p", str(pid), "-o", "lstart="], text=True, capture_output=True, check=False,
+                           env={**os.environ, "LC_ALL": "C", "LANG": "C"}).stdout.strip()
+    if not shown:
+        return None
     try:
-        pid = int(pid_file(target, number, kind).read_text(encoding="utf-8").strip())
+        return time.mktime(time.strptime(" ".join(shown.split()), "%a %b %d %H:%M:%S %Y"))
+    except ValueError:
+        return 0.0  # running, start time unreadable: alive, but never old enough to be stopped
+
+
+def session_pid(target: Path, number: int, kind: str = "PR") -> int | None:
+    """The PID of the session launched for this PR while it still runs, or None.
+
+    The launcher writes its PID and then `exec`s the agent, so the process is older than its PID file.
+    A process that started after the file was written reused a dead session's PID: not ours."""
+    path = pid_file(target, number, kind)
+    try:
+        pid = int(path.read_text(encoding="utf-8").strip())
+        written = path.stat().st_mtime
     except (OSError, ValueError):
-        return False
+        return None
+    if pid <= 1:
+        return None
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
-        return False
+        return None
     except PermissionError:
         pass
-    command = subprocess.run(["ps", "-p", str(pid), "-o", "command="], text=True, capture_output=True,
-                             check=False).stdout
-    return bool(command.strip())
+    started = _started_at(pid)
+    if started is None or started > written + 2:  # lstart has 1 s resolution
+        return None
+    return pid
+
+
+def session_alive(target: Path, number: int, kind: str = "PR") -> bool:
+    """The session launched for this PR still runs (its PID is alive and is still that launcher)."""
+    return session_pid(target, number, kind) is not None
 
 
 def session_watching(target: Path, number: int) -> bool:
@@ -261,10 +317,10 @@ def _shell() -> str:
 
 def agent_command(target: Path, number: int, config: dict[str, Any], name: str | None = None,
                   prompt: str | None = None) -> str:
-    template = str(config.get("agent_command") or DEFAULT_INBOX["agent_command"])
+    template = str(config.get("agent_command") or AGENTS[config.get("agent") or "claude"]["command"])
     return template.format(
         name=shlex.quote(name or f"review PR-{number}"),
-        prompt=shlex.quote(prompt or f"/android-review {number} --target {target}"),
+        prompt=shlex.quote(prompt or agent_prompt(config, "review", pr=number, target=target)),
         pr=number, target=shlex.quote(str(target)),
     )
 
@@ -386,7 +442,7 @@ def launch_watch(target: Path, dry_run: bool = False) -> dict[str, Any]:
         return {"status": "running", "pr": number, "next": "nothing: a session already watches this PR"}
     config = inbox_config(target)
     script = write_script(target, int(number), config, kind="WATCH", name=f"watch PR-{number}",
-                          prompt=f"/android-workflow {ticket} --watch --pr {number}")
+                          prompt=agent_prompt(config, "watch", ticket=ticket, pr=number))
     command = open_command(script, config)
     if dry_run:
         return {"status": "dry_run", "pr": number, "script": str(script), "command": command}
@@ -416,3 +472,76 @@ def inbox_once(target: Path) -> dict[str, Any]:
             "summary": lines or ["no PR asks for your review right now"],
             "next": "end the run with `summary` (2–3 lines); update or close the board task once, never one per PR "
                     "poll, never left in progress. Do not loop: the next scheduled run looks again"}
+
+
+# --- ending a PR that is over ---------------------------------------------------------------------
+
+def _ancestors() -> set[int]:
+    """This process and its parents: the agent session that runs this command is one of them."""
+    seen, pid = set(), os.getpid()
+    while pid > 1 and pid not in seen:
+        seen.add(pid)
+        shown = subprocess.run(["ps", "-p", str(pid), "-o", "ppid="], text=True, capture_output=True,
+                               check=False).stdout.strip()
+        pid = int(shown) if shown.isdigit() else 0
+    return seen
+
+
+def stop_session(pid: int, delay: float) -> None:
+    """SIGTERM the session after `delay` seconds, from a process outside this one's group, so the
+    command returns first and a session that ends itself still shows its last message."""
+    subprocess.Popen(["/bin/sh", "-c", f"sleep {int(delay)}; kill -TERM {int(pid)} 2>/dev/null"],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True, close_fds=True)
+
+
+def pr_state(target: Path, number: int) -> str | None:
+    """MERGED, CLOSED or OPEN, or None when GitHub cannot be asked."""
+    from android_workflow.watch import _gh, github_env
+
+    shown = _gh(["pr", "view", str(number), "--json", "state"], env=github_env(target), cwd=target)
+    try:
+        return json.loads(shown.stdout).get("state") if shown.returncode == 0 else None
+    except ValueError:
+        return None
+
+
+def finish(target: Path, number: int, kind: str = "PR") -> dict[str, Any]:
+    """The PR is merged or closed: remove its worktree and stop the session launched for it.
+
+    `kind` PR: a review session (`target` is the app's main checkout or the review worktree; its PID
+    lives in the main checkout). `kind` WATCH: the PR Watcher of `/android-workflow` (`target` is the
+    run's worktree, where its PID lives). An open PR keeps both; a session started by hand has no PID
+    file and keeps running."""
+    from android_workflow.cleanup import cleanup, main_checkout
+
+    target = target.resolve()
+    main = main_checkout(target)
+    home = main if kind == "PR" else target
+    state = pr_state(main, number)
+    if state not in {"MERGED", "CLOSED"}:
+        return {"status": "open" if state == "OPEN" else "unknown", "pr": number, "state": state,
+                "next": "nothing removed: the PR is still open, keep following it" if state == "OPEN"
+                else "GitHub did not answer: nothing removed, try again later"}
+    pid = session_pid(home, number, kind)  # read before the cleanup deletes the PID file with the worktree
+    config = inbox_config(main)
+    removed = cleanup(main, pr=number, force=True)
+    for name in (f"{kind}-{number}.sh", f"{kind}-{number}.pid"):
+        (launch_dir(home) / name).unlink(missing_ok=True)
+    result: dict[str, Any] = {"status": "finished", "pr": number, "state": state.lower(),
+                              "removed": [item["path"] for item in removed["removed"]],
+                              "kept": removed["kept"], "failed": removed["failed"]}
+    if pid is None:
+        result["session"] = {"stopped": False, "why": "no launched session runs for this PR"}
+        result["tell"] = f"PR #{number} is {state.lower()}: its worktree is removed"
+        return result
+    itself = pid in _ancestors()
+    delay = config["close_delay"] if itself else 0
+    stop_session(pid, delay)
+    result["session"] = {"stopped": True, "pid": pid, "itself": itself, "in_seconds": delay}
+    result["tell"] = (f"PR #{number} is {state.lower()}: its worktree is removed and "
+                      + (f"this session closes in {int(delay)} s" if itself else "its session in the other tab is closed"))
+    if itself:
+        result["next"] = "end with the Done summary now, in one short message: this session stops in " \
+                         f"{int(delay)} s; run no other command"
+    return result

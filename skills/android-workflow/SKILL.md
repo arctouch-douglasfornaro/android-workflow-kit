@@ -142,6 +142,7 @@ CLI pr status|wait|merge --target T [--pr N] [--timeout S]       CLI pr sync --t
 CLI pr reply --target T --item ID (--body "…" | --skip "why") [--edit]   CLI pr rerequest --target T --reviewer LOGIN
 CLI pr base --target T --set BRANCH   (stack on another PR / back to the default branch)   CLI pr gh --target T -- <gh args>
 CLI pr launch --target T   (the PR Watcher continues in its own terminal tab after this session)
+CLI pr finish --target T [--pr N]   (merged/closed: worktree removed, the launched watch session stopped)
 CLI log … --stage Implementer --status completed --no-code "why"   (a round that changed no code on purpose)
 CLI pr body --target T --section "<heading>" --file F.md   (replaces only that section of the open PR's description)
 CLI pr ci --target T --check NAME --as ours|unrelated|rerun --reason "…"
@@ -350,7 +351,8 @@ CLI cleanup --target T [--all] [--pr N] [--base] [--dry-run]   (worktrees of mer
     cancelled/timed-out job) is re-run once by `pr wait` itself (`wait` for `re-run of …`, logged).
     The rest reach `aw-pr-watcher` with a `hint` (`ours` when the log names a file this PR changed).
     - `merged` / `closed` → `CLI log --stage "PR Watcher" --status completed --note "<merged|closed>"`,
-      then, last, `CLI cleanup --target TARGET --pr N --force` (removes this PR's worktree), stop. Asked to
+      then, last, `CLI pr finish --target TARGET` (removes this PR's worktree and stops the session
+      `pr launch` started; `session.itself` → the summary in one message, nothing else runs), stop. Asked to
       delete worktrees → `CLI cleanup` (never `git worktree remove` or `rm -rf` by hand: an open PR's
       run is archived by it and `start` in a recreated worktree resumes it). `needs_user` (too many rounds, or watched for `watch.max_hours`) → tell the developer and stop.
     Merge rule: the PR is approved (GitHub's review decision) and nobody may still be asking for

@@ -1328,6 +1328,20 @@ def dispatch(target: Path, args: Any) -> tuple[dict[str, Any], int]:
         from android_workflow.review_inbox import launch_watch
 
         return launch_watch(target), 0
+    if args.action == "finish":
+        from android_workflow.paths import run_dir
+        from android_workflow.review_inbox import finish
+
+        number = args.pr
+        if not number:
+            try:
+                number = (json.loads((run_dir(target) / "pr-watch.json").read_text(encoding="utf-8")).get("pr") or {}).get("number")
+            except (OSError, ValueError):
+                number = None
+        if not number:
+            raise ValueError("finish needs --pr: this run has no PR on record")
+        result = finish(target, int(number), "WATCH")
+        return result, 0 if result["status"] in {"finished", "open"} else 1
     if args.action == "base":
         if not getattr(args, "set_base", None):
             raise ValueError("base needs --set BRANCH")

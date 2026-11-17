@@ -70,6 +70,7 @@ CLI review reply  --target WT --draft-id ID                               (posts
 CLI gate | prebuild | device … | emulator … | log …  --target WT         (as in android-workflow)
 CLI review inbox  --target MAIN [--wait --timeout S]                     (no PR: PRs asking for our review)
 CLI review launch --target MAIN --pr N [--dry-run]                       (one PR's review session in a new tab)
+CLI review finish --target MAIN --pr N                                   (merged/closed: worktree removed, launched session stopped)
 ```
 
 ## Execute
@@ -136,7 +137,7 @@ CLI review launch --target MAIN --pr N [--dry-run]                       (one PR
      `CLI review reply --target WT --draft-id <id>`. Never on silence or with another id. A
      `verdict_change` from the agent (a reply shows we should now approve or block) → tell the
      developer; a new review is their call, never posted from the watch.
-   - `timed_out` → wait again. `merged` / `closed` → stop. `needs_user` (followed for `watch.max_hours`,
+   - `timed_out` → wait again. `merged` / `closed` → `CLI review finish` (see Done), stop. `needs_user` (followed for `watch.max_hours`,
      72 by default, the same limit as the watch of our own PRs) → tell the developer and stop.
    The polling is the one of `CLI pr wait` (`watch.poll`): every minute, slower while nothing changes
    (up to every 5 min), back to every minute after something happened.
@@ -320,7 +321,10 @@ In `RUN`: `pr-context.json` (with `copies`), `ticket/<KEY>.md`, `copy-diff/*.dif
 The review is posted (or the developer said stop). Show: PR URL, event, inline comment count, the
 posted review URL, `RUN/review-draft.md`, and the absolute `media/before` / `media/after` paths
 when the device ran. The worktree stays while the PR is open.
-When the watch says the PR is over, run `CLI cleanup --target MAIN --pr N --force` last. "Delete the worktrees",
+When the watch says the PR is over, run `CLI review finish --target MAIN --pr N` last: it removes the
+worktree and, when the listener launched this session, stops it (`session.itself` → write the Done
+summary in one message and run nothing else; the tab closes after `review.inbox.close_delay`, 30 s).
+Never on `needs_user`, a stop by the developer or an open PR (it answers `open` and removes nothing). "Delete the worktrees",
 "apague os worktrees" → `CLI cleanup --target MAIN` (merged and closed PRs; `--all` for every one,
 open PRs' runs archived first; `--base` also the base-build checkout; `--dry-run` to list). Never
 `git worktree remove` or `rm -rf` by hand: submodules make git refuse, and an open PR's run is lost.

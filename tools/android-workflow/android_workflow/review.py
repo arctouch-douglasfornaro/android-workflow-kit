@@ -2774,6 +2774,11 @@ def dispatch(target: Path, args: Any) -> tuple[dict[str, Any], int]:
             raise ValueError("launch requires --pr")
         result = review_inbox.launch(target, args.pr, dry_run=args.dry_run)
         return result, 0 if result["status"] in {"launched", "running", "dry_run"} else 1
+    if action == "finish":
+        from android_workflow import review_inbox
+
+        result = review_inbox.finish(target, parse_pr(args.pr), "PR")
+        return result, 0 if result["status"] in {"finished", "open"} else 1
     if action == "reply":
         result = reply(target, args.draft_id)
         return result, 0 if result["status"] == "posted" else 1

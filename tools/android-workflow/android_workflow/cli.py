@@ -4409,7 +4409,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     office_parser.add_argument("--days", type=float, help="with --prune: also drop past runs idle this many days")
     pr_parser = subparsers.add_parser("pr", help="PR Watcher: follow the open PR until it is merged")
     pr_parser.add_argument("action", choices=("status", "wait", "reply", "rerequest", "ci", "sync", "merge", "feedback",
-                                              "body", "base", "gh", "launch"))
+                                              "body", "base", "gh", "launch", "finish"))
     pr_parser.add_argument("--target", required=True, type=Path)
     pr_parser.add_argument("--pr", type=int, help="PR number (default: the one this run opened, else the branch's)")
     pr_parser.add_argument("--timeout", type=float, default=540.0, help="wait: give up after this many seconds")
@@ -4428,10 +4428,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     pr_parser.add_argument("--section", help='body: the heading whose section to replace, e.g. "## Analytics events"')
     pr_parser.add_argument("--file", type=Path, help="body: the markdown that becomes that section")
     review_parser = subparsers.add_parser("review", help="Android Review: review an open PR, post one review after the OK")
-    review_parser.add_argument("review_action", choices=("start", "next", "ci", "draft", "edit", "shown", "post", "answer", "device", "ticket", "wait", "replies", "reply", "status", "inbox", "launch"))
+    review_parser.add_argument("review_action", choices=("start", "next", "ci", "draft", "edit", "shown", "post", "answer", "device", "ticket", "wait", "replies", "reply", "status", "inbox", "launch", "finish"))
     review_parser.add_argument("--target", required=True, type=Path,
-                               help="start / status / inbox / launch: the app's main checkout; every other action: the review worktree")
-    review_parser.add_argument("--pr", help="start / status / launch: PR number, URL or branch name")
+                               help="start / status / inbox / launch / finish: the app's main checkout; every other action: the review worktree")
+    review_parser.add_argument("--pr", help="start / status / launch / finish: PR number, URL or branch name")
     review_parser.add_argument("--worktree", type=Path, help="start: where the review worktree goes")
     review_parser.add_argument("--no-media", action="store_true", dest="no_media", help="start: do not download PR media")
     review_parser.add_argument("--no-device", action="store_true", dest="no_device")
@@ -4715,7 +4715,7 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
         from android_workflow.review import dispatch as dispatch_review
 
         missing = {"start": "pr", "shown": "draft_id", "post": "draft_id", "reply": "draft_id", "answer": "answer", "device": "require",
-                   "status": "pr", "launch": "pr"}.get(args.review_action)
+                   "status": "pr", "launch": "pr", "finish": "pr"}.get(args.review_action)
         if missing and not getattr(args, missing):
             raise ValueError(f"review {args.review_action} needs --{missing.replace('_', '-')}")
         if args.review_action == "answer" and not args.question:

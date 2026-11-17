@@ -154,3 +154,90 @@ class LaunchTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AgentAndFinishTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.target = Path(self.tmp.name) / "app"
+        (self.target / ".ai").mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(self.target)], check=True)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def configure(self, **inbox_config: object) -> None:
+        (self.target / ".ai" / "android-workflow.json").write_text(json.dumps({"review": {"inbox": inbox_config}}))
+
+    def test_codex_gets_its_own_command_and_a_prompt_naming_the_skill(self) -> None:
+        self.configure(agent="codex")
+        text = inbox.write_script(self.target, 42, inbox.inbox_config(self.target)).read_text()
+        self.assertIn("exec codex 'Use the android-review skill: /android-review 42 --target", text)
+        self.assertNotIn("claude", text)
+
+    def test_an_explicit_agent_command_still_wins(self) -> None:
+        self.configure(agent_command="my-agent {prompt}")
+        text = inbox.write_script(self.target, 5, inbox.inbox_config(self.target)).read_text()
+        self.assertIn("exec my-agent '/android-review 5 --target", text)
+
+    def test_an_unknown_agent_is_refused(self) -> None:
+        self.configure(agent="cursor")
+        with self.assertRaises(ValueError):
+            inbox.inbox_config(self.target)
+
+    def test_a_pid_reused_by_a_newer_process_is_not_our_session(self) -> None:
+        path = inbox.pid_file(self.target, 42)
+        path.parent.mkdir(parents=True)
+        path.write_text(str(os.getpid()))
+        self.assertEqual(inbox.session_pid(self.target, 42), os.getpid())
+        old = path.stat().st_mtime - 3600
+        os.utime(path, (old, old))  # the file predates this process: the PID was reused
+        self.assertIsNone(inbox.session_pid(self.target, 42))
+
+    def test_finish_keeps_everything_while_the_pr_is_open(self) -> None:
+        with mock.patch.object(inbox, "pr_state", return_value="OPEN"), \
+                mock.patch("android_workflow.cleanup.cleanup") as cleanup, \
+                mock.patch.object(inbox, "stop_session") as stop:
+            result = inbox.finish(self.target, 42)
+        self.assertEqual(result["status"], "open")
+        cleanup.assert_not_called()
+        stop.assert_not_called()
+
+    def test_finish_removes_the_worktree_and_stops_only_the_launched_session(self) -> None:
+        sleeper = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(sleeper.wait)
+        self.addCleanup(sleeper.kill)
+        path = inbox.pid_file(self.target, 42)
+        path.parent.mkdir(parents=True)
+        path.write_text(str(sleeper.pid))
+        removed = {"removed": [{"path": "/wt/PR-42"}], "kept": [], "failed": []}
+        with mock.patch.object(inbox, "pr_state", return_value="MERGED"), \
+                mock.patch("android_workflow.cleanup.cleanup", return_value=removed) as cleanup, \
+                mock.patch.object(inbox, "stop_session") as stop:
+            result = inbox.finish(self.target, 42)
+        self.assertEqual(result["status"], "finished")
+        self.assertEqual(result["removed"], ["/wt/PR-42"])
+        cleanup.assert_called_once_with(self.target.resolve(), pr=42, force=True)
+        stop.assert_called_once_with(sleeper.pid, 0)  # another tab: stopped at once
+        self.assertEqual(result["session"], {"stopped": True, "pid": sleeper.pid, "itself": False, "in_seconds": 0})
+        self.assertFalse(path.exists())
+
+    def test_a_session_ending_itself_keeps_time_for_its_last_message(self) -> None:
+        path = inbox.pid_file(self.target, 9)
+        path.parent.mkdir(parents=True)
+        path.write_text(str(os.getpid()))
+        with mock.patch.object(inbox, "pr_state", return_value="CLOSED"), \
+                mock.patch("android_workflow.cleanup.cleanup", return_value={"removed": [], "kept": [], "failed": []}), \
+                mock.patch.object(inbox, "stop_session") as stop:
+            result = inbox.finish(self.target, 9)
+        stop.assert_called_once_with(os.getpid(), 30.0)
+        self.assertTrue(result["session"]["itself"])
+        self.assertIn("next", result)
+
+    def test_a_session_started_by_hand_is_never_stopped(self) -> None:
+        with mock.patch.object(inbox, "pr_state", return_value="MERGED"), \
+                mock.patch("android_workflow.cleanup.cleanup", return_value={"removed": [], "kept": [], "failed": []}), \
+                mock.patch.object(inbox, "stop_session") as stop:
+            result = inbox.finish(self.target, 42)
+        stop.assert_not_called()
+        self.assertFalse(result["session"]["stopped"])
