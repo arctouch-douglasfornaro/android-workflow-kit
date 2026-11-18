@@ -161,11 +161,12 @@ and posts nothing without the developer's OK in that tab.
    - `queued` entries wait for a free slot (`review.inbox.max_parallel`, 2 by default); say so once.
    - `idle` / `timed_out`: wait again silently.
    - `offline`: GitHub is unreachable (network, VPN, sleep), not a login problem: wait again silently.
-   A scheduled or unattended run (its prompt says so, e.g. Terminal One's "Android review inbox") is
-   one pass, never the loop: `CLI review inbox --target MAIN --once` (it launches what it finds and
-   returns `summary`), update or close the board task once (never one per poll, never left in
-   progress), end with that summary.
-3. The listener ends with this session or when the developer says stop. A launched session keeps
+   Every listener is this loop, a scheduled or unattended run included (its prompt says so, e.g.
+   Terminal One's "Android review inbox"), and so is every later `/android-review` in the same
+   session: a pass that finds nothing never ends the listener, so a PR that asks for the developer's
+   review later is still picked up. Never `--once`. On a board, keep one listener task in progress
+   while listening (never one task per poll).
+3. The listener ends only with this session or when the developer says stop. A launched session keeps
    running on its own; a re-request after our review launches a new session only when the old one has
    ended (a live session follows its PR with `review wait`).
 

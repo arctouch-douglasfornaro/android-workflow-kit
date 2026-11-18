@@ -456,8 +456,8 @@ def launch_watch(target: Path, dry_run: bool = False) -> dict[str, Any]:
 
 
 def inbox_once(target: Path) -> dict[str, Any]:
-    """A scheduled or unattended run: one look, every PR it finds launched now, and a summary to end on.
-    Never a loop: the next scheduled run looks again."""
+    """One look with every PR it finds launched now. The listener keeps going afterwards: one pass never
+    ends it, so a review requested later is still picked up."""
     found = inbox(target, wait=False)
     launched = []
     for item in found.get("launch") or []:
@@ -470,8 +470,9 @@ def inbox_once(target: Path) -> dict[str, Any]:
     return {"status": found.get("status"), "launched": launched, "skipped": skipped,
             "queued": [item.get("pr") for item in found.get("queued") or []],
             "summary": lines or ["no PR asks for your review right now"],
-            "next": "end the run with `summary` (2–3 lines); update or close the board task once, never one per PR "
-                    "poll, never left in progress. Do not loop: the next scheduled run looks again"}
+            "next": f"tell the developer the `summary` lines, then keep listening: CLI review inbox --target {target} "
+                    "--wait (background, --timeout 3300) and wait again after every result. Never end the listener "
+                    "after one pass"}
 
 
 # --- ending a PR that is over ---------------------------------------------------------------------

@@ -4452,7 +4452,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     review_parser.add_argument("--wait", action="store_true",
                                help="ci: poll until the checks finish; inbox: poll until a PR asks for our review")
     review_parser.add_argument("--once", action="store_true",
-                               help="inbox: a scheduled run: look once, launch what it finds, return a summary")
+                               help="inbox: look once and launch what it finds; the listener then keeps going with --wait")
     review_parser.add_argument("--timeout", type=float, default=540)
     review_parser.add_argument("--drop", action="append", default=[], help="edit: a comment id to drop (repeatable)")
     review_parser.add_argument("--set", action="append", nargs=2, metavar=("ID", "TEXT"), default=[],
