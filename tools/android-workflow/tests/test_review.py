@@ -1400,6 +1400,14 @@ class ReplyWatchTests(unittest.TestCase):
                 waited = review.wait(worktree, timeout=0)
         self.assertEqual((waited["status"], waited["reason"]), ("needs_user", "watched for 72 hours"))
 
+    def test_github_unreachable_keeps_the_watch_going(self) -> None:
+        with Project(self.CHANGE) as project:
+            worktree = FlowTests().run_to_draft(project, {"status": "approved", "blocking": []})
+            with mock.patch.object(review, "fetch_pr", side_effect=watch_module.GitHubUnreachable("no route")):
+                waited = review.wait(worktree, timeout=0)
+        self.assertEqual((waited["status"], waited["next"]), ("timed_out", "CLI review wait --target TARGET"))
+        self.assertIn("no route", waited["offline"][0])
+
     def test_a_merged_pr_ends_the_run_and_manual_comments_are_recorded(self) -> None:
         with Project(self.CHANGE) as project:
             worktree = FlowTests().run_to_draft(project, {"status": "approved", "blocking": []})

@@ -2452,6 +2452,9 @@ def wait(target: Path, timeout: float = 540, interval: float = 60) -> dict[str, 
         return False, {"status": "timed_out", "next": "CLI review wait --target TARGET"}, "idle"
 
     result, _ = poll(step, timeout, interval)
+    if result.get("status") == "offline":
+        # GitHub was unreachable on the last read (VPN, sleep, network): the watch goes on, never ends here.
+        return {"status": "timed_out", "offline": result.get("waiting_for"), "next": "CLI review wait --target TARGET"}
     return result
 
 
