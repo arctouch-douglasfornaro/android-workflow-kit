@@ -683,12 +683,13 @@ def launch_app(target: Path, serial: str, pins: str | None = None, link: str | N
     return result
 
 def device_budget_stop(target: Path) -> dict[str, Any] | None:
-    """Mid-round: once the run spent `device.budget_minutes` on the device, every device command answers
-    this instead of driving it, so a round that keeps trying cannot run past the budget."""
+    """Mid-round: once the run spent `device.budget_minutes` (when set) plus `DEVICE_BUDGET_GRACE_SECONDS`
+    on the device, every device command answers this instead of driving it. The grace lets a round that
+    crossed the budget finish the check in hand (its last capture) instead of losing it."""
     try:
-        from android_workflow.decide import device_stop
+        from android_workflow.decide import DEVICE_BUDGET_GRACE_SECONDS, device_stop
 
-        stop = device_stop(target, run_dir(target))
+        stop = device_stop(target, run_dir(target), grace=DEVICE_BUDGET_GRACE_SECONDS)
     except (FileNotFoundError, OSError, ValueError):
         return None
     if not stop:
@@ -696,4 +697,4 @@ def device_budget_stop(target: Path) -> dict[str, Any] | None:
     return {"status": "budget_spent", "reason": stop,
             "next": "stop driving the device: write device-report.md now with what was verified (PARTIAL or "
                     "BLOCKED, `Not verified` lists the rest) and log the Device stage. The developer can raise "
-                    "device.budget_minutes in .ai/android-workflow.json for more time"}
+                    "or clear (0 = no limit) device.budget_minutes in .ai/android-workflow.json for more time"}

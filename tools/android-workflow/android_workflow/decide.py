@@ -35,7 +35,8 @@ REVIEW_MAX_FIXES = 1    # still blocking after one fix round: draft
 DEVICE_MAX_FAILS = 2    # the second device FAIL: draft
 BEFORE_BUDGET_SECONDS = 600  # the Device `before` agent stops here: the Implementer is working meanwhile
 AFTER_BUDGET_SECONDS = 300   # the Device `after` agent: replay, judge, a few hand-driven checks
-DEVICE_BUDGET_MINUTES = 20   # device time per run (a review: per round); past it no device round starts
+DEVICE_BUDGET_MINUTES = 0    # device time per run (a review: per round); 0 = no limit, else past it no device round starts
+DEVICE_BUDGET_GRACE_SECONDS = 300  # a round already running past the budget finishes the check in hand within this
 REVIEW_DEVICE_MAX_ROUNDS = 2  # a review: the device round and one more, never a third
 DECISIONS_FILE = "decisions.jsonl"
 BOOTING = "booting"  # how a `wait_device` for a device starting for this run begins its `why`
@@ -738,12 +739,14 @@ def _partial_options(again: bool = True) -> dict[str, str]:
 
 
 def device_budget_seconds(target: Path) -> float:
+    """`device.budget_minutes` in seconds; 0 (the default) means no limit."""
     from android_workflow.emulator import _overrides
 
     try:
-        return max(float(_overrides(target).get("budget_minutes") or DEVICE_BUDGET_MINUTES), 1.0) * 60
+        minutes = float(_overrides(target).get("budget_minutes") or DEVICE_BUDGET_MINUTES)
     except (TypeError, ValueError):
-        return DEVICE_BUDGET_MINUTES * 60.0
+        minutes = float(DEVICE_BUDGET_MINUTES)
+    return max(minutes, 0.0) * 60
 
 
 def device_spent(agent_dir: Path) -> tuple[float, int]:
@@ -781,12 +784,13 @@ def missing_artifact_step(target: Path, agent_dir: Path, stages: dict[str, Any],
     return None
 
 
-def device_stop(target: Path, agent_dir: Path, review: bool = False) -> str | None:
-    """Why no more device round starts, or None: the run spent `device.budget_minutes` (default 20) on
-    the device, or (a review) it already had `REVIEW_DEVICE_MAX_ROUNDS` device rounds."""
+def device_stop(target: Path, agent_dir: Path, review: bool = False, grace: float = 0) -> str | None:
+    """Why no more device round starts, or None: the run spent `device.budget_minutes` (default 0, no
+    limit) on the device, plus `grace` seconds for a round already running, or (a review) it already had
+    `REVIEW_DEVICE_MAX_ROUNDS` device rounds."""
     seconds, rounds = device_spent(agent_dir)
     budget = device_budget_seconds(target)
-    if seconds >= budget:
+    if budget > 0 and seconds >= budget + grace:
         return f"the device budget is spent ({int(seconds // 60)} of {int(budget // 60)} min, device.budget_minutes)"
     if review and rounds >= REVIEW_DEVICE_MAX_ROUNDS:
         return f"{rounds} device rounds already ran in this review round (at most {REVIEW_DEVICE_MAX_ROUNDS})"

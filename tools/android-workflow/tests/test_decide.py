@@ -552,20 +552,46 @@ class RunTests(unittest.TestCase):
         metrics["stages"].setdefault("T7", {})["wall_time_seconds"] = minutes * 60
         (self.rundir / "stage-metrics.json").write_text(json.dumps(metrics), encoding="utf-8")
 
+    def set_device_budget(self, minutes: float) -> None:
+        (self.root / ".ai").mkdir(exist_ok=True)
+        (self.root / ".ai/android-workflow.json").write_text(json.dumps({"device": {"budget_minutes": minutes}}),
+                                                             encoding="utf-8")
+
     def test_past_the_device_budget_a_fail_opens_a_draft_instead_of_a_fix_round(self) -> None:
         self.visual_run()
+        self.set_device_budget(20)
         with mock.patch("android_workflow.emulator.status", return_value={"status": "connected", "serial": "emu-1"}):
             self.next()
             self.device_report("FAIL")
-            self.spend_device(decide.DEVICE_BUDGET_MINUTES + 1)
+            self.spend_device(21)
             answer = self.next()
         self.assertIn("--draft", answer["command"])
         self.assertIn("device budget is spent", answer["why"])
 
+    def test_with_no_device_budget_a_long_device_run_still_gets_its_fix_round(self) -> None:
+        self.visual_run()
+        with mock.patch("android_workflow.emulator.status", return_value={"status": "connected", "serial": "emu-1"}):
+            self.next()
+            self.device_report("FAIL")
+            self.spend_device(120)
+            self.assertIsNone(decide.device_stop(self.root, self.rundir))
+            self.assertEqual(self.next()["ids"], ["D1"])
+
+    def test_a_round_past_the_budget_keeps_the_device_through_the_grace(self) -> None:
+        from android_workflow import replay
+
+        self.visual_run()
+        self.set_device_budget(20)
+        with mock.patch("android_workflow.emulator.status", return_value={"status": "connected", "serial": "emu-1"}):
+            self.next()
+        self.spend_device(22)
+        self.assertIsNone(replay.device_budget_stop(self.root))
+        self.spend_device(20 + decide.DEVICE_BUDGET_GRACE_SECONDS / 60 + 1)
+        self.assertEqual(replay.device_budget_stop(self.root)["status"], "budget_spent")
+
     def test_past_the_device_budget_no_device_round_starts_and_blocked_is_recorded(self) -> None:
         self.visual_run()
-        (self.root / ".ai").mkdir(exist_ok=True)
-        (self.root / ".ai/android-workflow.json").write_text(json.dumps({"device": {"budget_minutes": 5}}), encoding="utf-8")
+        self.set_device_budget(5)
         with mock.patch("android_workflow.emulator.status", return_value={"status": "connected", "serial": "emu-1"}):
             self.assertEqual(self.next()["agent"], "aw-device")
             # The agent spent its time and came back with notes, no verdict.

@@ -23,12 +23,14 @@ free), and saved as flows. `after` runs those flows by code and only judges.
   prove them with `CLI device replay --target TARGET --serial <serial> --phase before` (installs the
   cached base APK, runs the flows and files the captures under `media/before/`). Capture the current
   state of the surface only (`capture: true`; when `capture` is false the flows only need to reach the
-  screen and assert it). No verdict. Stop at `budget_seconds` (600): flows that work are kept, the rest
-  are listed in your return as "not scripted". End with the `done` command the orchestrator passed
+  screen and assert it). No verdict. Aim to finish within `budget_seconds` (600), a pace and not a stop: past it,
+  finish the flow in hand; flows that work are kept, the rest are listed in your return as "not
+  scripted". End with the `done` command the orchestrator passed
   (`CLI log --target TARGET --stage Device --status flows_ready --note "<n> flow(s) saved"`). The
   device stays leased to this run for its `after` round; nothing to give back.
-- `after`: reviewed build. Verify the device AC from `plan.md` and capture evidence. Budget
-  `budget_seconds` (300) of your own device work: replay flows, judge, a few hand-driven checks. The
+- `after`: reviewed build. Verify the device AC from `plan.md` and capture evidence. Pace
+  `budget_seconds` (300) of your own device work: replay flows, judge, a few hand-driven checks; past
+  it, finish the check in hand (its capture included) before you write the report. The
   build and the install are the CLI's and do not count (`replay.json` → `flows_seconds`,
   `over_budget`): while `CLI device replay`/`install` runs, wait for its answer; never stop or
   report BLOCKED because a build or an install is slow.
@@ -91,9 +93,10 @@ the behavior only a running app shows.
   activities | grep -E 'ResumedActivity|topResumedActivity'` and a fresh screenshot or hierarchy dump;
   quote the resumed activity and the capture path in the report. A screen you assumed from a stale
   capture is not a wall.
-- The run has a device budget (`device.budget_minutes`, default 20, all rounds together; `CLI next`
-  starts no round past it). Stuck → report BLOCKED with what you verified, within your
-  `budget_seconds`; never retry silently.
+- The run has a device budget only when the developer sets `device.budget_minutes` (default 0, no
+  limit; all rounds together; `CLI next` starts no round past it, and a running round gets 5 more
+  minutes to finish the check in hand). Stuck → report BLOCKED with what you verified; never retry
+  silently.
 
 ## Work
 
@@ -130,8 +133,8 @@ the behavior only a running app shows.
    it before the first launch; a flag that does not take effect is a launch problem to fix that way, not
    a reason to report BLOCKED: `CLI device launch --target TARGET --serial S --pins '<json>' --link <uri>`
    cold-starts with the pins (when the project sets `device.pins_extra`), confirms them in logcat and then
-   opens the link. A device command that answers `budget_spent` ends the round: write the report with
-   what was verified and log it. Then run it with a Maestro flow saved in
+   opens the link. A device command that answers `budget_spent` (the developer's budget plus its
+   5-minute grace) ends the round: write the report with what was verified and log it. Then run it with a Maestro flow saved in
    `RUN/media/flows/<name>.yaml` following the Flow contract. Assert the target screen was reached
    (text/testTag) before judging anything. Recipe wrong → fix the flow, not the app. In `before`, this is
    the whole job: write, run and fix each flow until it passes on the base build.

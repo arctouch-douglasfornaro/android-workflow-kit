@@ -67,7 +67,8 @@ Optional overrides read by the newer commands (all may be left out):
 | `device.emulator_headless` | `false` (a window you can watch) | `emulator`: `true` starts it with `-no-window` |
 | `device.boot_timeout_seconds` | `300` | `emulator --wait` |
 | `device.flow_timeout_seconds` | `180` | `device replay`: one flow's time limit |
-| `device.after_budget_seconds` | `300` | `device replay`: `over_budget` in `replay.json`, and the Device `after` agent's budget |
+| `device.after_budget_seconds` | `300` | `device replay`: `over_budget` in `replay.json`, and the Device `after` agent's pace (a guide, never a stop) |
+| `device.budget_minutes` | `0` (no limit) | `next`: device time per run, every round together (a review: per review round); past it no device round starts, and a round already running gets 5 more minutes to finish the check in hand before device commands answer `budget_spent` |
 | `team.max_parallel` | `3` (1–3) | `team`: how many Implementers may work at once |
 | `skills.max` | `4` (1–8) | `skills`: how many skills the Implementer reads |
 | `watch.auto_merge` | `true` | `pr`: merge when ready; `false` stops at "ready to merge" |

@@ -270,8 +270,9 @@ CLI cleanup --target T [--all] [--pr N] [--base] [--dry-run]   (worktrees of mer
    independent parts and 4+ files (`update-spec --parallel-parts/--parallel-files`); gate and
    Reviewer together, one fix round for both; a draft after the third red gate in a row, a review
    still blocking after one fix, the second device FAIL in a row, a BLOCKED device, the device budget
-   spent (`device.budget_minutes`, default 20, every Device round together: no round starts past it,
-   the CLI writes a PARTIAL/BLOCKED report of what was verified) or a fix round that changed nothing (in a PR round: `ask_user`, push nothing, never a draft); an approved review kept
+   spent when the developer set one (`device.budget_minutes`, default 0 = no limit, every Device round
+   together: no round starts past it, a round already running gets 5 more minutes to finish the check
+   in hand, then the CLI writes a PARTIAL/BLOCKED report of what was verified) or a fix round that changed nothing (in a PR round: `ask_user`, push nothing, never a draft); an approved review kept
    when only formatting changed since; a device route for `ui`, navigation, lifecycle… and for `audio`
    and `analytics` (an AC about sound or events adds them back whatever the Planner's list says); the
    base build only for a visual change; the device `before` only with a passed base build and a
