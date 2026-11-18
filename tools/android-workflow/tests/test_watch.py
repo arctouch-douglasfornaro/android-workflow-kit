@@ -231,9 +231,14 @@ class AssessTests(unittest.TestCase):
         self.assertEqual(result["action"], "wait")
         self.assertIn("draft", result["waiting_for"][0])
 
-    def test_too_many_rounds_hands_it_to_the_developer(self) -> None:
+    def test_too_many_rounds_hands_it_to_the_developer_only_with_a_limit(self) -> None:
         pr = pull_request(reviewThreads={"nodes": [thread(("C9", user("ana"), "One more"))]})
-        self.assertEqual(decide(pr, fresh_watch(rounds=6))["action"], "needs_user")
+        self.assertEqual(decide(pr, fresh_watch(rounds=6), max_rounds=6)["action"], "needs_user")
+        self.assertEqual(decide(pr, fresh_watch(rounds=60))["action"], "respond")  # default: no limit
+
+    def test_max_hours_zero_never_hands_over(self) -> None:
+        self.assertFalse(watch.over_max_hours(NOW - 1000 * 3600, CONFIG, NOW))
+        self.assertTrue(watch.over_max_hours(NOW - 73 * 3600, {**CONFIG, "max_hours": 72}, NOW))
 
 
 class StatusTests(unittest.TestCase):

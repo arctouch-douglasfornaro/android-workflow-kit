@@ -138,7 +138,7 @@ CLI review finish --target MAIN --pr N                                   (merged
      `verdict_change` from the agent (a reply shows we should now approve or block) → tell the
      developer; a new review is their call, never posted from the watch.
    - `timed_out` → wait again. `merged` / `closed` → `CLI review finish` (see Done), stop. `needs_user` (followed for `watch.max_hours`,
-     72 by default, the same limit as the watch of our own PRs) → tell the developer and stop.
+     no limit by default, the same limit as the watch of our own PRs) → tell the developer and stop.
    The polling is the one of `CLI pr wait` (`watch.poll`): every minute, slower while nothing changes
    (up to every 5 min), back to every minute after something happened.
 

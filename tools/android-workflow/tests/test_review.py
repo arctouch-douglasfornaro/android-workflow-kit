@@ -17,6 +17,7 @@ from pathlib import Path
 from unittest import mock
 
 from android_workflow import review
+from android_workflow import watch as watch_module
 from android_workflow.cli import log_stage, read_json
 
 _TMP = Path(__file__).resolve().parent / "_tmp"
@@ -1390,10 +1391,11 @@ class ReplyWatchTests(unittest.TestCase):
         with Project(self.CHANGE) as project:
             worktree = FlowTests().run_to_draft(project, {"status": "approved", "blocking": []})
             agent_dir = review.agent_dir_for(worktree)
-            with mock.patch.object(review, "fetch_pr", return_value=fake_pr(project.head)):
+            with mock.patch.object(review, "fetch_pr", return_value=fake_pr(project.head)), \
+                    mock.patch.dict(watch_module.DEFAULT_WATCH, {"max_hours": 72}):
                 self.assertEqual(review.wait(worktree, timeout=0)["status"], "timed_out")
                 state = read_json(agent_dir / review.STATE_FILE)
-                state["watch"]["started_at"] -= 73 * 3600  # default watch.max_hours: 72
+                state["watch"]["started_at"] -= 73 * 3600
                 (agent_dir / review.STATE_FILE).write_text(json.dumps(state))
                 waited = review.wait(worktree, timeout=0)
         self.assertEqual((waited["status"], waited["reason"]), ("needs_user", "watched for 72 hours"))

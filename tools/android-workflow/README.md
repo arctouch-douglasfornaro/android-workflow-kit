@@ -75,7 +75,7 @@ Optional overrides read by the newer commands (all may be left out):
 | `watch.unreviewed_merge_after_minutes` | `30` | `pr`: with `require_review: false` and no reviewer requested, how long the PR stays open before it merges |
 | `watch.optional_check_grace_minutes` | `30` | `pr`: a pending check that is not required stops blocking this long after the last push |
 | `watch.merge_method` | first allowed of squash, merge, rebase | `pr merge` |
-| `watch.max_rounds` / `watch.max_hours` | `6` / `72` | `pr`: hand the PR to the developer after this many fix rounds or hours |
+| `watch.max_rounds` / `watch.max_hours` | `0` / `0` (no limit) | `pr`, `review wait`: hand the PR to the developer after this many fix rounds or hours; 0 follows it until merged or closed |
 | `watch.bots` | `[]` | `pr`: bots whose top-level comments count as feedback (inline comments always do) |
 | `review.inbox.team_requests` | `false` | `review inbox`: also PRs that ask a team you are in |
 | `review.inbox.assigned` | `true` | `review inbox`: also PRs assigned to you |

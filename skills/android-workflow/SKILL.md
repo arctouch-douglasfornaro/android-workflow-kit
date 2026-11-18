@@ -354,7 +354,7 @@ CLI cleanup --target T [--all] [--pr N] [--base] [--dry-run]   (worktrees of mer
       then, last, `CLI pr finish --target TARGET` (removes this PR's worktree and stops the session
       `pr launch` started; `session.itself` → the summary in one message, nothing else runs), stop. Asked to
       delete worktrees → `CLI cleanup` (never `git worktree remove` or `rm -rf` by hand: an open PR's
-      run is archived by it and `start` in a recreated worktree resumes it). `needs_user` (too many rounds, or watched for `watch.max_hours`) → tell the developer and stop.
+      run is archived by it and `start` in a recreated worktree resumes it). `needs_user` (only when the project sets `watch.max_rounds` or `watch.max_hours`; both default to no limit) → tell the developer and stop.
     Merge rule: the PR is approved (GitHub's review decision) and nobody may still be asking for
     changes; a reviewer still requested who has not answered does not hold an approved PR back
     (`watch.wait_for_requested_reviewers: true` waits for them all). Without any approval it waits

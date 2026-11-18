@@ -12,7 +12,7 @@ The next action is one of:
   no change request open); a reviewer still requested does not hold an approved PR back unless
   `watch.wait_for_requested_reviewers` is set;
 - `wait`: checks still run or reviewers have not answered yet (`waiting_for` says which);
-- `needs_user`: too many fix rounds; `merged` / `closed`: the PR is over.
+- `needs_user`: more fix rounds than `watch.max_rounds` (no limit by default); `merged` / `closed`: the PR is over.
 
 Threads are answered, never resolved: the reviewer resolves them. Merging respects the repository's own
 rules (branch protection, required checks) and never bypasses them.
@@ -45,8 +45,9 @@ DEFAULT_WATCH = {
     # A check that is not required and still pending stops blocking this long after the last push.
     "optional_check_grace_minutes": 30,
     "merge_method": None,  # squash | merge | rebase; default: the first the repository allows, in that order
-    "max_rounds": 6,
-    "max_hours": 72,
+    # 0 (the default) never hands the PR over: the watch follows it until it is merged or closed.
+    "max_rounds": 0,
+    "max_hours": 0,
     "bots": [],  # bots whose top-level comments count as feedback (their inline threads always do)
 }
 FAILED_CONCLUSIONS = {"FAILURE", "TIMED_OUT", "STARTUP_FAILURE", "ACTION_REQUIRED", "CANCELLED"}
@@ -374,7 +375,8 @@ def assess(pr: dict[str, Any], viewer: str, watch: dict[str, Any], config: dict[
         "reviewers": {"requested": requested, "approved": approved, "changes_requested": changes_requested},
         "answered_threads": len(answered),
     }
-    if watch["rounds"] >= int(config.get("max_rounds") or 0) and (items or ci_items):
+    max_rounds = int(config.get("max_rounds") or 0)
+    if max_rounds and watch["rounds"] >= max_rounds and (items or ci_items):
         return {**decision, "action": "needs_user",
                 "reason": f"{watch['rounds']} fix rounds already; the PR keeps getting new findings"}
     if items or ci_items:
@@ -688,8 +690,9 @@ def poll(step: Callable[[], tuple[bool, dict[str, Any], str]], timeout: float = 
 
 
 def over_max_hours(started_at: float | None, config: dict[str, Any], now: float) -> bool:
-    """Both watches stop and hand over to the developer after `watch.max_hours` of following one PR."""
-    return bool(started_at) and now - float(started_at) > float(config["max_hours"]) * 3600
+    """Both watches stop and hand over to the developer after `watch.max_hours` of following one PR (0: never)."""
+    hours = float(config.get("max_hours") or 0)
+    return bool(started_at) and hours > 0 and now - float(started_at) > hours * 3600
 
 
 def wait(target: Path, number: int | None = None, timeout: float = 540, interval: float = 60) -> dict[str, Any]:
