@@ -164,10 +164,39 @@ def ended_pull_request(target: Path, agent_dir: Path, branch: str) -> dict[str, 
     return {"state": state, "url": data.get("url")} if state in {"MERGED", "CLOSED"} else None
 
 
+def gh_can_attach() -> bool:
+    """`gh` 2.99+ uploads images and videos into a PR body with `--attach`; an older one cannot."""
+    global _GH_ATTACH
+    if _GH_ATTACH is None:
+        try:
+            found = subprocess.run(["gh", "pr", "create", "--help"], text=True, capture_output=True, timeout=30,
+                                   check=False)
+            _GH_ATTACH = found.returncode == 0 and "--attach" in found.stdout
+        except (OSError, subprocess.SubprocessError):
+            _GH_ATTACH = False
+    return _GH_ATTACH
+
+
+_GH_ATTACH: bool | None = None
+
+
+def upload_media_enabled(target: Path) -> bool:
+    """`upload_media` in .ai/android-workflow.json (default on): `false` keeps captures off GitHub, and the
+    developer drags them into the PR."""
+    from android_workflow.cli import durable_overrides, main_worktree
+
+    overrides = durable_overrides(target)
+    main = None if "upload_media" in overrides else main_worktree(target)
+    return (durable_overrides(main) if main else overrides).get("upload_media", True) is not False
+
+
 def open_pull_request(
     target: Path, host: str, remote: str, branch: str, base: str, subject: str, body_file: Path,
-    timeout: int, draft: bool = False, keep_body: bool = False,
+    timeout: int, draft: bool = False, keep_body: bool = False, attach: bool = False,
 ) -> dict[str, Any]:
+    """Open the PR (or update the open one). `attach`: upload the captures the body references locally
+    (`media/...`) with `gh --attach`; when that fails before anything went up, the references become file
+    names to drag and the PR is opened without them. With uploads, the local body mirrors the PR after."""
     cli = {"github": "gh", "gitlab": "glab"}.get(host)
     if not cli or not shutil.which(cli):
         return {"status": "manual", "compare_url": compare_url(remote, branch, base),
@@ -187,6 +216,34 @@ def open_pull_request(
                                   env=env)
         except subprocess.TimeoutExpired as error:
             raise ValueError(f"`{cli}` timed out after {timeout}s") from error
+
+    from android_workflow import pr_media
+
+    agent_dir = body_file.parent
+    uploads: dict[str, Any] = {}
+
+    def attach_args(body: str) -> list[str]:
+        files = pr_media.pending(agent_dir, body) if attach else []
+        uploads["files"] = files
+        return [arg for path in files for arg in ("--attach", path)]
+
+    def live_body() -> str | None:
+        viewed = run("pr", "view", branch, "--json", "body", "--jq", ".body")
+        return viewed.stdout if viewed.returncode == 0 else None
+
+    def without_uploads(failed: subprocess.CompletedProcess[str]) -> None:
+        # Nothing went up: the local references become file names to drag, and the call is made again.
+        uploads["warning"] = "captures were not uploaded (" + tail(failed.stderr or failed.stdout, 3) + \
+            "); drag them into the PR"
+        uploads["files"] = []
+        body_file.write_text(pr_media.to_manual(body_file.read_text(encoding="utf-8")), encoding="utf-8")
+
+    def with_uploads(result: dict[str, Any]) -> dict[str, Any]:
+        if uploads.get("files"):
+            result["attached"] = len(uploads["files"])
+        if uploads.get("warning"):
+            result["attach_warning"] = uploads["warning"]
+        return result
 
     if host == "github":
         from android_workflow.watch import POSTED_BODY_FILE, merge_body
@@ -217,10 +274,22 @@ def open_pull_request(
                     result["body"] = "unchanged"
                 else:
                     body_file.write_text(final, encoding="utf-8")
-                    edited = run("pr", "edit", branch, "--body-file", str(body_file))
+                    attached = attach_args(final)
+                    edited = run("pr", "edit", branch, "--body-file", str(body_file), *attached)
+                    if edited.returncode != 0 and attached:
+                        now = live_body()
+                        if now is not None and now.strip() != live.strip():
+                            uploads["warning"] = "some captures were not uploaded: " + tail(edited.stderr, 3)
+                            edited = subprocess.CompletedProcess(edited.args, 0, "", "")
+                        else:
+                            without_uploads(edited)
+                            final = body_file.read_text(encoding="utf-8")
+                            edited = run("pr", "edit", branch, "--body-file", str(body_file))
                     if edited.returncode != 0:
                         result["warning"] = tail(edited.stderr, 5)
                         final = live
+                    elif uploads.get("files"):
+                        final = live_body() or final  # the asset URLs gh wrote in place of `media/...`
             # RUN/pr-description.md mirrors the PR: the next update starts from what is there.
             if final.strip():
                 body_file.write_text(final, encoding="utf-8")
@@ -233,11 +302,18 @@ def open_pull_request(
                     result["ready_warning"] = tail(readied.stderr or readied.stdout, 5)
             elif was_draft:
                 result["draft"] = True
-            return result
-        created = run(
-            "pr", "create", "--base", base, "--head", branch, "--title", subject, "--body-file", str(body_file),
-            *(["--draft"] if draft else []),
-        )
+            return with_uploads(result)
+        create = ["pr", "create", "--base", base, "--head", branch, "--title", subject, "--body-file",
+                  str(body_file), *(["--draft"] if draft else [])]
+        attached = attach_args(body_file.read_text(encoding="utf-8"))
+        created = run(*create, *attached)
+        if created.returncode != 0 and attached:
+            if re.search(r"https?://\S+/pull/\d+", created.stdout):
+                uploads["warning"] = "some captures were not uploaded: " + tail(created.stderr, 3)
+                created = subprocess.CompletedProcess(created.args, 0, created.stdout, created.stderr)
+            else:
+                without_uploads(created)
+                created = run(*create)
     else:
         created = run(
             "mr", "create", "--target-branch", base, "--source-branch", branch, "--title", subject,
@@ -248,8 +324,12 @@ def open_pull_request(
     urls = re.findall(r"https?://\S+", created.stdout)
     from android_workflow.watch import POSTED_BODY_FILE
 
+    if host == "github" and uploads.get("files"):
+        now = live_body()  # the asset URLs gh wrote in place of `media/...`
+        if now and now.strip():
+            body_file.write_text(now if now.endswith("\n") else now + "\n", encoding="utf-8")
     (body_file.parent / POSTED_BODY_FILE).write_text(body_file.read_text(encoding="utf-8"), encoding="utf-8")
-    return {"status": "created", "url": urls[-1] if urls else None, "draft": draft}
+    return with_uploads({"status": "created", "url": urls[-1] if urls else None, "draft": draft})
 
 
 CHECKBOX = re.compile(r"^(\s*[-*]\s+\[)([ xX])(\]\s+)(.*)$")
@@ -381,7 +461,11 @@ def deliver(
 
     from android_workflow import pr_media
 
-    text, media = pr_media.apply(agent_dir, strip_agent_attribution(text), spec)
+    host, remote = remote_host(target)
+    # Captures go up with `gh --attach` only when this delivery opens or edits the PR body on GitHub.
+    upload = (not no_push and not no_pr and not keep_body and host == "github" and shutil.which("gh") is not None
+              and upload_media_enabled(target) and gh_can_attach())
+    text, media = pr_media.apply(agent_dir, strip_agent_attribution(text), spec, upload=upload)
     if media:
         result["media"] = media
         if media["unpaired"]:
@@ -473,13 +557,18 @@ def deliver(
         result.update({"pr": None, "warnings": warnings, "duration_seconds": round(time.monotonic() - started, 1)})
         write_json(agent_dir / "delivery.json", result)
         return result
-    host, remote = remote_host(target)
     draft = bool((state.get("draft") or {}).get("issues"))
     pr = open_pull_request(
         target, host, remote, branch, base_name, subject, body_file, timeout=300, draft=draft, keep_body=keep_body,
+        attach=upload,
     )
     result["pr"] = pr
-    if media and pr.get("status") in {"created", "updated"} and pr.get("body") != "kept":
+    if media and pr.get("attached"):
+        media["uploaded"] = len(pr_media.record(agent_dir, body_file.read_text(encoding="utf-8")))
+    if pr.get("attach_warning"):
+        warnings.append(pr["attach_warning"])
+    uploaded_all = media and media.get("upload") and not pr.get("attach_warning")
+    if media and not uploaded_all and pr.get("status") in {"created", "updated"} and pr.get("body") != "kept":
         media["opened"] = pr_media.reveal(media["folder"])  # one drag away for the Before/After cells
     result["warnings"] = warnings
     result["duration_seconds"] = round(time.monotonic() - started, 1)

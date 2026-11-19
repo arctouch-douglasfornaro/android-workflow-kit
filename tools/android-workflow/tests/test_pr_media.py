@@ -139,11 +139,12 @@ class DeliverFillsTheTableTests(unittest.TestCase):
         reveal.assert_not_called()
         self.assertNotIn("opened", result["media"])
 
-    def test_a_new_pull_request_opens_the_media_folder(self) -> None:
+    def test_a_new_pull_request_opens_the_media_folder_when_uploads_are_off(self) -> None:
         with AndroidProject() as root:
             finished_run(root, body=TEMPLATE)
             media(run_dir(root), {"before/a.png": "", "after/a.png": ""})
             with mock.patch("android_workflow.delivery.remote_host", return_value=("github", "x")), \
+                    mock.patch("android_workflow.delivery.gh_can_attach", return_value=False), \
                     mock.patch("android_workflow.delivery.open_pull_request",
                                return_value={"status": "created", "url": "u"}), \
                     mock.patch("android_workflow.pr_media.reveal", return_value=True) as reveal:
@@ -151,6 +152,148 @@ class DeliverFillsTheTableTests(unittest.TestCase):
                 folder = str(run_dir(root) / "media")
         reveal.assert_called_once_with(folder)
         self.assertTrue(result["media"]["opened"])
+
+
+    def test_uploaded_captures_never_open_finder_and_are_recorded(self) -> None:
+        def fake_open(target, host, remote, branch, base, subject, body_file, **kwargs):
+            self.assertTrue(kwargs["attach"])
+            text = body_file.read_text(encoding="utf-8")
+            self.assertIn("![a before](media/before/a.png)", text)
+            body_file.write_text(text.replace("media/before/a.png", "https://github.com/user-attachments/assets/b1")
+                                 .replace("media/after/a.png", "https://github.com/user-attachments/assets/a1"),
+                                 encoding="utf-8")
+            return {"status": "created", "url": "u", "attached": 2}
+
+        with AndroidProject() as root:
+            finished_run(root, body=TEMPLATE)
+            media(run_dir(root), {"before/a.png": "", "after/a.png": ""})
+            with mock.patch("android_workflow.delivery.remote_host", return_value=("github", "x")), \
+                    mock.patch("android_workflow.delivery.shutil.which", return_value="/bin/gh"), \
+                    mock.patch("android_workflow.delivery.gh_can_attach", return_value=True), \
+                    mock.patch("android_workflow.delivery.open_pull_request", side_effect=fake_open), \
+                    mock.patch("android_workflow.pr_media.reveal") as reveal:
+                result = deliver(root)
+                known = pr_media.ledger(run_dir(root))
+        reveal.assert_not_called()
+        self.assertEqual(result["media"]["uploaded"], 2)
+        self.assertEqual(known["after/a.png"]["url"], "https://github.com/user-attachments/assets/a1")
+
+    def test_upload_media_false_keeps_captures_off_github(self) -> None:
+        with AndroidProject() as root:
+            finished_run(root, body=TEMPLATE)
+            media(run_dir(root), {"before/a.png": "", "after/a.png": ""})
+            config = root / ".ai" / "android-workflow.json"
+            data = __import__("json").loads(config.read_text(encoding="utf-8")) if config.is_file() else {}
+            data["upload_media"] = False
+            config.parent.mkdir(exist_ok=True)
+            config.write_text(__import__("json").dumps(data), encoding="utf-8")
+            with mock.patch("android_workflow.delivery.remote_host", return_value=("github", "x")), \
+                    mock.patch("android_workflow.delivery.shutil.which", return_value="/bin/gh"), \
+                    mock.patch("android_workflow.delivery.gh_can_attach", return_value=True), \
+                    mock.patch("android_workflow.delivery.open_pull_request",
+                               return_value={"status": "created", "url": "u"}) as opened, \
+                    mock.patch("android_workflow.pr_media.reveal", return_value=True):
+                deliver(root)
+                text = (run_dir(root) / "pr-description.md").read_text(encoding="utf-8")
+        self.assertFalse(opened.call_args.kwargs["attach"])
+        self.assertIn("a | `before/a.png` | `after/a.png`", text)
+
+
+class UploadTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.dir = Path(tempfile.mkdtemp(prefix="aw-upload-"))
+
+    def test_cells_reference_the_files_for_gh_attach(self) -> None:
+        agent_dir = media(self.dir, {"before/a.png": "", "after/a.png": "", "after/flow.mp4": ""})
+        text, info = pr_media.apply(agent_dir, TEMPLATE, {"surfaces": ["ui"]}, upload=True)
+        self.assertIn("a | ![a before](media/before/a.png) | ![a after](media/after/a.png)", text)
+        self.assertIn("flow | — | [flow after (video)](media/after/flow.mp4)", text)
+        self.assertTrue(info["upload"])
+        self.assertEqual(pr_media.pending(agent_dir, text), [
+            str((agent_dir / "media/before/a.png").resolve()), str((agent_dir / "media/after/a.png").resolve()),
+            str((agent_dir / "media/after/flow.mp4").resolve())])
+        self.assertEqual(pr_media.apply(agent_dir, text, {"surfaces": ["ui"]}, upload=True)[0], text)
+
+    def test_an_unchanged_capture_reuses_its_url_and_a_changed_one_goes_up_again(self) -> None:
+        agent_dir = media(self.dir, {"before/a.png": "", "after/a.png": ""})
+        text, _ = pr_media.apply(agent_dir, TEMPLATE, {"surfaces": ["ui"]}, upload=True)
+        live = text.replace("media/before/a.png", "https://github.com/user-attachments/assets/b1") \
+            .replace("media/after/a.png", "https://github.com/user-attachments/assets/a1")
+        self.assertEqual(set(pr_media.record(agent_dir, live)), {"before/a.png", "after/a.png"})
+        again, _ = pr_media.apply(agent_dir, live, {"surfaces": ["ui"]}, upload=True)
+        self.assertEqual(again, live)
+        self.assertEqual(pr_media.pending(agent_dir, again), [])
+        (agent_dir / "media/after/a.png").write_bytes(b"new capture")
+        changed, _ = pr_media.apply(agent_dir, live, {"surfaces": ["ui"]}, upload=True)
+        self.assertIn("![a before](https://github.com/user-attachments/assets/b1) | ![a after](media/after/a.png)",
+                      changed)
+
+    def test_a_row_a_person_filled_stays_with_uploads_on(self) -> None:
+        body = TEMPLATE.replace("tablet | Image_Before | Image_After",
+                                "a | ![x](https://example.test/b.png) | ![y](https://example.test/a.png)")
+        agent_dir = media(self.dir, {"before/a.png": "", "after/a.png": ""})
+        text, _ = pr_media.apply(agent_dir, body, {"surfaces": ["ui"]}, upload=True)
+        self.assertIn("https://example.test/a.png", text)
+        self.assertEqual(pr_media.pending(agent_dir, text), [])
+
+    def test_to_manual_turns_references_into_file_names(self) -> None:
+        body = "a | ![a before](media/before/a.png) | [flow after (video)](media/after/flow.mp4) | ![k](https://x.test/k.png)"
+        self.assertEqual(pr_media.to_manual(body),
+                         "a | `before/a.png` | `after/flow.mp4` (video) | ![k](https://x.test/k.png)")
+
+
+class OpenWithAttachTests(unittest.TestCase):
+    def fake_gh(self, root: Path, create_fails_with_attach: bool = False) -> tuple[Path, Path]:
+        bin_dir = root / "fakebin"
+        bin_dir.mkdir()
+        calls = root / "gh-calls.txt"
+        fail = ('case "$*" in *--attach*) echo "upload refused" >&2; exit 1;; esac\n'
+                if create_fails_with_attach else "")
+        (bin_dir / "gh").write_text(
+            "#!/bin/sh\n"
+            f"echo \"$@\" >> {calls}\n"
+            '[ "$2" = view ] && case "$*" in *--jq*) echo "body from GitHub"; exit 0;; *) exit 1;; esac\n'
+            + fail +
+            "echo https://github.com/o/r/pull/7\n", encoding="utf-8")
+        (bin_dir / "gh").chmod(0o755)
+        return bin_dir, calls
+
+    def test_create_attaches_the_referenced_captures_and_mirrors_the_pr(self) -> None:
+        from android_workflow.delivery import open_pull_request
+
+        root = Path(tempfile.mkdtemp(prefix="aw-open-"))
+        media(root, {"before/a.png": "", "after/a.png": "", "after/unused.png": ""})
+        body = root / "pr-description.md"
+        body.write_text("a | ![a before](media/before/a.png) | ![a after](media/after/a.png)\n", encoding="utf-8")
+        bin_dir, calls = self.fake_gh(root)
+        with mock.patch.dict("os.environ", {"PATH": f"{bin_dir}:/usr/bin:/bin"}), \
+                mock.patch("android_workflow.watch.github_env", return_value={}):
+            result = open_pull_request(root, "github", "git@github.com:o/r.git", "b", "main", "S", body, 30,
+                                       attach=True)
+        created = next(line for line in calls.read_text(encoding="utf-8").splitlines() if line.startswith("pr create"))
+        self.assertEqual(result["attached"], 2)
+        self.assertEqual(created.count("--attach"), 2)
+        self.assertNotIn("unused.png", created)
+        self.assertEqual(body.read_text(encoding="utf-8"), "body from GitHub\n")
+
+    def test_a_refused_upload_opens_the_pr_with_file_names_to_drag(self) -> None:
+        from android_workflow.delivery import open_pull_request
+
+        root = Path(tempfile.mkdtemp(prefix="aw-open-"))
+        media(root, {"before/a.png": "", "after/a.png": ""})
+        body = root / "pr-description.md"
+        body.write_text("a | ![a before](media/before/a.png) | ![a after](media/after/a.png)\n", encoding="utf-8")
+        bin_dir, calls = self.fake_gh(root, create_fails_with_attach=True)
+        with mock.patch.dict("os.environ", {"PATH": f"{bin_dir}:/usr/bin:/bin"}), \
+                mock.patch("android_workflow.watch.github_env", return_value={}):
+            result = open_pull_request(root, "github", "git@github.com:o/r.git", "b", "main", "S", body, 30,
+                                       attach=True)
+        creates = [line for line in calls.read_text(encoding="utf-8").splitlines() if line.startswith("pr create")]
+        self.assertEqual(result["status"], "created")
+        self.assertIn("upload refused", result["attach_warning"])
+        self.assertNotIn("attached", result)
+        self.assertNotIn("--attach", creates[-1])
+        self.assertEqual(body.read_text(encoding="utf-8"), "a | `before/a.png` | `after/a.png`\n")
 
 
 if __name__ == "__main__":

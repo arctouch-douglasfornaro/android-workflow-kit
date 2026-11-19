@@ -53,9 +53,12 @@ it: whatever you write is stripped and the CLI's line is the only one kept.
 - Draft (`run-state.json` → `draft.issues`): one line "Not ready for review: <reason>" and the
   issues as bullets, so the reviewer sees what is still open. `CLI deliver` adds them if missing.
 - Screenshots: leave the template's screenshot section exactly as the template has it (no template:
-  write none). `CLI deliver` fills its Before/After table from `media/` by code, one row per capture
-  with the file to drag into each cell, or a "No screenshots" line. Never write image URLs or upload
-  captures anywhere.
+  write none). `CLI deliver` fills its Before/After table from `media/` by code, one row per capture,
+  or a "No screenshots" line. On GitHub it uploads each capture into its cell with `gh --attach`
+  (images inline, videos as links) and reuses the URL of a capture that did not change since its
+  upload. Without uploads (GitLab, `gh` older than 2.99, `"upload_media": false` in
+  `.ai/android-workflow.json`, `--no-pr`, or a refused upload) each cell names the file to drag. Never
+  write image URLs or upload captures yourself.
 
 ## Git → `CLI deliver`
 
@@ -78,9 +81,10 @@ The mechanical part is one command. Do not run `git add`, `commit`, `push` or `g
    draft PR from an earlier delivery is marked ready (`gh pr ready`) once the run has no open issues
    (GitHub or GitLab; any other host gets a compare URL) — strips any tool attribution from the
    commit and body, fills the screenshot table and adds the draft, waived-lint and skipped-device
-   lines when the body omits them. After opening the PR it opens `media/` in Finder (macOS).
+   lines when the body omits them. When captures were not uploaded it opens `media/` in Finder (macOS).
 3. It prints JSON and writes `RUN/delivery.json`: branch, `sha`, `files`, `pushed`, `pr` (`url` or
-   `compare_url`), `warnings`, `disclosures_added`, `media` (`files` in table order). Report those.
+   `compare_url`), `warnings`, `disclosures_added`, `media` (`files` in table order, `upload`, and
+   `uploaded`: captures sent this time). Report those.
 4. It exits non-zero with `error: …` on a refusal, a failing hook or a rejected push. Return that
    text (≤8 lines) and stop. Never retry with raw git, `--no-verify` or a force flag: the
    orchestrator decides.
@@ -89,8 +93,8 @@ The mechanical part is one command. Do not run `git add`, `commit`, `push` or `g
 
 ## Return (≤8 lines)
 
-Branch, commit SHA, PR URL (or compare URL), `warnings`, and `media.files` (drag each into its
-Before/After cell when editing the PR on the web).
+Branch, commit SHA, PR URL (or compare URL), `warnings`, and either how many captures were uploaded
+or, when they were not, `media.files` (drag each into its Before/After cell when editing the PR on the web).
 
 ## Never
 

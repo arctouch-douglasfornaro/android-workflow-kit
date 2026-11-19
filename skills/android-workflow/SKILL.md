@@ -489,8 +489,9 @@ and the device is PASS (or not required, or PARTIAL and accepted by the develope
 issues otherwise.
 If the PR Watcher was still watching, say in one line that it stops with this session and that
 `/android-workflow <ID> --watch` resumes it.
-Show: PR URL (and whether it is a draft), changed files, stage log path, and the absolute `media/before` and
-`media/after` paths so the user can drag the evidence into the PR. End with `office_message` from
+Show: PR URL (and whether it is a draft), changed files, stage log path, and whether the captures were
+uploaded into the PR (`media.upload` with no upload warning). When they were not, show the absolute
+`media/before` and `media/after` paths so the user can drag the evidence into the PR. End with `office_message` from
 `CLI status --target TARGET`, as is, on its own line (also when you stop to ask the user).
 
 The PR description on GitHub is the source of truth once the PR is open. Every update (`CLI deliver`,
