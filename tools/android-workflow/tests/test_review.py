@@ -397,6 +397,39 @@ class FlowTests(unittest.TestCase):
             self.assertEqual(office.run_status(current_run(worktree), run_state),
                              ("watching", float(run_state["watching_since"])))
 
+    def test_a_redraft_keeps_the_comment_edits_and_a_stale_draft_is_not_posted(self) -> None:
+        review_json = {"schema_version": 1, "status": "approved", "blocking": [], "acceptance": [],
+                       "concerns": [{"id": "C1", "file": f"{REPO}:5", "problem": "cache() is never invalidated"},
+                                    {"id": "C2", "file": f"{REPO}:4", "problem": "load() name is vague"}]}
+        with Project(self.CHANGE) as project:
+            worktree = self.run_to_draft(project, review_json)
+            agent_dir = review.agent_dir_for(worktree)
+            review.draft(worktree)
+            ids = {c["finding"]: c["id"] for c in read_json(agent_dir / review.DRAFT_FILE)["comments"]}
+            edited = review.edit(worktree, drop=[ids["C1"]], set_text=[[ids["C2"], "nit: rename load()"]], body="Mine.")
+            self.assertEqual(review.next_action(worktree)["next"], "ask_user")  # shown
+            # The Reviewer adds a concern after the developer saw the draft.
+            review_json["concerns"].insert(0, {"id": "C0", "file": f"{REPO}:4", "problem": "load() is untested"})
+            (agent_dir / "review.json").write_text(json.dumps(review_json))
+            with mock.patch.object(review, "fetch_pr", return_value=fake_pr(project.head)), \
+                    mock.patch("android_workflow.watch._gh") as gh:
+                refused = review.post(worktree, edited["draft_id"])
+                gh.assert_not_called()
+            ask = review.next_action(worktree)
+            redrafted = review.draft(worktree)
+            value = read_json(agent_dir / review.DRAFT_FILE)
+        self.assertEqual((refused["reason"], refused["changed"]), ("inputs_changed", ["review.json"]))
+        self.assertEqual(ask["next"], "draft")
+        self.assertIn("review.json changed since the draft", ask["why"])
+        self.assertIn("edits to comments and threads carry over", ask["why"])
+        self.assertEqual((redrafted["edits_kept"], redrafted["edits_not_kept"]), (2, ["body"]))
+        bodies = {c["finding"]: c["body"] for c in value["comments"]}
+        self.assertNotIn("C1", bodies)
+        self.assertEqual(bodies["C2"], "nit: rename load()")
+        self.assertIn("C0", bodies)
+        self.assertNotEqual(value["body"], "Mine.")  # the body summarizes the checks: composed again
+        self.assertEqual(value["edits"]["drop"], ["C1"])  # a later redraft carries them again
+
     def test_a_moved_head_refuses_the_post(self) -> None:
         with Project(self.CHANGE) as project:
             worktree = self.run_to_draft(project, {"status": "approved", "blocking": [], "acceptance": []})
@@ -977,6 +1010,54 @@ class DeviceTests(unittest.TestCase):
         self.assertIn("T7", spec["route"])
         self.assertIn("ui", spec["surfaces"])
 
+    def test_a_device_ac_routes_through_the_device_without_a_ui_change(self) -> None:
+        with Project({REPO: "package com.example\n\nclass ProfileRepository\n"}) as project:
+            result = project.start()
+            worktree, agent_dir = Path(result["worktree_path"]), Path(result["run"])
+            write_profile(worktree)
+            review.next_action(worktree)
+            (agent_dir / review.SPEC_FILE).write_text(json.dumps({"status": "ready", "acceptance": [
+                {"id": "AC1", "text": "profile_viewed is logged once", "evidence": "device"},
+                {"id": "AC2", "text": "load() returns 1", "evidence": "test"}]}))
+            log_stage(worktree, "Planner", "completed", "2 AC", "host")
+            checks = review.next_action(worktree)
+            self.assertEqual(checks["also"], ["CLI prebuild --target TARGET", "CLI device build --target TARGET"])
+            (agent_dir / "review.json").write_text(json.dumps({"status": "approved", "blocking": []}))
+            log_stage(worktree, "Reviewer", "completed", "done", "host")
+            with mock.patch.object(review, "fetch_pr", return_value=fake_pr(project.head)):
+                review.ci(worktree)
+            with mock.patch("android_workflow.decide._device_for", return_value=("emulator-5554", None, "")):
+                spawn = review.next_action(worktree)
+            route = read_json(agent_dir / "ticket-spec.json")["route"]
+        self.assertEqual((spawn["agent"], spawn["mode"]), ("aw-device", "after"))
+        self.assertEqual(spawn["why"], "device AC (AC1): verify the PR head on the device")
+        self.assertIn("T7", route)
+
+    def test_a_check_landing_after_the_draft_redrafts_it(self) -> None:
+        with Project({REPO: "package com.example\n\nclass ProfileRepository\n"}) as project:
+            result = project.start()
+            worktree, agent_dir = Path(result["worktree_path"]), Path(result["run"])
+            write_profile(worktree)
+            review.next_action(worktree)
+            (agent_dir / review.SPEC_FILE).write_text(json.dumps({"status": "ready", "acceptance": [
+                {"id": "AC1", "text": "load() returns 1", "evidence": "test"}]}))
+            log_stage(worktree, "Planner", "completed", "1 AC", "host")
+            review.next_action(worktree)
+            (agent_dir / "review.json").write_text(json.dumps({"status": "approved", "blocking": []}))
+            log_stage(worktree, "Reviewer", "completed", "done", "host")
+            (agent_dir / review.CI_FILE).write_text(json.dumps({"status": "passed", "passed": 1, "at": 1}))
+            review.draft(worktree)
+            self.assertEqual(review.next_action(worktree)["next"], "ask_user")
+            (agent_dir / review.CI_FILE).write_text(json.dumps({"status": "passed", "passed": 1, "at": 2}))
+            self.assertEqual(review.next_action(worktree)["next"], "ask_user")
+            review.edit(worktree, body="Edited.")
+            self.assertEqual(review.next_action(worktree)["next"], "ask_user")
+            (agent_dir / "device-report.md").write_text("# Status\n\nPASS\n")
+            redraft = review.next_action(worktree)
+            self.assertEqual(redraft["next"], "draft")
+            review.draft(worktree)
+            self.assertEqual(review.next_action(worktree)["next"], "ask_user")
+
 
 
 class CarryOverTests(unittest.TestCase):
@@ -1033,6 +1114,14 @@ class CarryOverTests(unittest.TestCase):
             body = read_json(agent_dir / review.DRAFT_FILE)["body"]
         self.assertEqual(drafted["event"], "APPROVE")  # AC1 still proved by the carried device run
         self.assertIn(f"PASS on {project.head[:7]} carried over", body)
+
+    def test_a_behavior_ac_runs_the_device_again_after_any_new_commit(self) -> None:
+        with Project({REPO: "package com.example\n\nclass ProfileRepository\n"}) as project:
+            _, agent_dir = self.round_one_with_device_pass(project)
+            result = self.delta(project, push_fix(project, REPO, "package com.example\n\nclass ProfileRepository {\n  fun load() = 1\n}\n"))
+            carry = read_json(agent_dir / review.STATE_FILE).get("device_carry")
+        self.assertTrue(carry)  # the earlier PASS is known, but the behavior it proved may have changed
+        self.assertFalse(result.get("device_carried"))
 
     def test_a_new_ui_change_or_new_media_runs_them_again(self) -> None:
         with Project(self.UI) as project:

@@ -203,7 +203,9 @@ head and proposes resolving the addressed ones). A run of that PR on disk also g
   Reviewer explains every divergence (intended, or a finding).
 - **Device** only when the diff changes UI: Android resources (`res/layout|drawable|values|…`),
   the manifest, `@Composable`/`@Preview` code, screen/view classes (never test sources: `src/test`,
-  `src/androidTest`, `sharedTest`, `testFixtures`). The Planner may waive it for a
+  `src/androidTest`, `sharedTest`, `testFixtures`), or when the spec has an AC with
+  `evidence: device` (behavior only a running app shows: an analytics event, a logcat side effect, a
+  background job…), UI change or not. The Planner may waive it for a
   pure refactor pinned by tests (`device: skip` + reason in the spec), never for a resource or
   manifest change. The Reviewer can require it (`CLI review device --require`), which beats the
   waiver. `after` = PR head, `before` = the base APK replayed
@@ -215,7 +217,8 @@ head and proposes resolving the addressed ones). A run of that PR on disk also g
   APK builds) while the PR's commits since that head change no UI; the review says "PASS on abc1234
   carried over: the new commits change no UI" and the carried report still proves the device AC. A UI
   change since then, a force-push that dropped that head, `--require` or the Reviewer's
-  `device_required` → the device runs again.
+  `device_required` → the device runs again. So does any PR commit since that head when the device ran
+  only for a behavior AC (`evidence: device` on a PR that changes no UI).
 - **Reviewer tier** (round 1, from the diff only; the PR text never lowers it): standard when the diff
   has at most `review.small_diff_lines` (150; `0` = always strong) changed lines in at most 5 files and
   no risky area — DI (`@Module`, `@Provides`, `@Binds`, `di/`), Room/serialization (`@Entity`, `@Database`,
@@ -274,9 +277,17 @@ head and proposes resolving the addressed ones). A run of that PR on disk also g
   the body under *Other notes*. A finding with a valid `suggestion` carries GitHub's suggested-change
   block (the author's "Commit suggestion"); one the CLI cannot apply (off the hunk, >10 lines,
   overlapping, no change) is posted as the text fix and listed under `suggestions_as_text` in the draft result.
+- **Redraft**: a draft records what it was composed from (spec, `review.json`, media, device report and
+  captures, gate, render, CI verdict and check states); when any of it changes after the draft (a device
+  run the developer required late), `next` returns `draft` again and names what changed. An `edit`
+  keeps that record, so an edited draft is redrafted only when a check actually changed; that redraft
+  carries the developer's comment and thread edits (by finding and thread, not by C1/R1/T1) and reports
+  `edits_kept` / `edits_not_kept`: an edited body or event is composed again, since both summarize the
+  checks. `draft` run again on unchanged checks starts over with no edits.
 - **Post**: one review via `POST /repos/{o}/{r}/pulls/{n}/reviews` pinned to the reviewed commit;
   refused when the draft changed since the OK, was never shown (`next` returning it with `show`, or
-  `review shown`; every `edit` or redraft resets it) or the PR head moved. The PR is never merged from this mode.
+  `review shown`; every `edit` or redraft resets it), a check changed after the draft (`inputs_changed`)
+  or the PR head moved. The PR is never merged from this mode.
 - **Others' comments**: `pr-context.json` carries `other_threads` (inline threads others opened, open
   first, max 40) and `discussion` (PR comments and review bodies, max 30). A finding may repeat a point
   from one of them with more detail (`thread` → the comment links it); `replies` (agree, disagree,

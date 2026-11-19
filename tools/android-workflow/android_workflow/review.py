@@ -604,21 +604,27 @@ def _device_to_carry(agent_dir: Path, state: dict[str, Any], previous_head: str)
 
 def ui_since_device(target: Path, carry: dict[str, Any], head: str, files: list[str]) -> dict[str, Any] | None:
     """`ui_change` of what changed since the head the device last passed, limited to the PR's own files (a
-    merge of the base brings other people's screens, which the device never had to check). None when that
-    head is gone (force-push), so the device runs again."""
+    merge of the base brings other people's screens, which the device never had to check), plus those
+    `files`. None when that head is gone (force-push), so the device runs again."""
     changed = _git(target, "diff", "--name-only", carry["head"], head)
     if changed.returncode != 0:
         return None
     mine = set(files)
-    return ui_change(target, carry["head"], head, [line for line in changed.stdout.splitlines() if line.strip() in mine])
+    since = [line.strip() for line in changed.stdout.splitlines() if line.strip() in mine]
+    return {**ui_change(target, carry["head"], head, since), "files": since}
 
 
 def device_carried(agent_dir: Path, context: dict[str, Any], state: dict[str, Any]) -> str | None:
     """Why the device does not run again this round, or None: it passed on an earlier head and the PR's
-    commits since then change no UI. Never over the Reviewer or the developer requiring the device."""
+    commits since then change no UI. Never over the Reviewer or the developer requiring the device, and
+    never when the device ran for a behavior AC (`evidence: device` on a PR that changes no UI) and any PR
+    file changed since: that behavior lives in code the UI rule does not see."""
     carry = state.get("device_carry")
     since = context.get("ui_since_device")
     if not isinstance(carry, dict) or not isinstance(since, dict) or since.get("ui"):
+        return None
+    behavior_only = not (context.get("ui_change") or {}).get("ui") and device_acceptance(agent_dir)
+    if behavior_only and since.get("files", True):
         return None
     if state.get("device_forced") or _review_json(agent_dir).get("device_required"):
         return None
@@ -983,11 +989,21 @@ def media_not_needed(context: dict[str, Any], spec: dict[str, Any], state: dict[
     return "no UI change and no acceptance criterion relies on the attached media"
 
 
+def device_acceptance(agent_dir: Path) -> list[str]:
+    """The AC the Planner can only prove on a device (`evidence: device`): behavior that shows only on a
+    running app (an analytics event, a side effect in logcat, a background job…) needs the device even
+    when the diff changes no UI."""
+    spec = _read(agent_dir / SPEC_FILE)
+    return [str(a.get("id") or "?") for a in spec.get("acceptance") or []
+            if isinstance(a, dict) and a.get("evidence") == "device"]
+
+
 def _device_needed(agent_dir: Path, context: dict[str, Any], state: dict[str, Any]) -> bool:
     review = _review_json(agent_dir)
     if device_waived(agent_dir, context, state) or device_carried(agent_dir, context, state):
         return False
-    return bool((context.get("ui_change") or {}).get("ui") or state.get("device_forced") or review.get("device_required"))
+    return bool((context.get("ui_change") or {}).get("ui") or state.get("device_forced") or review.get("device_required")
+                or device_acceptance(agent_dir))
 
 
 def ci_not_needed(context: dict[str, Any], state: dict[str, Any]) -> str | None:
@@ -1196,6 +1212,8 @@ def _decide(target: Path, record: bool, no_device: bool) -> dict[str, Any]:
         if result:
             return result
     elif device:
+        if record:
+            _route_device(agent_dir)
         result = _device_step(target, agent_dir, record, with_render=decision if decision["mode"] == "both" else None)
         if result:
             return result
@@ -1213,6 +1231,12 @@ def _decide(target: Path, record: bool, no_device: bool) -> dict[str, Any]:
     if not draft or draft.get("head") != context["head"] or draft.get("stale"):
         return _answer("draft", "every check is in: compose the review", command="CLI review draft --target TARGET",
                        then="CLI review next --target TARGET")
+    changed = inputs_changed(draft, agent_dir)
+    if changed:
+        carried = ("; the developer's edits to comments and threads carry over, an edited body or event does not"
+                   if draft.get("edited") else "")
+        return _answer("draft", f"{', '.join(changed)} changed since the draft: compose it again{carried}",
+                       command="CLI review draft --target TARGET", then="CLI review next --target TARGET")
     if record and draft.get("shown") != draft["id"]:
         # Returned with `show`: the host prints this exact draft now, so it is the one an OK may post.
         draft["shown"] = draft["id"]
@@ -1314,7 +1338,12 @@ def _device_step(target: Path, agent_dir: Path, record: bool,
             _write(agent_dir / STATE_FILE, state)
         return None
     _log_started(target, "Device", "verify the PR head on the device", record)
-    spawn = _answer("spawn", "UI change: verify the PR head on the device", agent="aw-device", mode="after",
+    device_ac = device_acceptance(agent_dir)
+    why = ("UI change: verify the PR head on the device"
+           if (_read(agent_dir / CONTEXT_FILE).get("ui_change") or {}).get("ui")
+           else "device AC (" + ", ".join(device_ac) + "): verify the PR head on the device" if device_ac
+           else "device required: verify the PR head on the device")
+    spawn = _answer("spawn", why, agent="aw-device", mode="after",
                     stage="Device", serial=serial,
                     replay=decide._replay_hint(agent_dir),
                     scaffold=None if decide.flows_saved(agent_dir) else "CLI device scaffold --target TARGET",
@@ -1745,6 +1774,11 @@ def draft(target: Path, allow_quiet: bool = True) -> dict[str, Any]:
     if not context:
         raise ValueError("no review context: run `CLI review start` first")
     config = review_config(target)
+    # A redraft because a check changed keeps the developer's comment and thread edits; `draft` again on
+    # the same checks is how the developer starts over, so it keeps none.
+    previous = _read(agent_dir / DRAFT_FILE)
+    carried_edits = (previous.get("edits") if previous.get("head") == context["head"] and not previous.get("quiet")
+                     and inputs_changed(previous, agent_dir) else None)
     quiet = quiet_round(agent_dir, context, state) if allow_quiet else None
     if quiet:
         # Already approved and nothing new: no review, only our addressed threads resolved after the OK.
@@ -1754,7 +1788,7 @@ def draft(target: Path, allow_quiet: bool = True) -> dict[str, Any]:
             "event": None, "quiet": True, "approved_head": quiet.get("head"), "approved_url": quiet.get("url"),
             "reasons": [f"already approved on {str(quiet.get('head'))[:7]}; the new commits raise nothing new"],
             "body": "", "comments": [], "resolve": resolve, "overflow": 0,
-            "max_inline_comments": config["max_inline_comments"]})
+            "max_inline_comments": config["max_inline_comments"], "inputs": draft_inputs(agent_dir)})
         return {"status": "drafted", "draft_id": result["id"], "event": None, "quiet": True, "inline": 0,
                 "in_body": 0, "resolve": len(resolve), "show": str(agent_dir / DRAFT_MD), "security": None}
     findings = sorted(_findings(agent_dir), key=lambda f: (SEVERITY_ORDER[f["severity"]], f["path"] or "~", f["line"] or 0))
@@ -1921,15 +1955,20 @@ def draft(target: Path, allow_quiet: bool = True) -> dict[str, Any]:
                                      "comments": comments, "resolve": resolve, "overflow": len(overflow),
                                      "thread_replies": thread_replies,
                                      **({"footer": footer} if footer else {}),
-                                     "max_inline_comments": config["max_inline_comments"]})
+                                     "max_inline_comments": config["max_inline_comments"],
+                                     "inputs": draft_inputs(agent_dir)})
     security = [item["id"] for item in findings if item.get("security")]
+    replayed = _replay_edits(target, carried_edits, result) if carried_edits else {}
+    if replayed.get("edits_kept"):
+        result = _read(agent_dir / DRAFT_FILE)
+        comments, thread_replies, resolve = result["comments"], result.get("thread_replies") or [], result.get("resolve") or []
     return {"status": "drafted", "draft_id": result["id"], "event": event, "inline": len(comments),
             "suggestions": sum(1 for c in comments if c.get("suggestion")),
             "suggestions_as_text": dropped_suggestions or None,
             "thread_replies": len(thread_replies), "replies_dropped": replies_dropped or None,
             "in_body": len(overflow), "resolve": len(resolve), "show": str(agent_dir / DRAFT_MD),
             "security": ({"findings": security, "note": "possible security issue: also raise it in #security"}
-                         if security else None)}
+                         if security else None), **replayed}
 
 
 def _draft_id(value: dict[str, Any]) -> str:
@@ -1953,6 +1992,38 @@ def _signed(text: str, footer: str | None) -> str:
 def _review_body(value: dict[str, Any]) -> str:
     """The body as posted: the draft's text, then the project's attribution footer when it has one."""
     return _signed(value.get("body") or "", value.get("footer"))
+
+
+DRAFT_INPUT_FILES = (SPEC_FILE, "review.json", MEDIA_FILE, "device-report.md", "gate-report.json", "render-review.json")
+
+
+def draft_inputs(agent_dir: Path) -> dict[str, str]:
+    """What the draft was composed from, one hash per input so a redraft can say which one changed. CI counts
+    by its verdict and check states only, since `review ci` rewrites its timestamp on every call; an edit
+    keeps the draft's value, so only `draft` refreshes it."""
+    def digest(data: bytes) -> str:
+        return hashlib.sha256(data).hexdigest()[:12]
+
+    inputs = {name: digest((agent_dir / name).read_bytes()) if (agent_dir / name).is_file() else "-"
+              for name in DRAFT_INPUT_FILES}
+    ci = _read(agent_dir / CI_FILE)
+    checks = sorted((str(c.get("name")), str(c.get("state"))) for c in ci.get("checks") or [] if isinstance(c, dict))
+    state = _read(agent_dir / STATE_FILE)
+    captures = sorted(str(p.relative_to(agent_dir)) for phase in ("before", "after")
+                      for p in (agent_dir / "media" / phase).glob("*") if p.is_file())
+    extra = {"ci": {"status": ci.get("status"), "checks": checks}, "captures": captures,
+             "state": {key: state.get(key) for key in ("device_forced", "device_skipped", "media_skipped")}}
+    inputs.update({key: digest(json.dumps(value, sort_keys=True).encode("utf-8")) for key, value in extra.items()})
+    return inputs
+
+
+def inputs_changed(draft_value: dict[str, Any], agent_dir: Path) -> list[str]:
+    """The inputs that changed since the draft was composed (none for a draft from before this record)."""
+    recorded = draft_value.get("inputs")
+    if not isinstance(recorded, dict):
+        return []
+    now = draft_inputs(agent_dir)
+    return sorted(key for key in set(recorded) | set(now) if recorded.get(key) != now.get(key))
 
 
 def _save_draft(agent_dir: Path, value: dict[str, Any]) -> dict[str, Any]:
@@ -1994,7 +2065,9 @@ def _save_draft(agent_dir: Path, value: dict[str, Any]) -> dict[str, Any]:
 
 def edit(target: Path, drop: list[str] | None = None, event: str | None = None,
          set_text: list[list[str]] | None = None, body: str | None = None,
-         keep_open: list[str] | None = None) -> dict[str, Any]:
+         keep_open: list[str] | None = None, replay: bool = False) -> dict[str, Any]:
+    """The developer's changes to the draft. They are also recorded by what they point at (finding, thread),
+    so a redraft of the same head carries the comment and thread changes over; `replay` is that redraft."""
     agent_dir = agent_dir_for(target)
     value = _read(agent_dir / DRAFT_FILE)
     if not value:
@@ -2047,6 +2120,10 @@ def edit(target: Path, drop: list[str] | None = None, event: str | None = None,
         value["body"] = body
         value.pop("headline", None)
     value["edited"] = True
+    value["edits"] = _record_edits(before, wanted, set_text or [], keep, event, body is not None)
+    if replay:
+        saved = _save_draft(agent_dir, value)
+        return {"status": "edited", "draft_id": saved["id"]}
     # What the developer changed is the measure of the review's usefulness: dropped and rewritten
     # comments by severity (with the text before and after), the event override and the body diff.
     old_comments = {c["id"]: c for c in before.get("comments") or []}
@@ -2073,6 +2150,64 @@ def edit(target: Path, drop: list[str] | None = None, event: str | None = None,
             "show": str(agent_dir / DRAFT_MD),
             "next": "CLI review next --target TARGET: it returns the new draft to show; print RUN/review-draft.md "
                     "as is and ask again. `post` refuses this id until it was shown"}
+
+
+def _record_edits(before: dict[str, Any], dropped: set[str], set_text: list[list[str]], keep: set[str],
+                  event: str | None, body: bool) -> dict[str, Any]:
+    """The edits by what they point at: a comment by its finding, a reply or a thread to keep open by its
+    thread. Comment ids (C1, R1, T1) are positions and change when a redraft adds or removes a finding."""
+    edits = json.loads(json.dumps(before.get("edits") or {}))
+    finding = {c["id"]: c.get("finding") for c in before.get("comments") or [] if c.get("finding")}
+    reply = {r["id"]: r.get("thread") for r in before.get("thread_replies") or [] if r.get("thread")}
+    resolve = {t["id"]: t.get("thread") for t in before.get("resolve") or [] if t.get("thread")}
+
+    def add(kind: str, key: str) -> None:
+        if key not in edits.setdefault(kind, []):
+            edits[kind].append(key)
+
+    for key in sorted(dropped):
+        if key in finding:
+            add("drop", finding[key])
+        elif key in reply:
+            add("drop_replies", reply[key])
+    for key, text in set_text:
+        key = key.upper()
+        if key in finding:
+            edits.setdefault("text", {})[finding[key]] = text
+        elif key in reply:
+            edits.setdefault("reply_text", {})[reply[key]] = text
+    for key in sorted(keep):
+        if key in resolve:
+            add("keep_open", resolve[key])
+    if event:
+        edits["event"] = True
+    if body:
+        edits["body"] = True
+    return edits
+
+
+def _replay_edits(target: Path, edits: dict[str, Any], value: dict[str, Any]) -> dict[str, Any]:
+    """Carries the developer's comment and thread edits over to a redraft of the same head. An edited body
+    or event is not: the redraft exists because a check changed, and both summarize the checks."""
+    by_finding = {c.get("finding"): c["id"] for c in value.get("comments") or []}
+    by_reply = {r.get("thread"): r["id"] for r in value.get("thread_replies") or []}
+    by_resolve = {t.get("thread"): t["id"] for t in value.get("resolve") or []}
+    drop = [by_finding[f] for f in edits.get("drop") or [] if f in by_finding] \
+        + [by_reply[t] for t in edits.get("drop_replies") or [] if t in by_reply]
+    texts = [[by_finding[f], text] for f, text in (edits.get("text") or {}).items()
+             if f in by_finding and by_finding[f] not in drop] \
+        + [[by_reply[t], text] for t, text in (edits.get("reply_text") or {}).items()
+           if t in by_reply and by_reply[t] not in drop]
+    keep = [by_resolve[t] for t in edits.get("keep_open") or [] if t in by_resolve]
+    wanted = len(edits.get("drop") or []) + len(edits.get("drop_replies") or []) + len(edits.get("text") or {}) \
+        + len(edits.get("reply_text") or {}) + len(edits.get("keep_open") or [])
+    kept = len(drop) + len(texts) + len(keep)
+    if kept:
+        edit(target, drop=drop, set_text=texts, keep_open=keep, replay=True)
+    not_kept = [name for name in ("body", "event") if edits.get(name)]
+    if wanted > kept:
+        not_kept.append(f"{wanted - kept} comment or thread edit(s) whose finding or thread is gone")
+    return {"edits_kept": kept, "edits_not_kept": not_kept or None}
 
 
 def shown(target: Path, draft_id: str) -> dict[str, Any]:
@@ -2103,6 +2238,11 @@ def post(target: Path, draft_id: str) -> dict[str, Any]:
     if value.get("id") != draft_id or _draft_id(value) != draft_id:
         return {"status": "refused", "reason": "draft_changed",
                 "next": "the draft is not the one the developer approved: show RUN/review-draft.md again"}
+    changed = inputs_changed(value, agent_dir)
+    if changed:
+        return {"status": "refused", "reason": "inputs_changed", "changed": changed,
+                "next": "a check changed after the draft: CLI review next --target TARGET composes it again; "
+                        "show the new draft and ask for the OK again"}
     if value.get("shown") != draft_id:
         return {"status": "refused", "reason": "not_shown",
                 "next": f"the developer never saw draft {draft_id}: print RUN/{DRAFT_MD} as is "
@@ -2278,12 +2418,17 @@ def ticket(target: Path, skip: str | None) -> dict[str, Any]:
 
 def require_device(target: Path, reason: str) -> dict[str, Any]:
     """The Reviewer found a UI effect the file rule missed: the device runs. Never the other way."""
-    from android_workflow import cli
-
     agent_dir = agent_dir_for(target)
     state = _read(agent_dir / STATE_FILE)
     state["device_forced"] = reason
     _write(agent_dir / STATE_FILE, state)
+    _route_device(agent_dir)
+    return {"status": "device_required", "reason": reason}
+
+
+def _route_device(agent_dir: Path) -> None:
+    from android_workflow import cli
+
     spec_path = agent_dir / "ticket-spec.json"
     if spec_path.is_file():
         spec = cli.read_json(spec_path)
@@ -2292,7 +2437,6 @@ def require_device(target: Path, reason: str) -> dict[str, Any]:
             spec["surfaces"] = sorted(set(spec.get("surfaces") or []) - {"domain"} | {"ui"})
             spec["visual"] = True
             cli.write_json(spec_path, spec)
-    return {"status": "device_required", "reason": reason}
 
 
 def reply_inbox(pr: dict[str, Any], viewer: str | None, handled: set[str], since: float | None) -> list[dict[str, Any]]:
