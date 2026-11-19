@@ -662,8 +662,9 @@ def _fix_round(agent_dir: Path, team: dict[str, Any], findings: list[str], revie
         rest = [item for item in findings if not any(item in ids for ids in routed.values())]
         if rest:
             routed.setdefault("Tech Lead", []).extend(rest)
+        # fix_of/ids as for one Implementer: a team round that changes nothing then ends in a draft, not a loop.
         return _answer("fix", why, agent="aw-implementer", routes=routed, read=sources, stage="Implementer",
-                       note="fix round: " + ", ".join(findings))
+                       note="fix round: " + ", ".join(findings), ids=findings, fix_of=fingerprint)
     return _spawn("aw-implementer", why, mode="fix", ids=findings, read=sources, stage="Implementer",
                   note="fix round: " + ", ".join(findings), resume=True, fix_of=fingerprint)
 

@@ -95,7 +95,7 @@ CLI review finish --target MAIN --pr N                                   (merged
      carries the base build and the PR-head APK, so they build while the Planner and the Reviewer read.
    - `checks`: in the same turn, spawn every `run` agent (`aw-reviewer` mode `pr`/`pr-delta`,
      `aw-media`; a `run` entry with `tier: standard` uses the standard tier: the `pr-delta` review, and a
-     first-round `pr` review of a small diff with no risky area), run every `commands` entry, and start `also` in the background (base build and the
+     first-round `pr` review of a small diff with no risky area; `resume: true` resumes the earlier Reviewer with its `note` and `acceptance_regressions`), run every `commands` entry, and start `also` in the background (base build and the
      PR-head APK when the PR changes UI).
    - `fetch_design` / `spawn` with `with_agent` / `aw-media` mode `render`: as in android-workflow
      (*Execute*); every `then` is `CLI review next --target WT`.

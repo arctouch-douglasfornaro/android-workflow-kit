@@ -688,6 +688,12 @@ def start(main_target: Path, pr_ref: str, worktree: Path | None = None, download
                        if line.strip()]
         # The spec is what the PR claims: unchanged PR text and tickets → the Planner does not run again.
         keep_spec = state.get("claims") == claims and (agent_dir / SPEC_FILE).is_file()
+        # Preserve the prior review and its spec under their reviewed head for delta reconciliation.
+        for name in ("review.json", SPEC_FILE):
+            source = agent_dir / name
+            archive = agent_dir / f"{name}.{previous_head}"
+            if source.is_file() and not archive.exists():
+                archive.write_bytes(source.read_bytes())
         # A new round: the earlier round's verdicts and draft describe the old head.
         carry = _device_to_carry(agent_dir, state, previous_head)
         if carry:
@@ -1026,7 +1032,7 @@ def quiet_round(agent_dir: Path, context: dict[str, Any], state: dict[str, Any])
     """A delta round with nothing to say: we already approved an earlier head, and the Reviewer, the media
     and CI found nothing new on the new commits (every earlier thread addressed). Returns that approval.
     Posting another APPROVE then is noise: only the addressed threads are resolved, with the developer's OK."""
-    if int(state.get("round") or 1) < 2:
+    if int(state.get("round") or 1) < 2 or _acceptance_regressions(agent_dir, state):
         return None
     approved = _earlier_approval(state, context.get("head") or "")
     review = _review_json(agent_dir)
@@ -1141,7 +1147,27 @@ def _decide(target: Path, record: bool, no_device: bool) -> dict[str, Any]:
     run: list[dict[str, Any]] = []
     waiting: list[str] = []
     reviewer = _stage_status(target, "T6")
-    if reviewer != "completed" or not (agent_dir / "review.json").is_file():
+    lost = _acceptance_regressions(agent_dir, state) if reviewer == "completed" else []
+    if lost and state.get("regression_asked") == context["head"]:
+        return _answer("ask_user", "the Reviewer was asked once and still gives no reason why "
+                       + ", ".join(lost) + " lost the proof it had on the earlier head",
+                       question=f"{', '.join(lost)} were met on the earlier head and are now unmet/unverified "
+                                "with no reason: re-run the Reviewer, or say why and edit RUN/review.json?",
+                       then="CLI review next --target TARGET")
+    if lost:
+        # An AC met on the earlier head lost its proof with no reason given: the Reviewer explains it (or
+        # proves it again) before the draft, which refuses such a review. Asked once per head.
+        if record:
+            state["regression_asked"] = context["head"]
+            _write(agent_dir / STATE_FILE, state)
+        _log_started(target, "Reviewer", "explain lost AC proof: " + ", ".join(lost), record)
+        run.append({"agent": "aw-reviewer", "mode": "pr-delta", "stage": "Reviewer", "tier": "standard",
+                    "resume": True, "acceptance_regressions": lost,
+                    "note": ("met on the earlier head, now unmet/unverified: add `regression_reason` to each "
+                             "acceptance row (or prove it again) in RUN/review.json"),
+                    "read": ["RUN/review.json", f"RUN/review.json.{state['previous_head']}",
+                             f"RUN/{SPEC_FILE}", f"RUN/{DELTA_FILE}"]})
+    elif reviewer != "completed" or not (agent_dir / "review.json").is_file():
         if reviewer in {"started", "running"}:
             waiting.append("aw-reviewer")
         else:
@@ -1152,7 +1178,12 @@ def _decide(target: Path, record: bool, no_device: bool) -> dict[str, Any]:
                         **({"tier": "standard"} if delta or small else {}),
                         "read": [f"RUN/{CONTEXT_FILE}", f"RUN/{SPEC_FILE}", *ticket_read,
                                  *[item["diff"] for item in context.get("copies") or []]]
-                                + ([f"RUN/{DELTA_FILE}"] if delta else [])})
+                                + ([f"RUN/{DELTA_FILE}"] if delta else [])
+                                + ([f"RUN/review.json.{state['previous_head']}",
+                                    f"RUN/{SPEC_FILE}.{state['previous_head']}"]
+                                   if delta and state.get("previous_head")
+                                   and (agent_dir / f"review.json.{state['previous_head']}").is_file()
+                                   and (agent_dir / f"{SPEC_FILE}.{state['previous_head']}").is_file() else [])})
     media = [item for item in context.get("media") or [] if item.get("status") == "downloaded"]
     skip_media = media_not_needed(context, spec, state) if media else None
     if skip_media and state.get("media_skipped") != skip_media and record:
@@ -1168,6 +1199,12 @@ def _decide(target: Path, record: bool, no_device: bool) -> dict[str, Any]:
             run.append({"agent": "aw-media", "mode": "pr", "stage": None,
                         "read": [f"RUN/{CONTEXT_FILE}", f"RUN/{SPEC_FILE}", f"RUN/{PR_MEDIA_DIR}/"]})
     ci_report = _read(agent_dir / CI_FILE)
+    if ci_report.get("status") == "head_moved" and ci_report.get("head") != context["head"]:
+        # New commits on the PR: re-running `review ci` would answer head_moved again, forever.
+        return _answer("start", "the PR head moved to " + str(ci_report.get("head") or "?")[:7]
+                       + ": a new round reviews the new commits",
+                       command=f"CLI review start --target {state.get('main') or 'MAIN'} --pr {context['number']}",
+                       then="CLI review next --target TARGET")
     commands: list[str] = []
     if not ci_report or ci_report.get("status") == "head_moved":
         commands.append("CLI review ci --target TARGET")
@@ -1765,6 +1802,32 @@ def _acceptance(agent_dir: Path, context: dict[str, Any] | None = None,
     return rows
 
 
+def _acceptance_regressions(agent_dir: Path, state: dict[str, Any]) -> list[str]:
+    """Require an explanation when an unchanged criterion loses its prior proof."""
+    head = state.get("previous_head")
+    if not head:
+        return []
+    previous = _read(agent_dir / f"review.json.{head}")
+    old_spec = _read(agent_dir / f"{SPEC_FILE}.{head}")
+    new_spec = _read(agent_dir / SPEC_FILE)
+    old_text = {str(row.get("id")): row.get("text") for row in old_spec.get("acceptance", [])
+                if isinstance(row, dict) and row.get("text")}
+    new_text = {str(row.get("id")): row.get("text") for row in new_spec.get("acceptance", [])
+                if isinstance(row, dict) and row.get("text")}
+    old_met = {str(row.get("id")) for row in previous.get("acceptance", [])
+               if isinstance(row, dict) and row.get("status") == "met"}
+    regressions = []
+    for row in _review_json(agent_dir).get("acceptance", []):
+        if not isinstance(row, dict):
+            continue
+        key = str(row.get("id"))
+        if (key in old_met and old_text.get(key) and old_text.get(key) == new_text.get(key)
+                and row.get("status") in {"unmet", "unverified"}
+                and not str(row.get("regression_reason") or "").strip()):
+            regressions.append(key)
+    return regressions
+
+
 def draft(target: Path, allow_quiet: bool = True) -> dict[str, Any]:
     from android_workflow.cli import device_report_status, recorded_verdict, text_if_exists
 
@@ -1773,6 +1836,9 @@ def draft(target: Path, allow_quiet: bool = True) -> dict[str, Any]:
     state = _read(agent_dir / STATE_FILE)
     if not context:
         raise ValueError("no review context: run `CLI review start` first")
+    regressions = _acceptance_regressions(agent_dir, state)
+    if regressions:
+        raise ValueError("acceptance lost prior proof without regression_reason: " + ", ".join(regressions))
     config = review_config(target)
     # A redraft because a check changed keeps the developer's comment and thread edits; `draft` again on
     # the same checks is how the developer starts over, so it keeps none.
