@@ -158,7 +158,7 @@ and posts nothing without the developer's OK in that tab.
      ("Review PR #N: <title>"). `failed` → relay `error` and the script path the developer can run.
    - `skipped`: one line per PR with its `why` (draft, fork, bot, untrusted author). Never launch it;
      the developer starts it with `/android-review N` if they want.
-   - `queued` entries wait for a free slot (`review.inbox.max_parallel`, 2 by default); say so once.
+   - `queued` entries wait for a free slot (`review.inbox.max_parallel`, 5 by default); say so once.
    - `idle` / `timed_out`: wait again silently.
    - `offline`: GitHub is unreachable (network, VPN, sleep), not a login problem: wait again silently.
    Every listener is this loop, a scheduled or unattended run included (its prompt says so, e.g.

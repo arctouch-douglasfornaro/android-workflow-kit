@@ -83,7 +83,7 @@ Optional overrides read by the newer commands (all may be left out):
 | `review.inbox.drafts` | `false` | `review inbox`: start draft PRs too |
 | `review.inbox.author_associations` | `["OWNER", "MEMBER", "COLLABORATOR"]` | `review inbox`: authors whose PRs are built automatically; others are only reported |
 | `review.inbox.skip_authors` | `["dependabot", "renovate", "github-actions"]` | `review inbox`: authors never started (bots always skipped) |
-| `review.inbox.max_parallel` | `2` | `review inbox`: sessions still reviewing at once; a session that only watches its PR does not count |
+| `review.inbox.max_parallel` | `5` | `review inbox`: sessions still reviewing at once; a session that only watches its PR does not count |
 | `review.inbox.terminal` | `auto` (iTerm when it runs there, else Terminal.app) | `review launch`: `terminal`, `iterm`, or `command` |
 | `review.inbox.command` | none | `review launch`: with `terminal: command`, a shell command with `{script}` that opens a tab running it |
 | `review.inbox.agent_command` | `claude -n {name} {prompt}` | `review launch`: the agent session started in the tab (`{name}`, `{prompt}`, `{pr}`, `{target}`) |

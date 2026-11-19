@@ -89,6 +89,7 @@ class InboxTest(unittest.TestCase):
         self.assertEqual([i["pr"] for i in self.scan(pr(3, isDraft=False))["launch"]], [3])  # ready for review
 
     def test_max_parallel_queues_while_sessions_review_but_not_while_they_only_watch(self) -> None:
+        self.config["max_parallel"] = 2
         self.alive |= {1, 2}
         self.scan(pr(1), pr(2))
         found = self.scan(pr(1), pr(2), pr(3))

@@ -390,7 +390,7 @@ to the board.
 - It reports drafts, forks, bots (dependabot, renovate, github-actions) and authors outside
   `OWNER`/`MEMBER`/`COLLABORATOR` once and never launches them, because launching builds the PR's code
   on your machine. Start one by hand with `/android-review N`.
-- At most 2 reviews run at once (`review.inbox.max_parallel`). Others queue until a slot frees up.
+- At most 5 reviews run at once (`review.inbox.max_parallel`). Others queue until a slot frees up.
   A session that only watches its PR after the post does not count.
 - A PR that asks for your review again after you reviewed it is launched again only when its old
   session has ended (a live session already follows the PR).

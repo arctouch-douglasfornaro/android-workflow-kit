@@ -43,7 +43,7 @@ DEFAULT_INBOX = {
     "drafts": False,                 # draft PRs wait until they are ready for review
     "author_associations": ["OWNER", "MEMBER", "COLLABORATOR"],
     "skip_authors": ["dependabot", "renovate", "github-actions"],
-    "max_parallel": 2,               # sessions still reviewing (a session that only watches does not count)
+    "max_parallel": 5,               # sessions still reviewing (a session that only watches does not count)
     "terminal": "auto",              # auto | terminal | iterm | command
     "command": None,                 # terminal "command": a shell command with {script}, e.g. "open -a MyTerm {script}"
     "agent": "claude",               # claude | codex: the agent the tab runs, with its own prompt
