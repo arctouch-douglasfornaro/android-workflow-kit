@@ -68,8 +68,11 @@ The only planning role for `/android-workflow`. One pass, short output.
    filter. The Device
    `before` agent turns it into Maestro flows that `after` replays by code, so write it as numbered
    steps it can script with no guessing: each step `action → selector (text, test tag or id) → what is
-   visible next`, the preconditions (logged in, test data, flag), the deep link when the screen has one
-   (it beats tapping through screens), and for each behavior the **evidence name** it ends on, on the
+   visible next`. A Compose test tag is a Maestro `id:` only when the app sets `testTagsAsResourceId =
+   true` (grep for it); without it, the selector is the visible text or content description, with the
+   tag in parentheses as code evidence (`text: "Save"` (tag `editor_save`)), and an element the change
+   adds is selected by the text it will show, not only by its new tag. Then the preconditions (logged
+   in, test data, flag), the deep link when the screen has one (it beats tapping through screens), and for each behavior the **evidence name** it ends on, on the
    step's own line as ``Capture `<surface>-happy` `` (`<surface>`, `<surface>-happy`,
    `<surface>-error-retry`): `CLI device scaffold` makes one flow per name it finds there. Never name a
    device serial or tell the Device which emulator to avoid: the CLI leases a device to the run.
