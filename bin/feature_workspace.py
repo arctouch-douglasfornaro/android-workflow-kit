@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Resolve and create the feature-workflow working branch (or worktree).
+"""Resolve and create the ticket's working branch (or worktree) for the android-workflow CLI.
 
-Self-contained, token-cheap helper for the `workspace-agent` (feature-workflow
-setup phase). From a ticket id + title it does ALL the deterministic work so the
-agent only has to run it and report:
+From a ticket id + title it does all the deterministic work so the agent only has
+to run it and report:
 
   * resolves the base/default branch (never hardcodes master/main);
   * derives `<username>` — preferring the prefix the person already uses on their
@@ -360,7 +359,7 @@ def emit(result):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Create the feature-workflow working branch/worktree")
+    parser = argparse.ArgumentParser(description="Create the ticket's working branch/worktree")
     parser.add_argument("--ticket", required=True, help="Ticket id, e.g. MF-1234 (LOCAL- fallback if invalid)")
     parser.add_argument("--title", required=True, help="Short ticket title/description")
     parser.add_argument("--username", help="Override the derived `<username>` branch prefix")
@@ -424,8 +423,7 @@ def main(argv=None):
     if current == "HEAD":
         # Detached HEAD. `current_branch` returns the literal "HEAD", so the plain `!= base` test
         # below would report `noop-non-base` with `branch: HEAD` and exit 0, declaring the workspace
-        # healthy. `feature_ship.py` refuses "HEAD" outright, so the run would complete every phase
-        # and then hard-fail at delivery. Treat it like the base branch: create the feature branch.
+        # healthy, and delivery would later fail to push a branch named "HEAD". Treat it like the base branch: create the feature branch.
         current = base
         result["current_branch"] = "HEAD (detached)"
 

@@ -65,6 +65,7 @@ The repository mirrors `~/.ai`, which is where every host reads it from.
 | `skills/android-workflow/agents/` | The eight `aw-*` agents: setup, planner, tech lead, implementer, reviewer, device, delivery, PR watcher. |
 | `skills/device-driving/` | How the Device agent drives the phone or emulator (Maestro first, adb fallback). |
 | `skills/investigate-first/` | Finding the cause of a bug or crash before editing: symptom, traced path, ranked hypotheses, cause with `file:line` or the blocker. |
+| `skills/create-ticket/` | Writes a ticket (title, description, acceptance criteria, tech detail) as text; filing it in a tracker is a separate step. |
 | `skills/android/` | Universal Android skills (Compose, Compose performance, performance, navigation, edge-to-edge, screenshots, Android CLI, ktlint) and `catalog.json`, the topics each one covers. The workflow picks them per ticket. |
 | `tools/android-workflow/` | The Python package behind the `android-workflow` CLI, with its tests. |
 | `bin/` | `android-workflow` launcher plus the helpers the CLI calls: `feature_setup.py` (project profile), `feature_workspace.py` (ticket branch/worktree) and `android_probe.py`. |
