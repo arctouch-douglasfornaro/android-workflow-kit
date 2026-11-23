@@ -67,6 +67,8 @@ The repository mirrors `~/.ai`, which is where every host reads it from.
 | `skills/android/` | Universal Android skills (Compose, Compose performance, performance, navigation, edge-to-edge, screenshots, Android CLI, ktlint) and `catalog.json`, the topics each one covers. The workflow picks them per ticket. |
 | `tools/android-workflow/` | The Python package behind the `android-workflow` CLI, with its tests. |
 | `bin/` | `android-workflow` launcher plus the helpers the CLI calls: `feature_setup.py` (project profile), `feature_workspace.py` (ticket branch/worktree) and `android_probe.py`. |
+| `skills/eval-playbook/`, `evals/`, `bin/skill_eval.py` | Evals for the agents' instructions: cases on a synthetic app, checks, a Codex judge and a score history. |
+| `AGENTS.md` | Rules for coding agents working on this kit (run the evals after changing an agent). |
 
 ## Install
 
@@ -417,3 +419,8 @@ Details: [`skills/android-review/SKILL.md`](skills/android-review/SKILL.md) and 
 cd ~/.ai/tools/android-workflow && python3 -m unittest discover -s tests
 cd ~/.ai/bin && python3 -m unittest discover -p '*_test.py'
 ```
+
+Unit tests cover the CLI, not what the agents do with their instructions. After changing an agent's
+`.md` or a workflow `SKILL.md`, ask Claude Code in `~/.ai` to "run the evals" (`/eval-playbook`): it runs
+each affected case on a synthetic app, scores it with Codex as the judge and prints the delta against
+the last run (`python3 ~/.ai/bin/skill_eval.py report`).
