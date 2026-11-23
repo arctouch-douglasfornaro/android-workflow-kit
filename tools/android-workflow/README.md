@@ -11,7 +11,8 @@ How the workflow runs (stages, agents, levels, stops) is described in one place 
 
 | Command | What it does |
 |---|---|
-| `setup --target APP [--source-repo MAIN] [--accept] [--force]` | Project profile and quality-gate facts, once per build configuration |
+| `setup --target APP [--source-repo MAIN] [--accept] [--force]` | Project profile and quality-gate facts, once per build configuration. Every run checks; `missing_steps` names only what is missing (`profile`, `profile_delta` with the build files that changed or the rows edited since acceptance, `profile_sections`, `variants`, `formatter`, `app_id`, `feature_map`) and `spawn` the Setup agents for them (the feature map never blocks). A learned `## Device recipes` line is not an edit |
+| `feature-map --target APP [--source-repo MAIN] [--init] [--learn ROWS.md]` | The app's feature map, `.ai/feature-map.md` in the main checkout: `status` (`missing`, `stale` while a release-manifest activity or navigation-graph file is neither mapped nor under Not mapped, else `ok`), `uncovered`, `orphans`. `--learn` merges a file's Surfaces / Not mapped rows by name under a lock and refuses logins and secrets |
 | `start --target APP --id ID --title "…"` | New ticket folder, `ticket-spec.json`, `change-set-map.json` |
 | `resume --target APP --question-id Q --answer "…"` | Answers a business question that paused the run |
 | `update-spec --target APP --surfaces ui --acceptance "a\|b"` | Planner corrections; the route is recomputed |

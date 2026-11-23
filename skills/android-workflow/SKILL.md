@@ -83,7 +83,7 @@ acceptance criteria come from the issue and its comments.
 
 | Role | Agent | Tier | Runs |
 |---|---|---|---|
-| Setup | `aw-setup` | strong | only when `CLI setup` says `needs_setup_agent` (a build change, not a dependency-version bump) |
+| Setup | `aw-setup` | strong (only small steps: standard) | only for the `missing_steps` of `CLI setup`, with the tier its `spawn` entry names |
 | Planner | `aw-planner` | strong | standard and full levels |
 | Tech Lead | `aw-tech-lead` | standard | only for a team (`CLI next` decides, Execute 4): splits the plan into slices, then integrates them |
 | Implementer | `aw-implementer` | standard | always: code **and** its unit tests; resumed for every fix round. A team runs up to 3 at once, one per slice |
@@ -127,6 +127,7 @@ refuses a command (`pr merge` included), tell the developer and stop; never retr
 ```text
 python3 ~/.ai/bin/feature_workspace.py --repo-root T --ticket ID --title "…" [--worktree]
 CLI next     --target T [--no-device] [--no-watch] [--level express|standard] [--dry-run]   (the next action)
+CLI feature-map --target T [--init] [--learn ROWS.md]   (the shared map: path, status, uncovered entry points)
 CLI setup    --target T [--source-repo MAIN]        CLI start    --target T --id ID --title "…" [--type bug --reproduction "…"] [--level L]
 CLI resume   --target T --question-id Q --answer "…" CLI update-spec --target T --surfaces ui --acceptance "a|b"
 CLI prebuild --target T [--wait [--timeout S]|--status] [--force]   CLI gate     --target T
@@ -177,8 +178,12 @@ CLI cleanup --target T [--all] [--pr N] [--base] [--dry-run]   (worktrees of mer
    `ready` → reuse (the profile is inherited or refreshed when only dependency versions moved). A
    worktree adopts the main checkout's accepted setup by itself (`adopted_setup`) when no build file
    differs; never copy the profile or run `setup --accept` by hand.
-   `needs_setup_agent` → spawn `aw-setup` with the JSON; its questions are batched to the user
-   once; a missing formatter or app id never blocks a domain-only ticket.
+   Every run checks; only what is missing runs. For each entry in `spawn`, spawn `aw-setup` with its
+   `steps` and `tier` and the JSON: a `blocking` entry (`needs_setup_agent`) finishes before `start`,
+   its questions batched to the user once; the `feature_map` entry runs in the background and is never
+   waited on (the Planner and the Device use the map when it is there). `profile` is a full Setup;
+   `profile_delta` re-checks only the build files that changed or the rows edited since acceptance. A
+   missing formatter or app id never blocks a domain-only ticket.
 3. **Ticket:** `CLI start` (add `--type bug --reproduction "..."`, `--acceptance "a|b"`,
    `--surfaces` when known, and the developer's `--level` and `--no-device`). It writes `ticket-spec.json` (with the
    level the rules give) and `change-set-map.json` (the likely files).

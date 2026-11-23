@@ -7,17 +7,53 @@ tools: Read, Grep, Glob, Bash, Write
 
 # Agent: aw-setup
 
-android-workflow Setup. Runs only when `CLI setup` returns `needs_setup_agent`; the result is
-reused by every ticket until the build configuration changes. Precision here pays back on
+android-workflow Setup. Runs only for what `CLI setup` lists in `missing_steps` (the orchestrator
+passes `steps` from its `spawn` entry); the result is reused by every ticket until the build
+configuration changes. Precision here pays back on
 every run, so prove each fact from a file; unknown stays empty. A worktree whose build files
 match the main checkout's accepted setup never gets here (`setup` adopts it); when `adopted_setup`
 says why it did not (`reason`: the build files that differ), learn what those files change, not
 the whole project again.
 
+## Steps: do only what is missing
+
+`steps` decides the scope. Work outside it is wasted: the rest of the profile was already verified.
+
+| Step | What to do |
+|---|---|
+| `profile` | Everything under Work below (missing, never accepted, or `--force`) |
+| `profile_delta` | Only what its `why` names. `build_changed`: read `changed_build_files` and fix the rows they affect (a new module's tasks, a plugin, a flavor); `profile_edited`: `diff` `accepted_snapshot` against the profile and confirm each changed row from a file (keep a correct human edit, fix a wrong one); `cited_file_missing`: point each row at the file's new place (`cited_files_missing`) |
+| `profile_sections` | Fill only the empty `sections` (Work steps 1, 6, 7 as they apply) |
+| `variants` | Work step 3 only |
+| `formatter` | The formatter half of Work step 1 only |
+| `app_id` | Work step 4, the applicationId and launch entry only |
+| `feature_map` | Feature map, below. Nothing else, and no `--accept` |
+
+Profile steps end with `CLI setup --target TARGET --accept` (it refuses while one is unresolved).
+
+## Feature map (step `feature_map`)
+
+`CLI feature-map --target TARGET [--source-repo MAIN]` gives the map's `path` (the main checkout's
+`.ai/feature-map.md`, shared by every worktree) and its `uncovered` entry points: release-manifest
+activities and the files that build a navigation graph. Run it with `--init` when `status` is `missing`.
+
+1. For each surface a ticket could change, one row under `## Surfaces`: `Surface` (what a person calls
+   it), `Entry` (activity class or route), `How to reach` (numbered steps from a cold launch, each
+   `action → selector → what is visible next`, joined with `→`, never `|`), `Deep link` (from the
+   intent filter, never guessed), `Selectors` (test tags / ids that prove you arrived), `Prerequisites`
+   (logged in, a feature flag pin, test data; a test account by its role, never a login), `Source`
+   (`path:line` of the screen). Start from `## Device recipes` in the profile and the existing Maestro flows.
+2. Entry points no ticket drives on a device (debug menus, test harness, internal tools, legacy
+   redirects) go under `## Not mapped` with one line why; a glob covers a family (`*Debug*`).
+3. Write the rows to a file and `CLI feature-map --target TARGET --learn <file>` (it merges by
+   Surface and refuses logins and secrets). Repeat until `status` is `ok`. With `uncovered` already
+   past 40, finish the most used surfaces first; what is left stays `stale` and the Device fills it in
+   as runs reach it.
+
 ## Inputs
 
-- `TARGET`, `CLI`, and the JSON from `CLI setup --target TARGET` (`reasons`, `probe`,
-  `quality`, `gate_commands`, `module_commands`).
+- `TARGET`, `CLI`, `steps`, and the JSON from `CLI setup --target TARGET` (`missing_steps`,
+  `reasons`, `probe`, `quality`, `gate_commands`, `module_commands`).
 - `.ai/workflow/_setup/probe.md` (cheap regex facts), `.ai/project-profile.md`.
 - Repository rules: `AGENTS.md`, `CLAUDE.md`, `.cursor/rules/`, `.editorconfig`, detekt/lint
   configs, PR template, CONTRIBUTING.
@@ -90,8 +126,9 @@ the whole project again.
 
 ## Return (≤10 lines)
 
-`READY` or the unresolved facts as one batched question, formatter, variant, app id, number of
-code-pattern rows, profile path.
+`READY` or the unresolved facts as one batched question, the steps done, formatter, variant, app id,
+number of code-pattern rows, profile path; for `feature_map`, its rows, the entry points left uncovered
+and the map path.
 
 ## Never
 

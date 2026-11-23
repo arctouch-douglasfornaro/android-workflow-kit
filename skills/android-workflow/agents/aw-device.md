@@ -77,6 +77,8 @@ the behavior only a running app shows.
 ## Inputs
 
 - `TARGET`, `RUN`, CLI, mode, `plan.md` (navigation recipe, device AC, `visual`).
+- The feature map (`CLI feature-map --target TARGET` → `path`): the route, deep link and selectors of
+  each surface, when the recipe leaves a hop out.
 - `serial`: the device `CLI next` leased to this run. Use only that serial (`adb -s`, `maestro
   --device`), never another one: another run may be installing its own build on it right now. Not
   ready → return `BLOCKED` (never PASS without a device). Never start, wipe or close an emulator
@@ -127,8 +129,8 @@ the behavior only a running app shows.
    every AC still open under Not verified with the reason. Only when Maestro truly cannot run here
    (device-driving §9) write the line `Maestro: unavailable — <the failure>` in the report: it is the
    one way a PASS is recorded without a replay, and the PR says so.
-3. Launch and follow the navigation recipe (express level has none: derive it from the
-   profile's Device rows and the NavHost/intent code for the changed screen). When it names a project
+3. Launch and follow the navigation recipe (express level has none: derive it from the feature
+   map's row, the profile's Device rows and the NavHost/intent code for the changed screen). When it names a project
    skill (`.ai/skills/<name>/SKILL.md`, e.g. how to cold-launch with feature-flag pins) read and follow
    it before the first launch; a flag that does not take effect is a launch problem to fix that way, not
    a reason to report BLOCKED: `CLI device launch --target TARGET --serial S --pins '<json>' --link <uri>`
@@ -163,12 +165,16 @@ the behavior only a running app shows.
    other phase: when they show the same screen, ingest the `after` file again under the `before`
    name (`--name <before name>`) and delete the old `after` file, so the PR table pairs them.
 7. Real failure: rerun once. Second failure = FAIL (first failure only = flaky, note it).
-8. A navigation step you had to discover by hand (a feature-flag override, a debug menu, a deep link,
-   a login hop) that took more than a minute: save it as a reusable Maestro subflow in
+8. Teach the next run what you had to find out. A surface you reached whose route the feature map
+   lacks or has wrong: write its row (same columns as the map's `## Surfaces`, the route that worked,
+   the selectors that proved arrival, `Source` as `path:line`) to `RUN/feature-map-rows.md` and run
+   `CLI feature-map --target TARGET --learn RUN/feature-map-rows.md` (it merges into the main
+   checkout's map). A hop that is not one surface's route (a feature-flag override, a debug menu, a
+   login) and took more than a minute: save it as a reusable Maestro subflow in
    `RUN/media/flows/_<name>.yaml` and add one line under `## Device recipes` in the **main checkout's**
    `.ai/project-profile.md` (`main` in `RUN/review-state.json` for a PR review, else `TARGET`):
-   what it does and the steps, so the next run copies it instead of rediscovering it. Never write
-   credentials or user data there.
+   what it does and the steps. A learned recipe never sends the project back to Setup. Never write
+   credentials or user data in either place.
 9. Leave the test account as you found it: undo what the checks changed (a starred term, a setting,
    a downloaded set). What you could not undo goes in the report under Not verified as "State left
    on the account: …".

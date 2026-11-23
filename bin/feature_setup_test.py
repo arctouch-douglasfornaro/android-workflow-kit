@@ -239,6 +239,54 @@ class StructuralRefreshTests(unittest.TestCase):
         wrapper.write_text("distributionUrl=https\\://services.gradle.org/distributions/gradle-8.11-bin.zip\n")
         self.assertEqual(structural, setup.digests(self.root)[1])
 
+    def _accepted(self):
+        setup.ensure(self.root, no_probe=True)
+        setup.ensure(self.root, accept=True)
+        return self.root / ".ai/project-profile.md"
+
+    def test_first_run_says_why(self):
+        fresh = Path(self.tmp.name) / "fresh"
+        fresh.mkdir()
+        (fresh / "settings.gradle.kts").write_text('include(":app")')
+        result = setup.ensure(fresh, no_probe=True)
+        self.assertEqual(result["why"], ["missing", "not_accepted"])
+
+    def test_a_learned_device_recipe_keeps_the_profile_accepted(self):
+        profile = self._accepted()
+        profile.write_text(profile.read_text() + "\n## Device recipes\n\n- Set page: open Recents, tap the set\n")
+        result = setup.ensure(self.root, no_probe=True)
+        self.assertFalse(result["requires_explorer"])
+        profile.write_text(profile.read_text() + "- Learn: deep link quizlet://learn\n")
+        self.assertFalse(setup.ensure(self.root, no_probe=True)["requires_explorer"])
+
+    def test_an_edit_outside_learned_sections_still_needs_review_and_names_the_snapshot(self):
+        profile = self._accepted()
+        profile.write_text(profile.read_text().replace("## Device recipes", "") + "\nChanged install command\n")
+        result = setup.ensure(self.root, no_probe=True)
+        self.assertTrue(result["requires_explorer"])
+        self.assertEqual(result["why"], ["profile_edited"])
+        self.assertTrue(Path(result["accepted_snapshot"]).is_file())
+
+    def test_a_build_change_names_the_files_that_changed(self):
+        self._accepted()
+        (self.root / "feature").mkdir()
+        (self.root / "feature/build.gradle.kts").write_text('plugins { id("com.android.library") }')
+        result = setup.ensure(self.root, no_probe=True)
+        self.assertEqual(result["why"], ["build_changed"])
+        self.assertEqual(result["changed_build_files"], ["feature/build.gradle.kts"])
+        again = setup.ensure(self.root, no_probe=True)
+        self.assertEqual(again["changed_build_files"], ["feature/build.gradle.kts"])
+
+    def test_a_state_from_before_per_file_digests_is_still_accepted(self):
+        profile = self._accepted()
+        state = setup.load_metadata(self.root)
+        for key in ("accepted_files", "accepted_profile_digest"):
+            state.pop(key)
+        state["profile_digest"] = setup.hashlib.sha256(profile.read_bytes()).hexdigest()
+        setup.metadata_path(self.root).write_text(setup.json.dumps(state))
+        self.assertFalse(setup.ensure(self.root, no_probe=True)["requires_explorer"])
+        self.assertIn("accepted_files", setup.load_metadata(self.root))
+
 
 if __name__ == "__main__":
     unittest.main()

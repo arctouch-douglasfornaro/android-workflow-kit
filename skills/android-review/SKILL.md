@@ -79,7 +79,8 @@ CLI review finish --target MAIN --pr N                                   (merged
    Relay a `bootstrap` failure (submodule, `local.properties`) and stop until the developer answers.
    `not_open` / `dirty_worktree` → tell the developer and stop. First chat line: PR, `WT`, `RUN`, UI
    change yes/no, media found/downloaded.
-2. `CLI setup --target WT --source-repo MAIN` (`needs_setup_agent` → `aw-setup`, as in android-workflow).
+2. `CLI setup --target WT --source-repo MAIN`: spawn each `spawn` entry as in android-workflow (blocking
+   ones before `review next`, `feature_map` in the background; the map lives in MAIN).
 3. Loop on `CLI review next --target WT` and do the one thing it returns:
    - `fetch_ticket`: for each of `keys`, read the issue from its tracker in `sources`: `jira` → the
      Jira tool (Atlassian `getJiraIssue`); `linear` → the Linear tool (`get_issue`, then

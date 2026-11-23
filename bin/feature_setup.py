@@ -62,9 +62,16 @@ def digests(root: Path) -> tuple[str, str]:
     Content, not checkout timestamps; include module and convention-plugin configuration. The
     structural one ignores dependency version bumps only.
     """
+    exact, structural, _ = scan(root)
+    return exact, structural
+
+
+def scan(root: Path) -> tuple[str, str, dict[str, str]]:
+    """`digests` plus the structural digest of each file, so a changed build names its files."""
     root = root.resolve()
     exact = hashlib.sha256()
     structural = hashlib.sha256()
+    shapes: dict[str, str] = {}
     convention_roots = []
     for settings in (root / "settings.gradle", root / "settings.gradle.kts"):
         if settings.is_file():
@@ -89,11 +96,13 @@ def digests(root: Path) -> tuple[str, str]:
                             and any(path.is_relative_to(p) for p in convention_roots)))
             if relevant:
                 content = path.read_bytes() if not path.is_symlink() else os.readlink(path).encode()
-                for hasher, data in ((exact, content), (structural, structural_text(name, content))):
+                shape = structural_text(name, content)
+                shapes[rel] = hashlib.sha256(shape).hexdigest()
+                for hasher, data in ((exact, content), (structural, shape)):
                     hasher.update(rel.encode() + b"\0")
                     hasher.update(data)
                     hasher.update(b"\0")
-    return exact.hexdigest(), structural.hexdigest()
+    return exact.hexdigest(), structural.hexdigest(), shapes
 
 
 def configuration_digest(root: Path) -> str:
@@ -118,6 +127,29 @@ def atomic_write(path: Path, text: str) -> None:
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
+
+
+# Sections agents append to as they learn (a Device run's navigation hop): never a reason to set up again.
+LEARNED_SECTIONS = ("Device recipes",)
+
+
+def trusted_text(text: str) -> str:
+    """The profile without its learned sections: what Setup verified and acceptance covers."""
+    for heading in LEARNED_SECTIONS:
+        text = re.sub(rf"^## {re.escape(heading)}\s*$.*?(?=^## |\Z)", "", text, flags=re.M | re.S)
+    return re.sub(r"\n{3,}", "\n\n", text).strip() + "\n"
+
+
+def profile_digest(path: Path) -> str:
+    return hashlib.sha256(trusted_text(path.read_text(errors="replace")).encode()).hexdigest()
+
+
+def accepted_snapshot_path(root: Path) -> Path:
+    return root / ".ai/workflow/_setup/profile-accepted.md"
+
+
+def changed_files(before: dict[str, str], now: dict[str, str]) -> list[str]:
+    return sorted(path for path in set(before) | set(now) if before.get(path) != now.get(path))
 
 
 def metadata_path(root: Path) -> Path:
@@ -220,7 +252,7 @@ def ensure(root: Path, source: Path | None = None, no_probe: bool = False,
     if not any((root / n).is_file() for n in ("settings.gradle", "settings.gradle.kts")):
         raise ValueError("No Gradle settings file; refusing to create an Android profile")
     profile = root / ".ai/project-profile.md"
-    fingerprint, structure = digests(root)
+    fingerprint, structure, files = scan(root)
     state = load_metadata(root)
     copied = False
     refreshed = False
@@ -241,16 +273,27 @@ def ensure(root: Path, source: Path | None = None, no_probe: bool = False,
             )
             if same_configuration or same_structure:
                 atomic_write(profile, source_profile.read_text())
+                if accepted_snapshot_path(source).is_file():
+                    atomic_write(accepted_snapshot_path(root), accepted_snapshot_path(source).read_text())
                 state = {**source_state, "configuration": fingerprint, "structure": structure}
+                if state.get("accepted_files") is not None:
+                    state["accepted_files"] = files  # same structure as the source's accepted build
                 copied = True
     created = not profile.exists()
     if created:
         atomic_write(profile, minimal_profile(root))
     if created:
         state = {}
-    profile_digest = hashlib.sha256(profile.read_bytes()).hexdigest()
-    if state.get("profile_digest") != profile_digest and not copied:
+    digest = profile_digest(profile)
+    raw_digest = hashlib.sha256(profile.read_bytes()).hexdigest()
+    # A raw digest is what states written before learned sections were left out recorded.
+    if state.get("profile_digest") not in (digest, raw_digest) and not copied:
         state["complete"] = False
+    if (state.get("complete") and state.get("accepted_files") is None
+            and state.get("configuration") == fingerprint):
+        # Accepted before per-file digests existed and still fresh: this build is the accepted one.
+        state["accepted_files"] = files
+        state["accepted_profile_digest"] = digest
     if (
         not created and not copied and not force
         and state.get("complete") and state.get("configuration") != fingerprint
@@ -266,8 +309,33 @@ def ensure(root: Path, source: Path | None = None, no_probe: bool = False,
         if state.get("configuration") != fingerprint:
             raise ValueError("Configuration changed; run --ensure before accepting the profile")
         state["complete"] = True
+        state["accepted_files"] = files
+        state["accepted_profile_digest"] = digest
+        atomic_write(accepted_snapshot_path(root), trusted_text(profile.read_text()))
     fresh = state.get("configuration") == fingerprint and state.get("complete", False)
     needs_explorer = force or not fresh
+    why: list[str] = []
+    changed: list[str] = []
+    cited: list[str] = []
+    if needs_explorer:
+        if force:
+            why.append("forced")
+        if created:
+            why.append("missing")
+        baseline = state.get("accepted_files")
+        if created or baseline is None or not state.get("accepted_profile_digest"):
+            why.append("not_accepted")
+        else:
+            if digest != state.get("accepted_profile_digest"):
+                why.append("profile_edited")
+            changed = changed_files(baseline, files)
+            if changed:
+                why.append("build_changed")
+            cited = missing_exemplars(profile.read_text(), root)
+            if cited:
+                why.append("cited_file_missing")
+            if not why:
+                why.append("not_accepted")
     probe_path = root / ".ai/workflow/_setup/probe.md"
     if needs_explorer and not no_probe and not accept:
         result = subprocess.run(
@@ -280,13 +348,21 @@ def ensure(root: Path, source: Path | None = None, no_probe: bool = False,
         "structure": structure,
         "complete": bool(accept or (fresh and not force)),
         "profile": str(profile),
-        "profile_digest": profile_digest,
+        "profile_digest": digest,
     }
+    for key in ("accepted_files", "accepted_profile_digest"):
+        if state.get(key) is not None:
+            next_state[key] = state[key]
     atomic_write(metadata_path(root), json.dumps(next_state, indent=2) + "\n")
+    snapshot = accepted_snapshot_path(root)
     return {
         "profile": str(profile), "created": created, "copied_from_worktree_source": copied,
         "refreshed_without_agent": refreshed,
         "requires_explorer": not next_state["complete"],
+        "why": why,
+        "changed_build_files": changed,
+        "cited_files_missing": cited,
+        "accepted_snapshot": str(snapshot) if "profile_edited" in why and snapshot.is_file() else None,
         "probe": str(probe_path) if probe_path.exists() else None,
         "status": "ready" if next_state["complete"] else "partial",
     }

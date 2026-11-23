@@ -83,7 +83,7 @@ def media_dir(target: Path, ticket_id: str | None = None) -> Path:
     return run_dir(target, ticket_id) / MEDIA_NAME
 
 
-LOCAL_ONLY_PATHS = (".ai/workflow/", ".ai/project-profile.md", ".ai/android-workflow.json")
+LOCAL_ONLY_PATHS = (".ai/workflow/", ".ai/project-profile.md", ".ai/android-workflow.json", ".ai/feature-map.md")
 
 
 def git_exclude_file(target: Path) -> Path | None:

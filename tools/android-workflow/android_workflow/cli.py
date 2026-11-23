@@ -720,12 +720,24 @@ def build_files(root: Path) -> dict[str, str]:
     return found
 
 
+def _setup_helper() -> Any:
+    if str(KIT_BIN) not in sys.path:
+        sys.path.insert(0, str(KIT_BIN))
+    import feature_setup  # type: ignore[import-not-found]
+
+    return feature_setup
+
+
 def _accepted_setup(root: Path) -> bool:
-    """Setup there was accepted and its profile not edited since."""
+    """Setup there was accepted and its profile not edited since (a learned Device recipe is no edit)."""
     state = read_json(root / SETUP_STATE_FILE) if (root / SETUP_STATE_FILE).is_file() else {}
     profile = root / PROFILE_FILE
-    return bool(state.get("complete") and profile.is_file()
-                and hashlib.sha256(profile.read_bytes()).hexdigest() == state.get("profile_digest"))
+    if not (state.get("complete") and profile.is_file()):
+        return False
+    digests = {hashlib.sha256(profile.read_bytes()).hexdigest()}
+    with contextlib.suppress(Exception):
+        digests.add(_setup_helper().profile_digest(profile))
+    return state.get("profile_digest") in digests
 
 
 DEPENDENCY_LINE = re.compile(
@@ -810,6 +822,34 @@ def adopt_setup(target: Path, source: Path) -> dict[str, Any] | None:
     return {"adopted": True, "from": str(source)}
 
 
+# Why the profile needs Setup again, from `feature_setup.py`. These have a known scope (the build files that
+# changed, the rows edited since the accepted snapshot, the exemplars that disappeared), so Setup re-checks
+# only that; anything else (missing, never accepted, forced) is a full Setup.
+DELTA_SETUP_REASONS = frozenset({"build_changed", "profile_edited", "cited_file_missing"})
+FULL_SETUP_STEPS = frozenset({"profile"})
+
+
+def feature_map_home(target: Path, source_repo: Path | None = None) -> Path:
+    """The checkout whose `.ai/feature-map.md` every worktree of the app shares: the main one."""
+    return (source_repo or main_worktree(target) or target).resolve()
+
+
+def setup_spawns(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The Setup agents to start for the missing steps: one for everything that blocks the ticket (strong
+    when the profile is involved, else standard), one more in the background for the feature map."""
+    blocking = [step["step"] for step in steps if step.get("blocking")]
+    spawns: list[dict[str, Any]] = []
+    if blocking:
+        if FULL_SETUP_STEPS & set(blocking):
+            blocking = ["profile"]  # a full Setup covers the sections, variants, formatter and app id
+        strong = bool({"profile", "profile_delta"} & set(blocking))
+        spawns.append({"agent": "aw-setup", "steps": blocking, "tier": "strong" if strong else "standard",
+                       "blocking": True})
+    if any(step["step"] == "feature_map" for step in steps):
+        spawns.append({"agent": "aw-setup", "steps": ["feature_map"], "tier": "standard", "blocking": False})
+    return spawns
+
+
 def run_setup(
     target: Path,
     force: bool = False,
@@ -851,24 +891,52 @@ def run_setup(
     quality = config["detected"]["quality"]
     overrides = durable_overrides(target)
     reasons: list[str] = []
+    steps: list[dict[str, Any]] = []
     if helper.get("requires_explorer"):
-        reasons.append("profile is missing, stale or not accepted")
-    reasons.extend(profile_gaps(target))
+        why = [str(item) for item in helper.get("why") or ["not_accepted"]]
+        reasons.append("profile is missing, stale or not accepted (" + ", ".join(why) + ")")
+        if set(why) <= DELTA_SETUP_REASONS:
+            steps.append({"step": "profile_delta", "why": why, "blocking": True,
+                          "changed_build_files": helper.get("changed_build_files") or [],
+                          "cited_files_missing": helper.get("cited_files_missing") or [],
+                          "accepted_snapshot": helper.get("accepted_snapshot")})
+        else:
+            steps.append({"step": "profile", "why": why, "blocking": True})
+    gaps = profile_gaps(target)
+    reasons.extend(gaps)
+    if gaps:
+        steps.append({"step": "profile_sections", "blocking": True,
+                      "sections": [re.sub(r"^profile section `(.*)` is empty$", r"\1", gap) for gap in gaps]})
     if quality["has_product_flavors"] and "unit_tests" not in (overrides.get("module_commands") or {}):
         reasons.append(
             "product flavors found "
             f"({', '.join(quality['product_flavors']) or 'names unresolved'}); "
             "record the real compile/test/lint/install tasks in .ai/android-workflow.json"
         )
+        steps.append({"step": "variants", "blocking": True, "flavors": quality["product_flavors"]})
     if not config["commands"].get("format_check") and "format_check" not in (overrides.get("commands") or {}):
         reasons.append("no formatter detected; confirm none exists or record it")
+        steps.append({"step": "formatter", "blocking": True})
     if not (config.get("device") or {}).get("application_id"):
         reasons.append("debug applicationId / launch entry not recorded")
+        steps.append({"step": "app_id", "blocking": True})
     if accept and reasons:
         raise ValueError("cannot accept setup: " + "; ".join(reasons))
+    from android_workflow import feature_map
+
+    map_home = feature_map_home(target, source_repo)
+    map_status = feature_map.status(target, map_home)
+    if map_status["status"] != "ok":
+        steps.append({"step": "feature_map", "blocking": False, "status": map_status["status"],
+                      "path": map_status["path"], "uncovered_count": map_status["uncovered_count"],
+                      "uncovered": map_status["uncovered"],
+                      "incomplete_rows": map_status.get("incomplete_rows") or []})
     return {
         "status": "ready" if not reasons else "needs_setup_agent",
         "reasons": reasons,
+        "missing_steps": steps,
+        "spawn": setup_spawns(steps),
+        "feature_map": {key: map_status.get(key) for key in ("path", "status", "rows", "uncovered_count", "orphans")},
         **({"adopted_setup": adopted} if adopted else {}),
         "profile": str(target / PROFILE_FILE),
         "probe": helper.get("probe"),
@@ -2665,7 +2733,7 @@ def source_changes(target: Path) -> list[str]:
     return sorted(changed)
 
 
-WORKFLOW_AI_ENTRIES = frozenset({"workflow", "android-workflow.json", "project-profile.md"})
+WORKFLOW_AI_ENTRIES = frozenset({"workflow", "android-workflow.json", "project-profile.md", "feature-map.md"})
 
 
 def is_workflow_file(name: str, tracked: Collection[str]) -> bool:
@@ -4250,6 +4318,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     setup_parser.add_argument("--force", action="store_true", help="re-probe even if nothing changed")
     setup_parser.add_argument("--accept", action="store_true", help="record that the Setup agent verified the profile")
     setup_parser.add_argument("--source-repo", type=Path, help="main checkout whose setup a worktree may reuse")
+    map_parser = subparsers.add_parser("feature-map", help="the app's feature map: where it is, whether it is stale")
+    map_parser.add_argument("--target", required=True, type=Path)
+    map_parser.add_argument("--source-repo", type=Path, help="main checkout that holds the shared map")
+    map_parser.add_argument("--init", action="store_true", help="write the empty skeleton when there is no map")
+    map_parser.add_argument("--learn", type=Path, help="merge this file's Surfaces / Not mapped rows into the map")
     gate_parser = subparsers.add_parser("gate")
     gate_parser.add_argument("--target", required=True, type=Path)
     log_parser = subparsers.add_parser("log")
@@ -4635,6 +4708,17 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
     if args.command == "setup":
         result = run_setup(target, force=args.force, accept=args.accept, source_repo=args.source_repo)
         return result, 0
+    if args.command == "feature-map":
+        from android_workflow import feature_map
+
+        home = feature_map_home(target, args.source_repo)
+        learned = None
+        if args.init:
+            feature_map.init(home)
+        if args.learn:
+            learned = feature_map.learn(home, args.learn.resolve())
+        result = feature_map.status(target, home)
+        return ({**result, "learned": learned} if learned else result), 0
     if args.command == "update-spec":
         result = update_spec(target, args)
         from android_workflow.skills import refresh as refresh_skills
