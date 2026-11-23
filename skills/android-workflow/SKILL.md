@@ -128,6 +128,7 @@ refuses a command (`pr merge` included), tell the developer and stop; never retr
 python3 ~/.ai/bin/feature_workspace.py --repo-root T --ticket ID --title "…" [--worktree]
 CLI next     --target T [--no-device] [--no-watch] [--level express|standard] [--dry-run]   (the next action)
 CLI feature-map --target T [--init] [--learn ROWS.md]   (the shared map: path, status, uncovered entry points)
+CLI rules patterns|check|list --target T [--min N] [--base SHA]   CLI rules test --target T --rule F.yml   (the developer's local review rules)
 CLI setup    --target T [--source-repo MAIN]        CLI start    --target T --id ID --title "…" [--type bug --reproduction "…"] [--level L]
 CLI resume   --target T --question-id Q --answer "…" CLI update-spec --target T --surfaces ui --acceptance "a|b"
 CLI prebuild --target T [--wait [--timeout S]|--status] [--force]   CLI gate     --target T
@@ -288,7 +289,8 @@ CLI cleanup --target T [--all] [--pr N] [--base] [--dry-run]   (worktrees of mer
    `finish --skip-device "<reason>"` only when there is no SDK or AVD to start one.
    The gate itself: formatter (fixing first when it can), then compile, unit tests, detekt and lint
    for the touched modules in one build, plus compile and unit tests for modules that use a changed
-   declaration, and a secret scan. Lint or format findings only in files the change does not touch,
+   declaration, a secret scan, and the developer's local review rules on the lines the change adds
+   (see Review rules: a `block` rule fails the gate as `G-rules`, a `warn` one is only reported). Lint or format findings only in files the change does not touch,
    and Android lint findings on lines of a touched file that the change did not write, are
    **waived** and disclosed in the PR; never "fix" a waived finding: it widens the diff. Gradle failing
    by itself (a lock timeout, a daemon that died or ran out of memory, "Could not create service") is
@@ -427,6 +429,34 @@ written and the source fingerprint never moves. It is never proof of behavior.
     instead of nothing; device-only AC stay not verified (a PARTIAL the developer decides on).
 - The developer overrides with `CLI render prefer --mode device|render|auto` (`device` = never render).
 - A Figma link in the ticket → `fetch_design` once, and the Render analyst compares against it.
+
+## Review rules (the developer's, local)
+
+Findings that keep coming back become ast-grep rules that never enter the app's repository:
+`MAIN/.ai/review-rules/*.yml` (this app; `.ai/review-rules/` is git-excluded) and `~/.ai/review-rules/`
+(every app; an app file of the same name wins). A rule's `severity: error` is `block` (gate fails,
+the Implementer fixes it), anything else `warn` (reported to the Implementer and the Reviewer, never a
+failure). They match only lines the change adds, so old code never trips them. Without `ast-grep`
+(`brew install ast-grep`) the step is skipped, never failed.
+
+When the developer asks for patterns or a new rule ("review patterns", "vira regra", "cria uma regra local"):
+
+1. `CLI rules patterns --target MAIN` groups the findings of every archived `review.json` (workflow
+   runs and PR reviews) by the code term or file they share across runs; `covered_by` names a rule
+   that already has it.
+2. For each group, decide from the findings' text whether a syntax pattern can catch it (an API
+   misuse such as `runCatching` in suspend code: yes; a double tap or a stale lambda: no, it stays
+   with the Reviewer; a stray file or a pre-existing lint failure: workflow noise, say so). Propose at
+   most 3 rules, each with the runs it comes from.
+3. On the developer's OK, write each to `MAIN/.ai/review-rules/<id>.yml` with `severity: warning`
+   and a first comment line naming the source run; `CLI rules test --target MAIN --rule F` must parse
+   and report its matches on the app (zero: the pattern is wrong; hundreds: say it will warn often).
+   Show the count. `block` (`severity: error`) only when the developer says so.
+4. **Team rule** only when the developer asks to promote one: write the repo version (a detekt
+   custom rule or a Konsist test, in the repo's existing setup) as a patch to
+   `MAIN/.ai/review-rules/promote/<id>.patch`. Never apply, commit or open a PR with it yourself.
+
+Never put user or student data in a rule; a rule's `message` names the API, not a person or PR text.
 
 ## Run files
 

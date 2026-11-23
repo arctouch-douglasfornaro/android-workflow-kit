@@ -2733,7 +2733,7 @@ def source_changes(target: Path) -> list[str]:
     return sorted(changed)
 
 
-WORKFLOW_AI_ENTRIES = frozenset({"workflow", "android-workflow.json", "project-profile.md", "feature-map.md"})
+WORKFLOW_AI_ENTRIES = frozenset({"workflow", "android-workflow.json", "project-profile.md", "feature-map.md", "review-rules"})
 
 
 def is_workflow_file(name: str, tracked: Collection[str]) -> bool:
@@ -2925,7 +2925,11 @@ def run_quality_gate(target: Path) -> dict[str, Any]:
     if slot["waited_seconds"] >= 1:
         extras["waited_for_build_slot_seconds"] = slot["waited_seconds"]
     scan = secret_scan(target)
-    gate_status = "passed" if gate_steps_pass(steps) and scan["status"] == "passed" else "failed"
+    from android_workflow.review_rules import FINDINGS_FILE, check_safely
+
+    rules = check_safely(target, diff_base(target))
+    write_json(agent_dir / FINDINGS_FILE, rules)
+    gate_status = "passed" if gate_steps_pass(steps) and scan["status"] == "passed" and rules["status"] != "failed" else "failed"
     waivers = [
         {"command": step["command"], **step["waiver"]} for step in steps if step.get("waiver")
     ]
@@ -2944,6 +2948,7 @@ def run_quality_gate(target: Path) -> dict[str, Any]:
         "warnings": warnings,
         "duration_seconds": duration,
         "secret_scan": scan,
+        "review_rules": rules,
         "prior_runs": prior_runs[-3:],
         # Gradle failing by itself is not a red gate of the change: the streak stays where it was.
         "red_streak": int(previous.get("red_streak") or 0) if gate_status == "failed" and (extras.get("infra") or extras.get("disk_full"))
@@ -4323,6 +4328,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     map_parser.add_argument("--source-repo", type=Path, help="main checkout that holds the shared map")
     map_parser.add_argument("--init", action="store_true", help="write the empty skeleton when there is no map")
     map_parser.add_argument("--learn", type=Path, help="merge this file's Surfaces / Not mapped rows into the map")
+    rules_parser = subparsers.add_parser("rules", help="personal review rules (ast-grep, local): patterns, check, test, list")
+    rules_parser.add_argument("rules_action", choices=("patterns", "check", "test", "list"))
+    rules_parser.add_argument("--target", required=True, type=Path)
+    rules_parser.add_argument("--rule", type=Path, help="test: the rule file to try on the whole app")
+    rules_parser.add_argument("--min", type=int, default=2, dest="minimum", help="patterns: runs a term must appear in")
+    rules_parser.add_argument("--base", help="check: compare with this commit instead of the run's base")
     gate_parser = subparsers.add_parser("gate")
     gate_parser.add_argument("--target", required=True, type=Path)
     log_parser = subparsers.add_parser("log")
@@ -4719,6 +4730,25 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
             learned = feature_map.learn(home, args.learn.resolve())
         result = feature_map.status(target, home)
         return ({**result, "learned": learned} if learned else result), 0
+    if args.command == "rules":
+        from android_workflow import review_rules
+
+        if args.rules_action == "patterns":
+            return review_rules.patterns(target, max(1, args.minimum)), 0
+        if args.rules_action == "list":
+            return {"rules": review_rules.listing(target), "rules_dir": str(review_rules.main_checkout(target) / review_rules.RULES_DIR),
+                    "global_rules_dir": str(review_rules.home_rules_dir()), "ast_grep": review_rules.binary()}, 0
+        if args.rules_action == "test":
+            if not args.rule:
+                raise ValueError("rules test needs --rule FILE")
+            result = review_rules.test(target, args.rule.resolve())
+            return result, 1 if result.get("error") else 0
+        result = review_rules.check(target, args.base or diff_base(target))
+        try:
+            write_json(run_dir(target) / review_rules.FINDINGS_FILE, result)
+        except FileNotFoundError:
+            pass  # no run here: the answer is the output
+        return result, 0
     if args.command == "update-spec":
         result = update_spec(target, args)
         from android_workflow.skills import refresh as refresh_skills

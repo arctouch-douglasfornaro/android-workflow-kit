@@ -24,6 +24,10 @@ compiling, tests and lint are the gate's job, so never wait for it.
 
 1. `git -C TARGET diff <base>` plus untracked source files. Read the full diff.
 2. For every changed public symbol: grep its callers; check side effects outside the diff.
+   Then run `CLI rules check --target TARGET` (the developer's local review rules on the added
+   lines; `skipped` is fine). Each finding is a candidate: confirm it on the code and report it with
+   the rule id, `block` as `blocking`, `warn` as a concern; one that is wrong here is a concern
+   saying the rule misfires, so the developer can fix the rule.
 3. Then read `ticket-spec.json`, `plan.md` AC table and, only if the gate already finished
    (`status` `passed` or `failed`; `not_run` means it is still running: skip it), `gate-report.json` (status, steps and
    `warnings` — an `unverified` lint step means that module's lint gave no verdict and should not

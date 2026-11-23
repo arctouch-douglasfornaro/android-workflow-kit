@@ -78,6 +78,9 @@ When the orchestrator gives you a slice, it is yours alone:
 ## Fix round
 
 Change only what the finding requires. Append to notes: finding ID → files → evidence.
+`G-rules` is a local review rule (`gate-report.json` → `review_rules.findings`: rule, file:line,
+message): fix the code it points at. A rule that is wrong for this code is the developer's call:
+`NEEDS_DECISION`, never edit or delete the rule.
 Never claim gate, review or device PASS. A Device FAIL (or finding) whose fix would contradict an
 AC or the plan's pattern to copy is the developer's call, not a redesign: edit nothing and return
 `NEEDS_DECISION: <the conflict, one question> (default: <your pick>)`.

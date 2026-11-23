@@ -162,6 +162,8 @@ def gate_failures(gate: dict[str, Any]) -> list[str]:
     ids = [f"G{index}" for index, _ in enumerate(failed, 1)]
     if (gate.get("secret_scan") or {}).get("status") == "failed":
         ids.append("G-secrets")
+    if (gate.get("review_rules") or {}).get("status") == "failed":
+        ids.append("G-rules")
     return ids or (["G1"] if gate.get("status") == "failed" else [])
 
 

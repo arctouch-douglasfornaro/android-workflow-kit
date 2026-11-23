@@ -202,6 +202,10 @@ head and proposes resolving the addressed ones). A run of that PR on disk also g
 - **Copied code**: a new source file that is mostly a copy of a file the PR changed or deleted (a
   split, a legacy fork) gets `RUN/copy-diff/<name>.diff` (original at the base vs the new file); the
   Reviewer explains every divergence (intended, or a finding).
+- **Local review rules**: the Reviewer also runs the developer's own ast-grep rules
+  (`CLI rules check`, android-workflow SKILL → Review rules) on the lines the PR adds; a hit it
+  confirms becomes a draft comment like any other finding, posted only with the developer's OK.
+  The rules never go to the PR's repository.
 - **Device** only when the diff changes UI: Android resources (`res/layout|drawable|values|…`),
   the manifest, `@Composable`/`@Preview` code, screen/view classes (never test sources: `src/test`,
   `src/androidTest`, `sharedTest`, `testFixtures`), or when the spec has an AC with
