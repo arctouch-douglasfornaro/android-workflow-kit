@@ -1,0 +1,32 @@
+{
+  "id": "setup-feature-map",
+  "about": "aw-setup with steps [feature_map]: maps every surface with routes, deep link and selectors from code; skips internal screens",
+  "agent": "aw-setup",
+  "tier": "standard",
+  "fixture": "notes-app",
+  "prepare": [
+    {"do": "overrides", "set": {"device": {"app_module": ":app", "application_id": "com.notes.app.debug", "launch_activity": ".MainActivity"}}},
+    {"do": "accept_profile"},
+    {"do": "cli", "args": ["setup", "--target", "{TARGET}"], "as": "SETUP_JSON"}
+  ],
+  "snapshot": [".ai/project-profile.md", ".ai/android-workflow.json"],
+  "prompt_file": "prompt.md",
+  "checks": [
+    {"id": "map_ok", "kind": "cli", "args": ["feature-map", "--target", "{TARGET}"], "field": "status", "value": "ok", "weight": 4},
+    {"id": "detail_deep_link", "kind": "map_row", "match": ["Entry|Source", "NoteDetailActivity"], "expect": {"Deep link": "notes://note/"}, "weight": 3},
+    {"id": "detail_selector", "kind": "map_row", "match": ["Entry|Source", "NoteDetailActivity"], "expect": {"Selectors": "note_detail"}, "weight": 2},
+    {"id": "archive_route", "kind": "map_row", "match": ["Surface|Entry|Source", "archive"], "expect": {"How to reach": "notes_archive_button|Archive"}, "weight": 2},
+    {"id": "settings_route", "kind": "map_row", "match": ["Entry|Source", "SettingsActivity"], "expect": {"How to reach": "notes_settings_button|Settings"}, "weight": 2},
+    {"id": "gallery_not_mapped", "kind": "not_mapped", "entry": "ComponentGalleryActivity", "weight": 2},
+    {"id": "profile_untouched", "kind": "unchanged", "file": ".ai/project-profile.md", "weight": 2},
+    {"id": "overrides_untouched", "kind": "unchanged", "file": ".ai/android-workflow.json", "weight": 1},
+    {"id": "no_secrets", "kind": "no_secrets", "files": [".ai/feature-map.md"], "weight": 1}
+  ],
+  "rubric": [
+    {"id": "routes_scriptable", "weight": 3, "criterion": "Each How to reach is numbered steps from a cold launch a Maestro flow could follow with no guessing: action, selector (test tag, id or text that exists in the code), what is visible next."},
+    {"id": "grounded", "weight": 3, "criterion": "Every selector, route, deep link and Source path exists in the code (check the files); nothing invented. The deep link matches the manifest's intent filter."},
+    {"id": "coverage_judgement", "weight": 2, "criterion": "Every user-facing surface is mapped (notes list, archive, note detail, settings); only internal or debug screens are under Not mapped, each with a reason."},
+    {"id": "scope", "weight": 2, "criterion": "Only the feature map step was done: the profile and the overrides untouched, no --accept, no build."}
+  ],
+  "judge_reads": [".ai/feature-map.md"]
+}

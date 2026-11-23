@@ -90,6 +90,10 @@ adb exec-out uiautomator dump /dev/tty
 ```
 Find the target node, read its `bounds="[x1,y1][x2,y2]"`, and tap the center `((x1+x2)/2, (y1+y2)/2)`. Match nodes by `resource-id`, `text`, or `content-desc` so the step survives screen-size changes.
 
+**Compose test tags are not ids by default:** Maestro's `id:` matches a `Modifier.testTag` only when the
+app sets `testTagsAsResourceId = true` in a semantics block; otherwise match the visible text or content
+description, and say so in the flow's comment.
+
 **Prefer Maestro's `assertVisible`/`tapOn` by text or id over dumping at all** (§9) — a dump is a debugging tool for when a selector does not match, not the normal way to drive a screen.
 
 ---

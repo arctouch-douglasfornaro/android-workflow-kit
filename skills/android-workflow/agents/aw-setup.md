@@ -39,12 +39,21 @@ activities and the files that build a navigation graph. Run it with `--init` whe
 
 1. For each surface a ticket could change, one row under `## Surfaces`: `Surface` (what a person calls
    it), `Entry` (activity class or route), `How to reach` (numbered steps from a cold launch, each
-   `action → selector → what is visible next`, joined with `→`, never `|`), `Deep link` (from the
-   intent filter, never guessed), `Selectors` (test tags / ids that prove you arrived), `Prerequisites`
-   (logged in, a feature flag pin, test data; a test account by its role, never a login), `Source`
-   (`path:line` of the screen). Start from `## Device recipes` in the profile and the existing Maestro flows.
-2. Entry points no ticket drives on a device (debug menus, test harness, internal tools, legacy
-   redirects) go under `## Not mapped` with one line why; a glob covers a family (`*Debug*`).
+   `action → selector → what is visible next`, joined with `→`, never `|`; the last step names what
+   proves arrival, so a flow can `assertVisible` it), `Deep link` (from the intent filter, never
+   guessed), `Selectors` (what a Maestro flow can match, see below), `Prerequisites` (logged in, a feature
+   flag pin, test data; a test account by its role, never a login), `Source` (`path:line` of the screen,
+   and of the navigation graph that declares its route). Start from `## Device recipes` in the profile
+   and the existing Maestro flows.
+   **Selectors Maestro can use.** A Compose `testTag` is a Maestro `id:` only when the app sets
+   `testTagsAsResourceId = true` in a semantics block (search for it, and say where). Without it, write
+   the visible text or content description (`text: "Archive"`) as the selector and keep the tag in
+   parentheses as code evidence (`text: "Archive"` (tag `notes_archive_button`)). View ids
+   (`R.id.x`) are always `id:`.
+2. A navigation graph file is covered by citing it in `Source` (or `Entry`) of the rows for the routes
+   it declares, never by listing it under Not mapped. `## Not mapped` is only for entry points no
+   ticket drives on a device (debug menus, test harness, internal tools, legacy redirects), each with one
+   line why; a glob covers a family (`*Debug*`).
 3. Write the rows to a file and `CLI feature-map --target TARGET --learn <file>` (it merges by
    Surface and refuses logins and secrets). Repeat until `status` is `ok`. With `uncovered` already
    past 40, finish the most used surfaces first; what is left stays `stale` and the Device fills it in

@@ -125,7 +125,7 @@ def _git(target: Path, *args: str) -> str | None:
 
 
 def _source_files(target: Path, suffixes: tuple[str, ...]) -> list[str]:
-    listed = _git(target, "ls-files")
+    listed = _git(target, "ls-files")  # tracked only: listing untracked files walks build dirs (20 s on a big app)
     if listed is not None:
         names = listed.splitlines()
     else:  # not a git checkout (a test fixture): walk it

@@ -1,0 +1,12 @@
+{
+  "commands": {
+    "format_check": "gradle lintKotlin",
+    "format_apply": "gradle formatKotlin",
+    "install": "gradle :app:installDebug"
+  },
+  "module_commands": {
+    "compile": "gradle {module}:compileDebugKotlin",
+    "unit_tests": "gradle {module}:testDebugUnitTest",
+    "android_lint": "gradle {module}:lintDebug"
+  }
+}

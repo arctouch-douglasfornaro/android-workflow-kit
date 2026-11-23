@@ -1,0 +1,148 @@
+{
+  "id": "planner-map-recipe",
+  "about": "aw-planner on a UI ticket for a mapped screen: verifiable AC, device proof, recipe taken from the feature map (deep link, selectors); a NEEDS_INPUT gets the scripted answer once",
+  "agent": "aw-planner",
+  "tier": "strong",
+  "fixture": "notes-app",
+  "prepare": [
+    {
+      "do": "overrides",
+      "set": {
+        "device": {
+          "app_module": ":app",
+          "application_id": "com.notes.app.debug",
+          "launch_activity": ".MainActivity"
+        }
+      }
+    },
+    {
+      "do": "accept_profile"
+    },
+    {
+      "do": "copy",
+      "from": "feature-map.md",
+      "to": ".ai/feature-map.md"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "start",
+        "--target",
+        "{TARGET}",
+        "--id",
+        "NOTES-12",
+        "--title",
+        "Show when a note was last edited on the note detail screen"
+      ],
+      "as": "START_JSON"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "next",
+        "--target",
+        "{TARGET}",
+        "--level",
+        "standard"
+      ],
+      "as": "NEXT_JSON"
+    }
+  ],
+  "snapshot": [
+    ".ai/feature-map.md"
+  ],
+  "prompt_file": "prompt.md",
+  "checks": [
+    {
+      "id": "plan_written",
+      "kind": "regex",
+      "file": ".ai/workflow/NOTES-12/plan.md",
+      "weight": 2,
+      "pattern": "^#+ Verification"
+    },
+    {
+      "id": "plan_headings",
+      "kind": "regex",
+      "file": ".ai/workflow/NOTES-12/plan.md",
+      "pattern": "^#+ Objective[\\s\\S]*^#+ Steps[\\s\\S]*^#+ Out of scope[\\s\\S]*^#+ Verification",
+      "weight": 1
+    },
+    {
+      "id": "recipe_uses_deep_link",
+      "kind": "regex",
+      "file": ".ai/workflow/NOTES-12/plan.md",
+      "pattern": "notes://note/",
+      "weight": 3
+    },
+    {
+      "id": "recipe_uses_map_selector",
+      "kind": "regex",
+      "file": ".ai/workflow/NOTES-12/plan.md",
+      "pattern": "note_detail_title|note_detail\\b",
+      "weight": 2
+    },
+    {
+      "id": "device_required",
+      "kind": "regex",
+      "file": ".ai/workflow/NOTES-12/plan.md",
+      "pattern": "device_required\\W{0,6}(yes|true)",
+      "weight": 2
+    },
+    {
+      "id": "evidence_name",
+      "kind": "regex",
+      "file": ".ai/workflow/NOTES-12/plan.md",
+      "pattern": "Capture `[\\w-]+`",
+      "weight": 1
+    },
+    {
+      "id": "spec_surfaces_ui",
+      "kind": "json_contains",
+      "file": ".ai/workflow/NOTES-12/ticket-spec.json",
+      "path": "surfaces",
+      "value": "ui",
+      "weight": 2
+    },
+    {
+      "id": "detail_file_named",
+      "kind": "regex",
+      "file": ".ai/workflow/NOTES-12/plan.md",
+      "pattern": "NoteDetailActivity\\.kt",
+      "weight": 1
+    },
+    {
+      "id": "map_untouched",
+      "kind": "unchanged",
+      "file": ".ai/feature-map.md",
+      "weight": 1
+    }
+  ],
+  "rubric": [
+    {
+      "id": "verifiable_ac",
+      "weight": 3,
+      "criterion": "Acceptance criteria are concrete and checkable (what text, where, for which notes), including the never-edited case, each with a proof type that fits (a relative time is device or unit, not render-only when it depends on the clock)."
+    },
+    {
+      "id": "recipe_from_map",
+      "weight": 3,
+      "criterion": "The navigation recipe reuses the feature map's row for Note detail (its deep link, its selectors, its prerequisite note) instead of rediscovering it, and is numbered steps a Maestro flow can script, ending on named evidence."
+    },
+    {
+      "id": "grounded_change_set",
+      "weight": 2,
+      "criterion": "The files and the pattern to copy exist in the code (NoteDetailActivity, the screen's Text composables); where the edited time comes from is named or asked, never invented."
+    },
+    {
+      "id": "no_invented_rules",
+      "weight": 2,
+      "criterion": "Business rules the ticket does not give (time format, where the timestamp is stored) are asked as NEEDS_INPUT or stated as an explicit assumption, not silently decided."
+    }
+  ],
+  "judge_reads": [
+    ".ai/workflow/NOTES-12/plan.md",
+    ".ai/workflow/NOTES-12/ticket-spec.json",
+    ".ai/feature-map.md"
+  ],
+  "answers": "ok, use the default you proposed"
+}

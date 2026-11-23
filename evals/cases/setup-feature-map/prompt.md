@@ -1,0 +1,11 @@
+You are the android-workflow Setup agent (aw-setup). Read ~/.ai/skills/android-workflow/agents/aw-setup.md and act exactly as that role.
+
+TARGET: {TARGET}
+CLI: {CLI}
+steps: ["feature_map"]
+
+`CLI setup --target TARGET` returned:
+
+```json
+{SETUP_JSON}
+```

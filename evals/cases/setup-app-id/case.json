@@ -1,0 +1,27 @@
+{
+  "id": "setup-app-id",
+  "about": "aw-setup with steps [app_id]: finds the debug applicationId in a convention plugin, records only that, accepts",
+  "agent": "aw-setup",
+  "tier": "standard",
+  "fixture": "notes-app",
+  "prepare": [
+    {"do": "accept_profile"},
+    {"do": "cli", "args": ["setup", "--target", "{TARGET}"], "as": "SETUP_JSON"}
+  ],
+  "snapshot": [".ai/project-profile.md"],
+  "prompt_file": "prompt.md",
+  "checks": [
+    {"id": "app_id_recorded", "kind": "json_equals", "file": ".ai/android-workflow.json", "path": "device.application_id", "value": "com.notes.app.debug", "weight": 4},
+    {"id": "setup_ready", "kind": "cli", "args": ["setup", "--target", "{TARGET}"], "field": "status", "value": "ready", "weight": 3},
+    {"id": "commands_kept", "kind": "json_equals", "file": ".ai/android-workflow.json", "path": "commands.format_check", "value": "gradle lintKotlin", "weight": 1},
+    {"id": "profile_scope", "kind": "sections_unchanged", "file": ".ai/project-profile.md", "except": ["Device", "App identity", "Provenance"], "weight": 2},
+    {"id": "no_feature_map", "kind": "file_absent", "file": ".ai/feature-map.md", "weight": 1},
+    {"id": "no_secrets", "kind": "no_secrets", "files": [".ai/project-profile.md", ".ai/android-workflow.json"], "weight": 1}
+  ],
+  "rubric": [
+    {"id": "evidence", "weight": 3, "criterion": "The applicationId and its debug suffix are proven from the file that sets them (the convention plugin), not guessed from the namespace or the module name; the launch activity matches the manifest's launcher."},
+    {"id": "scope", "weight": 3, "criterion": "Only the app id step was done: no other profile section re-explored or rewritten, no feature map, no build or install run."},
+    {"id": "reply", "weight": 1, "criterion": "The final reply is at most 10 lines and states READY (or one batched question), the steps done and the values recorded."}
+  ],
+  "judge_reads": [".ai/android-workflow.json", ".ai/project-profile.md"]
+}
