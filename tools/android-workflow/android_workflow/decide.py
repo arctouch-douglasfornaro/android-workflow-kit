@@ -238,8 +238,40 @@ def next_action(target: Path, no_device: bool = False, record: bool = True, no_w
         choose(target, agent_dir, level)
     answer = _decide(target, agent_dir, no_device, no_watch, record)
     if record:
+        settle_device(agent_dir, answer)
         _record(target, agent_dir, answer)
     return answer
+
+
+DEVICE_STEPS = frozenset({"wait_device", "replay_before"})
+
+
+def uses_device(answer: dict[str, Any]) -> bool:
+    """The answer puts this run on its device now: a Device agent to spawn or still working, a replay, or a
+    device it waits for while it boots. Anything else (planning, code, gate, review, delivery, a question)
+    needs no device."""
+    if answer.get("next") in DEVICE_STEPS or answer.get("agent") == "aw-device":
+        return True
+    command = str(answer.get("command") or "")
+    return "--serial" in command or command.startswith("CLI device ")
+
+
+def settle_device(agent_dir: Path, answer: dict[str, Any]) -> None:
+    """A run holds a device only while it is on it. Between the `before` and the `after`, during a fix
+    round, the review, the delivery or a question, its lease goes back to the machine, so another run's
+    Device starts now instead of waiting for this run to finish; the emulator stays open (the run still
+    wants one) and the next device step leases a free one again, this one first when it is free."""
+    if uses_device(answer):
+        return
+    from android_workflow.locks import held_by, release
+
+    try:
+        if held_by(agent_dir):
+            released = release(agent_dir)  # a device command still running keeps its part until it exits
+            if released:
+                answer["released_device"] = released
+    except OSError:
+        pass
 
 
 def choose(target: Path, agent_dir: Path, level: str) -> None:
@@ -830,15 +862,16 @@ def _device_for(target: Path, agent_dir: Path, record: bool) -> tuple[str | None
     starts for this run (`device.max_emulators`). Two runs never install their builds on one device."""
     from android_workflow.emulator import claim
 
+    prefer = _read(agent_dir / DEVICE_FILE)
     try:
-        current = claim(target, record=record)
+        current = claim(target, record=record, prefer=prefer)
     except Exception as error:  # noqa: BLE001 - no SDK: no device
         current = {"status": "unavailable", "reason": f"adb is not available ({error})"}
     if current.get("status") == "failed" and record:
         # Its device never booted: it was closed and released; lease or start another one now.
         failed = current
         try:
-            current = claim(target, record=record)
+            current = claim(target, record=record, prefer=prefer)
         except Exception as error:  # noqa: BLE001
             current = {"status": "unavailable", "reason": f"adb is not available ({error})"}
         if current.get("status") in {"failed", "unavailable", "no_device"}:
@@ -849,6 +882,8 @@ def _device_for(target: Path, agent_dir: Path, record: bool) -> tuple[str | None
                                           "skip": f'CLI finish --target TARGET --skip-device "{failed.get("reason")}"'}), ""
     state = current.get("status")
     if state in {"ready", "connected"}:
+        if record:
+            _remember_device(agent_dir, current)
         return str(current["serial"]), None, ""
     if state in {"booting", "would_start"}:
         what = (f"the emulator {current.get('serial')} ({current.get('avd')}) is booting for this run"
@@ -866,6 +901,29 @@ def _device_for(target: Path, agent_dir: Path, record: bool) -> tuple[str | None
         return None, _answer("ask_user", "a phone waits for its USB-debugging prompt",
                              question="accept USB debugging on the phone", then="CLI next --target TARGET"), ""
     return None, None, str(current.get("reason") or state or "no device")
+
+
+DEVICE_FILE = "device.json"
+
+
+def _remember_device(agent_dir: Path, current: dict[str, Any]) -> None:
+    """The device this run used last (`device.json`): its next device step asks for it first, and a
+    `before` captured on another model of device is captured again on the one the `after` gets."""
+    from android_workflow.cli import write_json
+
+    previous = _read(agent_dir / DEVICE_FILE)
+    serial, avd = str(current.get("serial") or ""), current.get("avd")
+    entry = {"serial": serial, "avd": avd, "at": round(time.time(), 3)}
+    before = agent_dir / "media" / "before"
+    if (previous.get("serial") and previous.get("serial") != serial and previous.get("avd") != avd
+            and before.is_dir() and any(before.iterdir())):
+        # The before shows another screen size: keep it aside; the late `before` replays the flows on
+        # this device so the PR pairs like with like.
+        aside = agent_dir / "media" / f"before-{previous.get('avd') or previous.get('serial')}"
+        if not aside.exists():
+            before.rename(aside)
+            entry["before_moved"] = str(aside.name)
+    write_json(agent_dir / DEVICE_FILE, entry)
 
 
 def device_wait_max_seconds(target: Path) -> float:

@@ -346,6 +346,62 @@ class DecideDeviceTests(test_decide.RunTests):
         self.assertEqual(recorded_verdict(self.rundir, "T7"), "pass")
 
 
+    def test_the_device_goes_back_as_soon_as_the_run_moves_off_it(self) -> None:
+        with StateHome():
+            self.visual_run()
+            with self.connected():
+                spawn = self.next()
+                waiting = self.next()  # the Device agent works: still its device
+                held_while_working = locks.lease_of("emu-1")
+                self._unreachable_report("BLOCKED")
+                moved_on = self.next()
+                held_after = locks.lease_of("emu-1")
+        self.assertEqual(spawn["serial"], "emu-1")
+        self.assertEqual((waiting["next"], waiting.get("agent")), ("wait", "aw-device"))
+        self.assertEqual(held_while_working["run"], str(self.rundir))
+        self.assertEqual(moved_on["next"], "finish")
+        self.assertEqual(moved_on["released_device"], ["emu-1"])
+        self.assertIsNone(held_after)
+        self.assertEqual(read_json(self.rundir / "device.json")["serial"], "emu-1")
+
+    def test_the_next_device_step_asks_for_the_device_it_used_before(self) -> None:
+        with StateHome():
+            self.visual_run()
+            (self.rundir / "device.json").write_text(json.dumps({"serial": "emu-2"}), encoding="utf-8")
+            both = mock.patch("android_workflow.emulator.status", return_value={
+                "status": "connected", "serial": "emu-1", "devices": ["emu-1", "emu-2"]})
+            with both:
+                answer = self.next()
+        self.assertEqual(answer["serial"], "emu-2")
+
+    def test_a_before_taken_on_another_model_is_set_aside_for_a_late_replay(self) -> None:
+        with StateHome():
+            self.visual_run()
+            self._before_on_another_model()
+
+    def _before_on_another_model(self) -> None:
+        before = self.rundir / "media" / "before"
+        before.mkdir(parents=True, exist_ok=True)
+        (before / "screen.png").write_bytes(b"png")
+        (self.rundir / "device.json").write_text(json.dumps({"serial": "emulator-5554", "avd": "Pixel_Tablet"}),
+                                                 encoding="utf-8")
+        decide._remember_device(self.rundir, {"serial": "emulator-5556", "avd": "Small_360x640"})
+        self.assertFalse(before.exists())
+        self.assertTrue((self.rundir / "media" / "before-Pixel_Tablet" / "screen.png").is_file())
+        self.assertEqual(read_json(self.rundir / "device.json")["before_moved"], "before-Pixel_Tablet")
+
+    def test_the_emulator_limit_follows_the_machine_unless_the_project_sets_it(self) -> None:
+        from android_workflow import emulator
+
+        for memory, expected in ((16, 2), (36, 3), (48, 4), (128, 4), (None, 2)):
+            with self.subTest(memory=memory), mock.patch.object(emulator, "_memory_gb", return_value=memory):
+                self.assertEqual(emulator.auto_max_emulators(), expected)
+        with mock.patch.object(emulator, "_overrides", return_value={"max_emulators": 3}):
+            self.assertEqual(emulator._max_emulators(self.root), 3)
+        with mock.patch.object(emulator, "_overrides", return_value={}), \
+                mock.patch.object(emulator, "_memory_gb", return_value=48):
+            self.assertEqual(emulator._max_emulators(self.root), 4)
+
 @own_tests
 class MediaRoundTests(test_decide.RunTests):
     def test_a_new_source_moves_the_earlier_after_captures_out_of_the_pr(self) -> None:

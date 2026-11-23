@@ -795,7 +795,7 @@ class EmulatorTests(unittest.TestCase):
         return folders
 
     def test_each_run_gets_its_own_emulator_up_to_the_limit_and_a_freed_one_is_reused(self) -> None:
-        with FakeSdk() as (target, state_dir):
+        with FakeSdk() as (target, state_dir), mock.patch.object(emulator, "_memory_gb", return_value=24):
             first, second, third = self.apps(target.parent, "A-1", "B-1", "C-1")
             mine = emulator.claim(first)
             first_args = self.launched(state_dir, 5554)

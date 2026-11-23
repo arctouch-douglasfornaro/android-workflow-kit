@@ -178,6 +178,7 @@ def prepare(case_id: str) -> dict[str, Any]:
             values[step["as"]] = json.dumps(run_cli(args, workdir), indent=2)
         else:
             raise ValueError(f"unknown prepare step {kind}")
+    _forget_device_wants(workdir)
     snapshots = {}
     for relative in case.get("snapshot", []):
         path = workdir / relative
@@ -193,6 +194,15 @@ def prepare(case_id: str) -> dict[str, Any]:
            "prepared_at": dt.datetime.now().isoformat(timespec="seconds")}
     save_run(run)
     return {key: run[key] for key in ("id", "agent", "tier", "workdir", "return_file", "prompt")}
+
+
+def _forget_device_wants(workdir: Path) -> None:
+    """A run started here never reaches a device: it must not keep the machine's emulators open."""
+    sys.path.insert(0, str(KIT / "tools" / "android-workflow"))
+    from android_workflow import locks  # noqa: PLC0415
+
+    for run in (workdir / ".ai" / "workflow").glob("*/run-state.json"):
+        locks.unwant(run.parent)
 
 
 # ---------------------------------------------------------------- checks

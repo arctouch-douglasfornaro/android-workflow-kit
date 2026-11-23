@@ -211,7 +211,8 @@ CLI cleanup --target T [--all] [--pr N] [--base] [--dry-run]   (worktrees of mer
      build, a second `next` that says whether to capture the device `before`). `slices` → one
      `aw-implementer` per slice in the same turn, each logged with `--stage Implementer --slice S<n>`.
      `first` → run it before spawning. `replay`, `scaffold`, `done` and `serial` → pass them to `aw-device`
-     (the serial is leased to this run until `finish`: no other run installs on it). `budget_seconds` → pass
+     (the serial is leased to this run while it is on the device; the next answer that needs no device
+     gives it back, and `released_device` says so). `budget_seconds` → pass
      it to `aw-device` (`before` writes the flows while the Implementer works, `after` replays them and judges).
    - `checks`: run what `run` lists in the same turn: `CLI gate --target TARGET` (long command
      timeout, e.g. 30 min) and/or `agent` (`aw-reviewer`, `mode` `full` or `delta` with the `fixed`
@@ -383,14 +384,17 @@ Implementers of a team with each other (one owner per file).
   the same base gets them at once;
 - each run has its own device: the first time it needs one it leases a ready device nobody uses (an
   emulator already open, a phone), else one more emulator starts just for it, up to
-  `device.max_emulators` (default 2; a busy or failing `device.avd` falls back to another AVD that is not
+  `device.max_emulators` (default: one per 12 GB of memory, 2 to 4; a busy or failing `device.avd` falls back to another AVD that is not
   running, else a second copy runs `-read-only` once the first has booted); past that, `next`
   answers `wait_device` naming who holds each device. `device.dedicated` (default `true`): only
   emulators the workflow started are leased, never the developer's own emulator or phone; one another
   run gave back is still reused. `false` (or `ANDROID_WORKFLOW_DEDICATED_DEVICE=0`) lets a run lease an
-  emulator already open or a phone. The lease lasts until `finish` (a command
-  still installing keeps it until it exits), so between its `before` and `after` rounds no other run
-  installs on that device. A leased emulator that dies, or is not booted after `device.boot_stall_seconds`
+  emulator already open or a phone. A run holds its device only while it is on it: the `next` that
+  answers anything else (the Implementer, the gate, the review, a question, delivery) gives it back
+  (a command still installing keeps it until it exits) and the emulator stays open for whoever needs
+  one. The next device step asks for the same device first, else another of the same AVD, else any free
+  one; a `before` captured on another model is set aside and replayed on the new device, so the PR pairs
+  like with like. A leased emulator that dies, or is not booted after `device.boot_stall_seconds`
   (360), is closed and replaced. `emulator --stop` closes only what this run held: an emulator another run
   holds is refused by name;
 - the Device APK is built before the device is held (`CLI device build`, started with the gate):

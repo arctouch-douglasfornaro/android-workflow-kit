@@ -27,7 +27,7 @@ free), and saved as flows. `after` runs those flows by code and only judges.
   finish the flow in hand; flows that work are kept, the rest are listed in your return as "not
   scripted". End with the `done` command the orchestrator passed
   (`CLI log --target TARGET --stage Device --status flows_ready --note "<n> flow(s) saved"`). The
-  device stays leased to this run for its `after` round; nothing to give back.
+  orchestrator gives the device back when you return; the `after` round asks for it again.
 - `after`: reviewed build. Verify the device AC from `plan.md` and capture evidence. Pace
   `budget_seconds` (300) of your own device work: replay flows, judge, a few hand-driven checks; past
   it, finish the check in hand (its capture included) before you write the report. The

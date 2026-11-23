@@ -1075,6 +1075,12 @@ def _done(state: dict[str, Any], context: dict[str, Any], why: str) -> dict[str,
 def next_action(target: Path, record: bool = True, no_device: bool = False) -> dict[str, Any]:
     answer = _decide(target, record, no_device)
     if record:
+        from android_workflow import decide
+
+        try:
+            decide.settle_device(agent_dir_for(target), answer)
+        except FileNotFoundError:
+            pass
         try:
             with (agent_dir_for(target) / "review-decisions.jsonl").open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps({"at": round(time.time(), 3), "next": answer.get("next"),

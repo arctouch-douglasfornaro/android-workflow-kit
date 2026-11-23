@@ -1,11 +1,13 @@
 """Give each run its own device: reuse one that is open and free, else start one more emulator.
 
-A run leases one device (`locks`) the first time it needs one and keeps it until `finish`, so two
-runs never install their builds on one device. `claim` is the one entry point:
+A run leases one device (`locks`) for each device step and gives it back as soon as `next` answers
+something else (`decide.settle_device`), so two runs never install their builds on one device at once
+and no run holds an idle emulator through its code, review or delivery. The next device step asks for
+the same device first (`prefer`). `claim` is the one entry point:
 
 * the run already holds a device → that one (a leased emulator that died is dropped and replaced);
 * a ready device nobody leases (an emulator the developer or another run opened, a phone) → leased;
-* else, below `device.max_emulators` (default 2) emulators the workflow started → one more, started
+* else, below `device.max_emulators` (default: one per 12 GB of memory, 2 to 4) emulators the workflow started → one more, started
   for this run and leased to it while it boots (the configured AVD; when it is running or failed to
   boot lately, another AVD that is not running; else the configured AVD again with `-read-only`, once
   its first copy has booted: two copies of one AVD never boot at once);
@@ -45,6 +47,7 @@ LEGACY_NAMES = ("emulator.json", "emulators-extra.json")
 DEFAULT_BOOT_TIMEOUT = 300.0
 DEFAULT_FREE_TIMEOUT = 1800.0
 DEFAULT_MAX_EMULATORS = 2
+MAX_AUTO_EMULATORS = 4
 DEFAULT_BOOT_STALL = 360.0  # an emulator not booted this long after it started is stuck: given up
 FAILED_AVD_SECONDS = 1800.0  # an AVD that failed to boot is not the first choice for this long
 FAILURES_NAME = "emulator-failures.json"
@@ -217,11 +220,38 @@ def _run_of(target: Path) -> Path | None:
         return None
 
 
-def _max_emulators(target: Path) -> int:
+GB_PER_EMULATOR = 12  # an emulator plus its share of the Gradle builds that feed it
+
+
+def _memory_gb() -> float | None:
     try:
-        return max(int(_overrides(target).get("max_emulators") or DEFAULT_MAX_EMULATORS), 1)
-    except (TypeError, ValueError):
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 2**30
+    except (ValueError, OSError, AttributeError):
+        pass
+    done = _run(["sysctl", "-n", "hw.memsize"], timeout=5)
+    try:
+        return int(done.stdout.strip()) / 2**30 if done and done.returncode == 0 else None
+    except ValueError:
+        return None
+
+
+def auto_max_emulators() -> int:
+    """How many emulators this machine runs at once when the project does not say: one per 12 GB of
+    memory, between 2 and 4 (48 GB → 4)."""
+    memory = _memory_gb()
+    if not memory:
         return DEFAULT_MAX_EMULATORS
+    return min(max(int(memory // GB_PER_EMULATOR), DEFAULT_MAX_EMULATORS), MAX_AUTO_EMULATORS)
+
+
+def _max_emulators(target: Path) -> int:
+    configured = _overrides(target).get("max_emulators")
+    if configured in (None, "", "auto"):
+        return auto_max_emulators()
+    try:
+        return max(int(configured), 1)
+    except (TypeError, ValueError):
+        return auto_max_emulators()
 
 
 def dedicated(target: Path) -> bool:
@@ -434,15 +464,18 @@ def _launch(target: Path, run: Path | None, avd: str | None = None, headless: bo
     return {**record, "status": "booting", "started_by_workflow": True, **({"warnings": warnings} if warnings else {})}
 
 
-def claim(target: Path, record: bool = True, avd: str | None = None, headless: bool | None = None) -> dict[str, Any]:
+def claim(target: Path, record: bool = True, avd: str | None = None, headless: bool | None = None,
+          prefer: dict[str, Any] | None = None) -> dict[str, Any]:
     """The device this run uses: `ready`/`connected` (leased, booted), `booting` (leased, starting),
     `busy` (every device is another run's and no more emulators may start), or `unavailable` /
-    `unauthorized` / `no_device` with the reason. With `record=False` nothing is started or leased."""
+    `unauthorized` / `no_device` with the reason. With `record=False` nothing is started or leased.
+    `prefer` (`{"serial", "avd"}`, the device the run used last) orders the free ones: that serial, then
+    one of the same AVD, then the rest; it never makes the run wait."""
     from android_workflow.locks import acquire, free_serials, held_by, leases, release, run_label, want
 
     run = _run_of(target)
     if os.environ.get(NO_DEVICE_CHECK_ENV):
-        return _claim_reported(target, run, record)
+        return _claim_reported(target, run, record, prefer)
     adb = adb_path(target)
     if not adb:
         return {"status": "unavailable", "reason": "adb not found: install the Android SDK platform-tools or set ANDROID_HOME"}
@@ -473,6 +506,9 @@ def claim(target: Path, record: bool = True, avd: str | None = None, headless: b
                 release(run, serial=serial)  # its emulator is gone: lease another one below
         free = [serial for serial in _order(free_serials(ready, run))
                 if (serial in pool or not only_ours) and _booted(adb, serial)]
+        if prefer:
+            free.sort(key=lambda serial: (serial != prefer.get("serial"),
+                                          (pool.get(serial) or {}).get("avd") != prefer.get("avd")))
         if free:
             serial = free[0]
             if record:
@@ -514,7 +550,8 @@ def claim(target: Path, record: bool = True, avd: str | None = None, headless: b
                           + ("; device.dedicated: devices the developer opened or connected are never used" if only_ours else "")}
 
 
-def _claim_reported(target: Path, run: Path | None, record: bool) -> dict[str, Any]:
+def _claim_reported(target: Path, run: Path | None, record: bool,
+                    prefer: dict[str, Any] | None = None) -> dict[str, Any]:
     """`claim` with device checks off (`ANDROID_WORKFLOW_NO_DEVICE_CHECK`, the test suites): the devices
     are what `status` reports, leases work as usual, and no emulator is ever started."""
     from android_workflow.locks import acquire, free_serials, lease_of, run_label
@@ -525,6 +562,8 @@ def _claim_reported(target: Path, run: Path | None, record: bool) -> dict[str, A
     serials = [str(current["serial"])] if current.get("serial") else []
     serials += [str(serial) for serial in current.get("devices") or [] if str(serial) not in serials]
     free = free_serials(serials, run) if run else serials
+    if prefer:
+        free.sort(key=lambda serial: serial != prefer.get("serial"))
     if free:
         if record and run:
             acquire(free[0], run)

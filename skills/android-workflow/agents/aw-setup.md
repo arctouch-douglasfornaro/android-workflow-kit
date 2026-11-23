@@ -118,11 +118,11 @@ activities and the files that build a navigation graph. Run it with `--init` whe
   "install": "./gradlew :app:installProdDebug"}, "module_commands": {"compile":
   "./gradlew {module}:compileProdDebugKotlin", "unit_tests": "./gradlew {module}:testProdDebugUnitTest",
   "android_lint": "./gradlew {module}:lintProdDebug"}, "device": {"app_module": ":app",
-  "application_id": "com.example.debug", "launch_activity": ".MainActivity", "avd": "Pixel_8_API_35",
-  "max_emulators": 2}}`. `max_emulators`: emulators the workflow may start at once for parallel runs
-  (each run gets its own device); lower it to 1 on a machine with little memory. `dedicated` is
+  "application_id": "com.example.debug", "launch_activity": ".MainActivity", "avd": "Pixel_8_API_35"}}`.
+  Leave `max_emulators` out: by default the workflow sizes it from the machine's memory (one emulator
+  per 12 GB, 2 to 4); write it only when the developer asks for a number. `dedicated` is
   `true` by default: runs use only emulators the workflow started, never the developer's own emulator
-  or phone (each concurrent run needs one, so size `max_emulators` for it). Write `"dedicated": false`
+  or phone. Write `"dedicated": false`
   only when the developer asks for it, or the project is tested on a phone with no AVD.
   No formatter in the repo: `{"commands": {"format_check": "", "format_apply": ""}}` with a
   profile row saying so. Optional `quality_gates` keys, only when the project needs them:
