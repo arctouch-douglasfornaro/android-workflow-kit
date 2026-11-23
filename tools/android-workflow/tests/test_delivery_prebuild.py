@@ -488,6 +488,35 @@ class PrebuildTests(unittest.TestCase):
             self.assertEqual(main(["prebuild", "--target", str(root), "--status"]), 0)
             time.sleep(0)
 
+class TicketLinkTests(unittest.TestCase):
+    URL = "https://linear.app/acme/issue/LT-12"
+
+    def test_bare_and_bracketed_keys_become_links(self) -> None:
+        from android_workflow.delivery import link_ticket
+
+        body = "<!-- e.g. [LT-12] -->\nAddresses [LT-12]\nSee LT-12, not LT-123 or branch LT-12-fix."
+        linked, count = link_ticket(body, "LT-12", self.URL)
+        self.assertEqual(count, 2)
+        self.assertIn("<!-- e.g. [LT-12] -->", linked)
+        self.assertIn(f"Addresses [LT-12]({self.URL})", linked)
+        self.assertIn(f"See [LT-12]({self.URL}), not LT-123 or branch LT-12-fix.", linked)
+        self.assertEqual(link_ticket(linked, "LT-12", self.URL), (linked, 0))  # a second deliver changes nothing
+
+    def test_no_url_leaves_the_key(self) -> None:
+        from android_workflow.delivery import link_ticket
+
+        self.assertEqual(link_ticket("Addresses LT-12", "LT-12", None), ("Addresses LT-12", 0))
+
+    def test_the_tracker_of_the_key_picks_the_template(self) -> None:
+        from android_workflow.review import ticket_url
+
+        config = {"linear_prefixes": ["LT"], "links": {"linear": "https://linear.app/acme/issue/{key}",
+                                                      "jira": "https://acme.atlassian.net/browse/{key}"}}
+        self.assertEqual(ticket_url("LT-12", config), self.URL)
+        self.assertEqual(ticket_url("MF-9", config), "https://acme.atlassian.net/browse/MF-9")
+        self.assertIsNone(ticket_url("MF-9", {"linear_prefixes": ["LT"], "links": {}}))
+
+
 
 if __name__ == "__main__":
     unittest.main()

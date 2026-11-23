@@ -78,6 +78,10 @@ a key whose prefix is in `tickets.linear_prefixes` (`.ai/android-workflow.json`,
 or a linear.app link → the Linear tool (`get_issue`, then `list_comments`); any other key → the Jira
 tool (`getJiraIssue`). A Jira ticket that says it moved to Linear → read the Linear issue too. The
 acceptance criteria come from the issue and its comments.
+A tracker with no GitHub autolink (Linear) gets a clickable ticket in the PR body when the project's
+`.ai/android-workflow.json` has `tickets.links`, a URL per tracker with `{key}`
+(`{"linear": "https://linear.app/<workspace>/issue/{key}", "jira": "https://<site>.atlassian.net/browse/{key}"}`):
+`CLI deliver` turns the bare key into that link. The main checkout's value also counts for its worktrees.
 
 ## Agents
 

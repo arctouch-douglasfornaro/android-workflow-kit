@@ -273,9 +273,23 @@ def jira_keys(*texts: str) -> list[str]:
 
 
 def tickets_config(target: Path) -> dict[str, Any]:
-    overrides = _read(target / ".ai" / "android-workflow.json").get("tickets") or {}
+    from android_workflow.review_rules import main_checkout
+
+    # The main checkout's `tickets` first: a worktree copied its config once, so a later edit there counts too.
+    main = main_checkout(target)
+    shared = _read(main / ".ai" / "android-workflow.json").get("tickets") or {} if main != target.resolve() else {}
+    overrides = {**shared, **(_read(target / ".ai" / "android-workflow.json").get("tickets") or {})}
     prefixes = overrides.get("linear_prefixes", DEFAULT_TICKETS["linear_prefixes"])
-    return {"linear_prefixes": [str(item).upper().rstrip("-") for item in prefixes or []]}
+    links = overrides.get("links") if isinstance(overrides.get("links"), dict) else {}
+    return {"linear_prefixes": [str(item).upper().rstrip("-") for item in prefixes or []],
+            "links": {str(tracker): str(url) for tracker, url in links.items() if "{key}" in str(url)}}
+
+
+def ticket_url(key: str, config: dict[str, Any]) -> str | None:
+    """The ticket's web address from `tickets.links` (`{"linear": "https://linear.app/<ws>/issue/{key}",
+    "jira": "https://<site>.atlassian.net/browse/{key}"}`), or None when the project sets none."""
+    template = (config.get("links") or {}).get(ticket_source(key, config))
+    return template.replace("{key}", key) if template else None
 
 
 def ticket_source(key: str, config: dict[str, Any]) -> str:

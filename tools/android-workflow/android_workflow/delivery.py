@@ -353,6 +353,25 @@ def _drop_condition(comment: str, visual: bool, changed: list[str]) -> bool | No
     return None
 
 
+def link_ticket(body: str, key: str | None, url: str | None) -> tuple[str, int]:
+    """Every bare mention of the ticket key (`LT-12` or `[LT-12]`) becomes `[LT-12](url)`, outside HTML
+    comments and links: a tracker without a GitHub autolink (Linear) still gets a clickable ticket."""
+    if not key or not url:
+        return body, 0
+    escaped = re.escape(key)
+    count = 0
+
+    def one(segment: str) -> str:
+        nonlocal count
+        segment, first = re.subn(rf"\[{escaped}\](?!\()", f"[{key}]({url})", segment)
+        segment, second = re.subn(rf"(?<![\w/\[#=-]){escaped}(?![\w\]-])", f"[{key}]({url})", segment)
+        count += first + second
+        return segment
+
+    parts = re.split(r"(<!--.*?-->)", body, flags=re.S)
+    return "".join(part if part.startswith("<!--") else one(part) for part in parts), count
+
+
 def normalize_checklist(body: str, template: str, ticket_id: str | None, visual: bool, changed: list[str]) -> tuple[str, list[str]]:
     """The template's checklist, decided by code instead of the author's guess.
 
@@ -471,6 +490,14 @@ def deliver(
         if media["unpaired"]:
             warnings.append("captures without a pair (use the same --name in before and after): "
                             + ", ".join(media["unpaired"]))
+    ticket_id = (spec.get("ticket") or {}).get("id")
+    if ticket_id:
+        from android_workflow.review import ticket_url, tickets_config
+
+        text, linked = link_ticket(text, ticket_id, (spec.get("ticket") or {}).get("url")
+                                   or ticket_url(str(ticket_id), tickets_config(target)))
+        if linked:
+            result["ticket_linked"] = linked
     if template_text is not None:
         from android_workflow.cli import source_changes
         from android_workflow.decide import visual

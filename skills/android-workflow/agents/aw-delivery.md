@@ -41,6 +41,9 @@ it: whatever you write is stripped and the CLI's line is the only one kept.
   has room; otherwise one line. Leave every checkbox as the template has it: `CLI deliver` decides
   them by code (it ticks the ticket link when the body names the ticket, leaves the rest for the
   human, and removes an item whose `<!-- Delete if … -->` condition holds, e.g. no strings changed).
+- Ticket: write the key as the template asks (`Addresses [LT-123]`). With `tickets.links` in
+  `.ai/android-workflow.json`, `CLI deliver` turns every bare mention into a link to the ticket by
+  code; never build the URL yourself.
 - A PARTIAL device check the developer accepted (`run-state.json` → `device_partial`): one line with
   what stays unverified on a device (`CLI deliver` adds it if missing).
 - No template: 2–3 sentences, no extra headings.
