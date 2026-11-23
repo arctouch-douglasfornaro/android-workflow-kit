@@ -24,6 +24,15 @@ from android_workflow.cli import main, read_json
 from android_workflow.paths import KIT_ROOT, run_dir
 from test_live_team_emulator import GitProject
 
+def _private_terms() -> str:
+    """Words that must never appear in the public kit (employer, product and design-system names),
+    one per line in `.private-terms` at the kit root, a file that stays out of the repository."""
+    path = KIT_ROOT / ".private-terms"
+    words = [line.strip().lower() for line in path.read_text(encoding="utf-8").splitlines()] if path.is_file() else []
+    return "|".join(re.escape(word) for word in words if word and not word.startswith("#"))
+
+
+PRIVATE_TERMS = _private_terms()
 COMPOSE = "package com.example\nimport androidx.compose.runtime.Composable\n@Composable fun ProfileScreen() {}\n"
 
 
@@ -61,7 +70,8 @@ class KitSkillTests(unittest.TestCase):
             self.assertTrue(meta.get("description"), name)
             for retired in ("/workflow-setup", "00-capabilities", "Phase 0", "device-pass"):
                 self.assertNotIn(retired, text, (name, retired))
-            self.assertNotRegex(text.lower(), r"quizlet|assembly", name)  # the kit is public and app-neutral
+            if PRIVATE_TERMS:  # the kit is public and app-neutral; the terms live outside the repo
+                self.assertNotRegex(text.lower(), PRIVATE_TERMS, name)
 
     def test_every_host_links_the_kit_android_skills(self) -> None:
         for host in (".claude", ".codex", ".cursor", ".gemini", ".agents"):
@@ -101,20 +111,20 @@ class SelectionTests(unittest.TestCase):
             (root / "app/src/main/java/com/example/ProfileScreen.kt").write_text(COMPOSE, encoding="utf-8")
             project_skill(root, "compose-rules", "Compose conventions for this app. Use when writing Compose UI.")
             project_skill(root, "unit-testing", "Unit testing conventions. Use when writing tests.")
-            project_skill(root, "assembly-modal-dialog", "Using AssemblyModalDialog for confirmations.")
+            project_skill(root, "ds-modal-dialog", "Using DsModalDialog for confirmations.")
             project_skill(root, "jira-ticket-creator", "Creates a Jira ticket.")
             project_skill(root, "weekly-report", "A weekly report.", extra="disable-model-invocation: true\n")
             start(root, "Add a confirmation dialog to ProfileScreen")
             picked = read_json(run_dir(root) / "skills.json")
         names = [item["name"] for item in picked["implementer"]]
-        self.assertEqual(set(names[:3]), {"assembly-modal-dialog", "compose-rules", "unit-testing"})  # the app's own first
+        self.assertEqual(set(names[:3]), {"ds-modal-dialog", "compose-rules", "unit-testing"})  # the app's own first
         self.assertNotIn("compose-android", names)  # compose-rules covers Compose for this app
         self.assertNotIn("jira-ticket-creator", names)
         self.assertNotIn("weekly-report", names)
         rules = next(item for item in picked["implementer"] if item["name"] == "compose-rules")
         self.assertEqual((rules["source"], rules["path"]), ("project", ".ai/skills/compose-rules/SKILL.md"))
         self.assertIn("Compose conventions for this app", rules["description"])
-        self.assertIn("dialog", " ".join(next(i for i in picked["implementer"] if i["name"] == "assembly-modal-dialog")["why"]))
+        self.assertIn("dialog", " ".join(next(i for i in picked["implementer"] if i["name"] == "ds-modal-dialog")["why"]))
 
     def test_the_code_an_implementer_already_changed_refreshes_the_list(self) -> None:
         with GitProject() as root:

@@ -156,7 +156,7 @@ def user_branch_prefixes(repo_root, email):
     """Count `<prefix>/...` branch prefixes whose tip commit was authored by `email`.
 
     This is how we reuse the team's existing convention for this person
-    (e.g. `douglasfornaro` rather than guessing a bare first name).
+    (e.g. `jdoe` rather than guessing a bare first name).
     """
     counts = {}
     target = (email or "").strip().lower()

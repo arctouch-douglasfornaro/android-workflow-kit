@@ -64,6 +64,7 @@ The repository mirrors `~/.ai`, which is where every host reads it from.
 | `skills/android-workflow/SKILL.md` | The workflow: stages, agents, levels, stops and delivery rules (single source of truth). |
 | `skills/android-workflow/agents/` | The eight `aw-*` agents: setup, planner, tech lead, implementer, reviewer, device, delivery, PR watcher. |
 | `skills/device-driving/` | How the Device agent drives the phone or emulator (Maestro first, adb fallback). |
+| `skills/investigate-first/` | Finding the cause of a bug or crash before editing: symptom, traced path, ranked hypotheses, cause with `file:line` or the blocker. |
 | `skills/android/` | Universal Android skills (Compose, Compose performance, performance, navigation, edge-to-edge, screenshots, Android CLI, ktlint) and `catalog.json`, the topics each one covers. The workflow picks them per ticket. |
 | `tools/android-workflow/` | The Python package behind the `android-workflow` CLI, with its tests. |
 | `bin/` | `android-workflow` launcher plus the helpers the CLI calls: `feature_setup.py` (project profile), `feature_workspace.py` (ticket branch/worktree) and `android_probe.py`. |
@@ -211,7 +212,7 @@ The CLI (never an agent) then adds the line of the host running the workflow, on
 
 Optional keys: `text` (your own line instead of the host's), `commit_trailer` (`""` for none),
 `pull_request: false` or `review: false` (turn one side off). The host is read from its environment;
-`ANDROID_WORKFLOW_HOST=claude|codex|cursor|gemini` forces it. Today `quizlet-android` has it on.
+`ANDROID_WORKFLOW_HOST=claude|codex|cursor|gemini` forces it.
 
 #### JVM renders: a device only when it is needed
 

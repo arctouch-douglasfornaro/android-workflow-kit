@@ -463,9 +463,9 @@ PLAN = """# Plan
 
 Navigation recipe (debug build):
 - Preconditions: logged in.
-1. launchApp, tap `"Flashcards"`, wait for id `flashcards_content`.
-2. Swipe every card → id `flashcards_summary`. Capture `sdfc-summary-browse`.
-3. Wifi off, tap the row → error with Retry. Capture `start-round-error-retry`.
+1. launchApp, tap `"Cart"`, wait for id `cart_content`.
+2. Swipe every card → id `cart_summary`. Capture `cart-summary-browse`.
+3. Wifi off, tap the row → error with Retry. Capture `checkout-error-retry`.
 Evidence: `study-gfxinfo` (frame stats).
 
 Test plan: unit tests.
@@ -476,7 +476,7 @@ Test plan: unit tests.
 class ScaffoldTests(test_decide.RunTests):
     def test_the_recipe_becomes_one_flow_per_evidence_name(self) -> None:
         lines = recipe(PLAN)
-        self.assertEqual(evidence_names(lines), ["sdfc-summary-browse", "start-round-error-retry"])
+        self.assertEqual(evidence_names(lines), ["cart-summary-browse", "checkout-error-retry"])
         self.assertFalse(any("Test plan" in line for line in lines))
         self.start("--level", "express")
         (self.rundir / "plan.md").write_text(PLAN, encoding="utf-8")
@@ -484,14 +484,14 @@ class ScaffoldTests(test_decide.RunTests):
         again = scaffold(self.root, {})
         flows = self.rundir / "media/flows"
         nav = (flows / "_nav.yaml").read_text(encoding="utf-8")
-        browse = (flows / "sdfc-summary-browse.yaml").read_text(encoding="utf-8")
-        self.assertEqual(sorted(result["written"]), ["_nav.yaml", "sdfc-summary-browse.yaml",
-                                                     "start-round-error-retry.sh", "start-round-error-retry.yaml"])
+        browse = (flows / "cart-summary-browse.yaml").read_text(encoding="utf-8")
+        self.assertEqual(sorted(result["written"]), ["_nav.yaml", "cart-summary-browse.yaml",
+                                                     "checkout-error-retry.sh", "checkout-error-retry.yaml"])
         self.assertIn("appId: com.example.debug", nav)
         self.assertIn("# TODO 2. Swipe every card", nav)
         self.assertIn("- runFlow: _nav.yaml", browse)
-        self.assertIn("- takeScreenshot: sdfc-summary-browse", browse)
-        self.assertTrue(os.access(flows / "start-round-error-retry.sh", os.X_OK))
+        self.assertIn("- takeScreenshot: cart-summary-browse", browse)
+        self.assertTrue(os.access(flows / "checkout-error-retry.sh", os.X_OK))
         self.assertEqual(again["written"], [])  # never overwrites a flow the agent filled in
 
     def test_an_audio_ticket_gets_a_logcat_flow_that_keeps_only_the_matching_lines(self) -> None:

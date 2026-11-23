@@ -184,7 +184,7 @@ the behavior only a running app shows.
 `RUN/device-report.md`, always, BLOCKED included (a round without it is a round wasted). Its first
 line is `## Status: <VERDICT>` (`PASS` | `PARTIAL` | `FAIL` | `BLOCKED`), then headings exactly:
 Device (model, API, serial), Scenarios (one line per AC, starting with its id and ending with `: PASS` / `: FAIL` / `: BLOCKED`
-before the detail, e.g. `- AC5 legacy flashcards: PASS. Expected … Observed …`; the review draft
+before the detail, e.g. `- AC5 legacy cart: PASS. Expected … Observed …`; the review draft
 reads the verdict per AC from these lines; when the `before` capture shows the base build failing the
 same way, write `: FAIL, also fails on base`), Evidence (media paths),
 Not verified, Anomalies. `PARTIAL`: every AC you checked passed, but a device AC stayed unverified,

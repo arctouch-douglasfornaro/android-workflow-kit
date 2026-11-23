@@ -256,7 +256,7 @@ class StructuralRefreshTests(unittest.TestCase):
         profile.write_text(profile.read_text() + "\n## Device recipes\n\n- Set page: open Recents, tap the set\n")
         result = setup.ensure(self.root, no_probe=True)
         self.assertFalse(result["requires_explorer"])
-        profile.write_text(profile.read_text() + "- Learn: deep link quizlet://learn\n")
+        profile.write_text(profile.read_text() + "- Learn: deep link example://learn\n")
         self.assertFalse(setup.ensure(self.root, no_probe=True)["requires_explorer"])
 
     def test_an_edit_outside_learned_sections_still_needs_review_and_names_the_snapshot(self):

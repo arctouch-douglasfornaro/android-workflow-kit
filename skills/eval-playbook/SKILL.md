@@ -64,7 +64,7 @@ that case once before blaming an edit.
 `not_regex`, `cli`, `unchanged`, `sections_unchanged`, `no_secrets`, `map_row`, `not_mapped`, each with
 a `weight`), `rubric` (`id`, `weight`, `criterion` the judge scores 0–10 against the code), `judge_reads`.
 The prompt reads like the host's real spawn and never says eval, test, grade or rubric; the fixture
-is synthetic (no Quizlet code, no user data, no real accounts). `python3 -m unittest skill_eval_test`
+is synthetic (no real app code, no user data, no real accounts). `python3 -m unittest skill_eval_test`
 in `~/.ai/bin` checks every case loads.
 
 ## Never

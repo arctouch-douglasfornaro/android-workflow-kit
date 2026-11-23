@@ -61,7 +61,7 @@ class FeatureMapTests(unittest.TestCase):
         self.assertNotIn("SetPageActivity", stale["uncovered"])
         self.write_map(
             "| Set page | `SetPageActivity` | 1. Launch → tap a set | | | | `app/src/main/Set.kt:3` |\n"
-            "| Learn | LearnActivity | Set page → Learn | quizlet://learn | | | |\n"
+            "| Learn | LearnActivity | Set page → Learn | example://learn | | | |\n"
             "| Home | | Launch | | | | app/src/main/res/navigation/home.xml |\n",
             "| *Debug* | debug only |\n| feature/folders/** | not shipped |\n")
         result = feature_map.status(self.root, self.root)
