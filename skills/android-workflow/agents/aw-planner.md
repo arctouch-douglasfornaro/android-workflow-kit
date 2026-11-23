@@ -80,7 +80,11 @@ The only planning role for `/android-workflow`. One pass, short output.
    the way to force it on the device (airplane mode, `adb shell svc wifi disable`, a debug toggle)
    and its proof is `both`, never "device optional". Only when nothing on a device can force it,
    write `unit` and say why in one line.
-6. Test plan: which unit/Compose/Robolectric tests prove each AC and fail without the change.
+6. Test plan: which unit/Compose/Robolectric tests prove each AC and fail without the change. An AC
+   about what the screen does (an element shown or hidden, a label that updates or stays, a state
+   after resume) is proven where the screen is: a Compose UI or Robolectric test when the project
+   has one, otherwise `device` with its own recipe step. A unit test of the logic behind it proves
+   the logic, not the screen, so it is a second proof, never the only one.
 7. Skills: `RUN/skills.json` already lists the Android skills the CLI picked from the ticket and the
    likely files. If one clearly does not apply, or a listed project skill is missing for this change,
    fix it: `CLI skills --target TARGET --drop <name>` / `--add <name>` (names from `considered`).
