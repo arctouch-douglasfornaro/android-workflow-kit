@@ -126,6 +126,13 @@ def git(workdir: Path, *args: str) -> None:
     subprocess.run(["git", "-C", str(workdir), *args], check=True, capture_output=True, text=True)
 
 
+def fill(text: str, values: dict[str, str]) -> str:
+    """Replace only the known `{KEY}` placeholders: a stack trace's `{com.app/...}` stays as written."""
+    for key, value in values.items():
+        text = text.replace("{" + key + "}", value)
+    return text
+
+
 def git_head(workdir: Path) -> str:
     done = subprocess.run(["git", "-C", str(workdir), "rev-parse", "HEAD"], check=True, capture_output=True, text=True)
     return done.stdout.strip()
@@ -157,7 +164,8 @@ def prepare(case_id: str) -> dict[str, Any]:
     git(workdir, "init", "-q", "-b", "main")
     git(workdir, "-c", "user.name=Dev", "-c", "user.email=dev@localhost", "add", "-A")
     git(workdir, "-c", "user.name=Dev", "-c", "user.email=dev@localhost", "commit", "-q", "-m", "Initial import")
-    values: dict[str, str] = {"TARGET": str(workdir), "CLI": CLI_TEXT, "BASE_SHA": git_head(workdir)}
+    values: dict[str, str] = {"TARGET": str(workdir), "CLI": CLI_TEXT, "BASE_SHA": git_head(workdir),
+                         "FAKEBIN": str(workdir.parent / "fakebin")}
     for step in case.get("prepare", []):
         kind = step["do"]
         if kind == "overrides":
@@ -182,6 +190,9 @@ def prepare(case_id: str) -> dict[str, Any]:
             git(workdir, "-c", "user.name=Dev", "-c", "user.email=dev@localhost", "add", "-A")
             git(workdir, "-c", "user.name=Dev", "-c", "user.email=dev@localhost", "commit", "-q", "--allow-empty", "-m", step["message"])
             values["HEAD_SHA"] = git_head(workdir)
+            values["HEAD12"] = values["HEAD_SHA"][:12]
+        elif kind == "git":  # e.g. an `origin` remote and its ref, for agents that read `origin/<base>`
+            git(workdir, *[fill(arg, values) for arg in step["args"]])
         elif kind == "accept_profile":
             sys.path.insert(0, str(KIT / "bin"))
             import feature_setup  # noqa: PLC0415
@@ -189,7 +200,7 @@ def prepare(case_id: str) -> dict[str, Any]:
             feature_setup.ensure(workdir, no_probe=True)
             feature_setup.ensure(workdir, accept=True)
         elif kind == "cli":
-            args = [arg.format(**values) for arg in step["args"]]
+            args = [fill(arg, values) for arg in step["args"]]
             answer = run_cli(args, workdir)
             # `field` keeps one value of the answer (e.g. the review `tree`) for a later rendered copy
             values[step["as"]] = str(answer.get(step["field"], "")) if step.get("field") else json.dumps(answer, indent=2)

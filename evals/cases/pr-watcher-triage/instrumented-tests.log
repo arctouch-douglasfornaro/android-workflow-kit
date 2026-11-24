@@ -1,0 +1,9 @@
+> Task :feature:settings:connectedDebugAndroidTest
+com.notes.feature.settings.SettingsScreenTest > darkThemeToggle[Pixel_6_API_34(AVD) - 14] FAILED
+    java.lang.AssertionError: Assert failed: The component is not toggled on
+        at com.notes.feature.settings.SettingsScreenTest.darkThemeToggle(SettingsScreenTest.kt:31)
+Tests on Pixel_6_API_34(AVD) - 14 failed: There was 1 failure(s).
+The same test failed on main at 2026-11-23 (run 812): SettingsActivity's switch is hardcoded `checked = false`.
+> Task :feature:notes:connectedDebugAndroidTest
+com.notes.feature.notes.ArchiveScreenTest > showsArchivedNotes PASSED
+BUILD FAILED in 4m 12s

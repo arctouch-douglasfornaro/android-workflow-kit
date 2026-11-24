@@ -60,7 +60,8 @@ that case once before blaming an edit.
 
 `~/.ai/evals/cases/<id>/case.json`: `agent`, `tier`, `fixture`, `prepare` (`overrides`, `accept_profile`,
 `copy` (`render: true` fills `{BASE_SHA}`, `{HEAD_SHA}`, `{TARGET}` in the copied file), `commit` (`message`; the
-import is the base, a commit is e.g. the PR head of a `pr` review), `cli` with `as` to fill `{NAME}` in the prompt), `snapshot` (files compared by `unchanged`),
+import is the base, a commit is e.g. the PR head of a `pr` review), `branch`, `git` (`args`), `cli` with `as` to fill `{NAME}` in the prompt (`field` keeps one value of its answer); `{FAKEBIN}` is a
+folder next to the workspace for stand-ins like a logging `gh`, put first on the prompt's CLI `PATH`), `snapshot` (files compared by `unchanged`),
 `prompt_file`, `answers` (what the developer says to a NEEDS_INPUT, optional), `checks` (`json_equals`, `json_contains`, `file_exists`, `file_absent`, `regex`,
 `not_regex`, `cli`, `unchanged`, `sections_unchanged`, `no_secrets`, `map_row`, `not_mapped`, each with
 a `weight`), `rubric` (`id`, `weight`, `criterion` the judge scores 0–10 against the code), `judge_reads`.
