@@ -1075,6 +1075,75 @@ class ExplicitAvdTests(unittest.TestCase):
         self.assertIsNone(self.pick("Pixel_Tablet", running=("Pixel_Tablet",), booting=("Pixel_Tablet",))[0])
 
 
+class AvdRankTests(unittest.TestCase):
+    """Phones before tablets, `device.avd` (a name or a list) first, a new AVD found with no config."""
+
+    def home(self, folder, avds):
+        root = Path(folder)
+        for name, (width, height, density, tag) in avds.items():
+            (root / f"{name}.avd").mkdir()
+            (root / f"{name}.avd" / "config.ini").write_text(
+                f"hw.lcd.width={width}\nhw.lcd.height={height}\nhw.lcd.density={density}\ntag.id={tag}\n", encoding="utf-8")
+            (root / f"{name}.ini").write_text(f"path={root / (name + '.avd')}\n", encoding="utf-8")
+        return root
+
+    AVDS = {"A_Tablet": (2560, 1600, 320, "google_apis"), "B_Phone": (1080, 2280, 440, "google_apis"),
+            "C_Tv": (1920, 1080, 320, "android-tv"), "D_Phone": (720, 1280, 320, "google_apis")}
+
+    def pick(self, folder, preferred=None, running=(), failed=()):
+        from unittest import mock
+
+        from android_workflow import emulator
+
+        overrides = {} if preferred is None else {"avd": preferred}
+        with mock.patch.dict("os.environ", {"ANDROID_AVD_HOME": str(self.home(folder, self.AVDS))}), \
+                mock.patch.object(emulator, "list_avds", return_value=list(self.AVDS)), \
+                mock.patch.object(emulator, "_read_pool", return_value=[]), \
+                mock.patch.object(emulator, "devices", return_value=[]), \
+                mock.patch.object(emulator, "_running_avds", return_value=set(running)), \
+                mock.patch.object(emulator, "_failures", return_value={name: 1.0 for name in failed}), \
+                mock.patch.object(emulator, "_overrides", return_value=overrides):
+            return emulator._pick_avd(Path("/app"), "adb", "emulator", None)
+
+    def test_kind_comes_from_the_avd_config(self) -> None:
+        import tempfile
+        from unittest import mock
+
+        from android_workflow import emulator
+
+        with tempfile.TemporaryDirectory() as folder, \
+                mock.patch.dict("os.environ", {"ANDROID_AVD_HOME": str(self.home(folder, self.AVDS))}):
+            kinds = {name: emulator.avd_kind(name) for name in [*self.AVDS, "Missing"]}
+        self.assertEqual(kinds, {"A_Tablet": "tablet", "B_Phone": "phone", "C_Tv": "other", "D_Phone": "phone",
+                                 "Missing": "phone"})
+
+    def test_with_no_config_a_phone_opens_before_a_tablet(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as folder:
+            self.assertEqual(self.pick(folder), ("B_Phone", False, []))
+        with tempfile.TemporaryDirectory() as folder:
+            self.assertEqual(self.pick(folder, running=("B_Phone", "D_Phone"))[:2], ("A_Tablet", False))
+
+    def test_a_preference_list_comes_first_then_phones_before_tablets(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as folder:
+            self.assertEqual(self.pick(folder, preferred=["D_Phone", "A_Tablet"])[:2], ("D_Phone", False))
+        with tempfile.TemporaryDirectory() as folder:
+            chosen, read_only, warnings = self.pick(folder, preferred=["D_Phone", "A_Tablet"], running=("D_Phone",))
+        self.assertEqual((chosen, read_only), ("A_Tablet", False))
+        self.assertIn("'D_Phone' is already running", warnings[0])
+        with tempfile.TemporaryDirectory() as folder:  # a single name, failed lately: the next phone, not the tablet
+            self.assertEqual(self.pick(folder, preferred="A_Tablet", failed=("A_Tablet",))[0], "B_Phone")
+
+    def test_every_avd_running_starts_a_read_only_copy_of_the_first(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as folder:
+            self.assertEqual(self.pick(folder, preferred="D_Phone", running=tuple(self.AVDS))[:2], ("D_Phone", True))
+
+
 class DeviceLaunchTests(unittest.TestCase):
     def test_pins_launch_cold_then_open_the_link(self) -> None:
         import json

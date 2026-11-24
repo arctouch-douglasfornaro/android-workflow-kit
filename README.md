@@ -62,7 +62,7 @@ The repository mirrors `~/.ai`, which is where every host reads it from.
 | `.claude/`, `.codex/`, `.cursor/`, `.gemini/`, `.agents/` | Ready-made folders for each tool. They hold only pointers: links to the skills and small agent files that say "read `~/.ai/skills/android-workflow/agents/aw-…md`". |
 | `link.sh` | One-time setup: links those folders into your home so every tool finds them. |
 | `skills/android-workflow/SKILL.md` | The workflow: stages, agents, levels, stops and delivery rules (single source of truth). |
-| `skills/android-workflow/agents/` | The eight `aw-*` agents: setup, planner, tech lead, implementer, reviewer, device, delivery, PR watcher. |
+| `skills/android-workflow/agents/` | The nine `aw-*` agents: setup, planner, tech lead, implementer, reviewer, device, media, delivery, PR watcher. |
 | `skills/device-driving/` | How the Device agent drives the phone or emulator (Maestro first, adb fallback). |
 | `skills/investigate-first/` | Finding the cause of a bug or crash before editing: symptom, traced path, ranked hypotheses, cause with `file:line` or the blocker. |
 | `skills/create-ticket/` | Writes a ticket (title, description, acceptance criteria, tech detail) as text; filing it in a tracker is a separate step. |
@@ -132,179 +132,78 @@ command only to change one of them:
 | Branch | On `main` (or the repo's base branch): creates `<user>/<TICKET>-<slug>` in the same checkout. On any other branch: keeps working on it | `--worktree` to work in a separate folder instead |
 | PR base | The repo's default branch (`origin/HEAD`, else `main`, `master` or `develop`) | `--base BRANCH` |
 | Depth | Chosen from the ticket: `express` for a small, clear change (no Planner); `full` for risky areas (lifecycle, migrations, payments, auth); `standard` otherwise. Bugs are never `express` | `--level express\|standard\|full` |
-| Device check | Runs when the change is visible or runtime. No free device: it opens your emulator for the run (the AVD in `device.avd` of `.ai/android-workflow.json`, else one not running yet) and closes it at the end when no other run is waiting for one; a device you connected or opened is reused when free and never closed. A change you can only hear or see in the logs (audio, analytics events) is checked on the device too, from the filtered logcat. No emulator at all: skipped, and the PR says it was not verified on a device | `--no-device` to always skip it |
+| Device check | Runs when the change is visible or happens at runtime (audio and analytics events too, from the filtered logcat). It opens an emulator for the run: `device.avd` first (a name or a list), then phones before tablets. No emulator at all: skipped, and the PR says so | `--no-device` to always skip it |
 | Delivery | Commits, pushes and opens the PR (a draft if some check is still failing) | `--no-pr`, `--no-push` or `--no-commit` to stop earlier |
 | After the PR | The PR Watcher follows it until it is merged (below) | `--no-watch` to stop at the PR |
 
 ### 3. What happens
 
-1. **Branch** — on the base branch it creates `<user>/<TICKET>-<slug>`; on any other branch it keeps working there.
-2. **Setup (first run only)** — learns the project's patterns and quality tools and saves them in `.ai/project-profile.md`. Later tickets reuse it.
-3. **Depth** — picks `express`, `standard` or `full` from the ticket (see *Depth* in the table above).
-4. **Planner** — reads the code and writes verifiable acceptance criteria. Meanwhile the emulator boots (when no device is connected) and the unchanged app is built in the background, in its own checkout (`~/.cache/android-workflow/base/<repo>/`), never in yours: it cannot race the Implementer, it builds incrementally from one ticket to the next, and its APK is cached by commit (a second ticket on the same base gets it at once).
-5. **Implementer** — reads the Android skills this ticket needs (picked automatically: your app's own skills first, e.g. its Compose or testing rules, then the kit's), writes the change and the unit tests that prove it. In parallel, if a device is connected, the **before** screenshots are captured.
-   When the plan has independent parts (different modules, data and UI) the **Tech Lead** splits it into slices, up to
-   **3 Implementers** build them at the same time, each owning its own files, and the Tech Lead integrates them before the gate.
-6. **Quality gate** — formatter, compile, unit tests, detekt and lint for the modules touched. Failures go back to the Implementer (up to 2 times).
-7. **Code reviewer** — an independent review of the diff: bugs, side effects, callers, duplication, project conventions. Blocking findings go back to the Implementer once.
-8. **Device check** — installs the app, navigates to the change with Maestro flows (`CLI device scaffold` writes them from the plan, and lists flows earlier tickets proved, to copy) and captures the **after** screenshots or video. A PASS stands on flows replayed for the code that ships, so the next round replays them for free. When the **before** could not be captured while the Implementer worked, the same flows are replayed on the base APK afterwards. A check that left an AC unverified or saw something odd is **PARTIAL**: you choose ready, draft or another device round.
-9. **PR** — commits only app code, pushes and opens the PR.
-10. **PR Watcher** — follows the PR until it is merged. See below.
+1. Branch: on the base branch it creates `<user>/<TICKET>-<slug>`; on any other branch it keeps working there.
+2. Setup, first run only: learns the project's patterns and quality tools and saves them in `.ai/project-profile.md`. Later tickets reuse it.
+3. Depth: `express`, `standard` or `full`, from the ticket (see the table above).
+4. Planner: reads the code and writes verifiable acceptance criteria. The unchanged app builds in the background in its own checkout, so the device can capture the before state.
+5. Implementer: writes the change and the unit tests that prove it, following the Android skills the ticket needs (your app's own first). When the plan has independent parts, a Tech Lead splits it and up to 3 Implementers build the slices at once.
+6. Quality gate: formatter, compile, unit tests, detekt and lint for the touched modules. Failures go back to the Implementer, up to 2 times.
+7. Code reviewer: an independent review of the diff (bugs, side effects, callers, duplication, project conventions), in parallel with the gate. Blocking findings go back once.
+8. Device check: installs the app, reaches the change with Maestro flows and captures the after screenshots or video, paired with the before. A check that left a criterion unverified, or saw something odd, is PARTIAL and you choose: ready, draft or another round.
+9. PR: commits only app code, pushes and opens the PR.
+10. PR Watcher: follows the PR until it is merged (below).
 
-You see one line per stage in the chat, e.g. `Reviewer: approved, 0 blocking → review.json`.
+The chat gets one line per stage, e.g. `Reviewer: approved, 0 blocking → review.json`.
 
-### Two tickets at once
-
-Run two workflows side by side (each with `--worktree`, in its own session). The CLI keeps them from
-stepping on each other:
-
-- **Builds**: the gate, the base build and the device build take one of a few machine-wide build
-  slots and wait for a free one (`execution.max_parallel_builds`, default 2). The Device APK is built
-  before the run takes a device, so a device is only held for `adb install` and the flows.
-- **Device**: each run gets its own, leased from the first time it needs one until `finish`. An
-  emulator already open that no run uses is reused; otherwise one more emulator starts just for that
-  run (another AVD, or the same one read-only), up to `"device": {"max_emulators": 2}` in
-  `.ai/android-workflow.json`. Past that, the run waits (`next` says which run holds each device).
-  By default (`"device": {"dedicated": true}`) the workflows stay off **your** devices: each run
-  only uses an emulator the workflow started for it, never the emulator you opened or your phone
-  (those are never leased, touched or closed). An emulator another run gave back is still reused, and
-  the lease keeps it to one run at a time. To let runs use your open emulator or a phone, set
-  `"dedicated": false` (or `ANDROID_WORKFLOW_DEDICATED_DEVICE=0` for one session).
-  With 3+ runs on one laptop, keep 2 build slots (or 1) and close Android Studio.
-- **Base build**: one per repository at a time, shared by commit.
-- **Build cache**: when the project keeps its Gradle build cache inside the checkout
-  (`new File(rootDir, 'gradle-build-cache')`), every worktree (a review, the base checkout) would start
-  with an empty one and build the whole app. Each Gradle run the workflow starts in a worktree gets an
-  init script that points that cache at the main checkout's, so it reuses the outputs your own builds
-  left there. `ANDROID_WORKFLOW_SHARED_BUILD_CACHE=0` turns it off.
+Two tickets at once work too: run each with `--worktree` in its own session. The CLI shares build
+slots (`execution.max_parallel_builds`, default 2) and gives each run its own emulator, up to
+`device.max_emulators`. By default (`device.dedicated: true`) runs only use emulators the workflow
+started, never the emulator you opened or your phone; `false` lets them. With 3 or more runs on one
+laptop, keep 2 build slots or fewer and close Android Studio. Details: [`docs/cli-decisions.md`](docs/cli-decisions.md).
 
 ### 4. What you get
 
-- **A PR, every time code was written.** Ready for review when every check passed; a **draft** that
-  lists what is still open when a check kept failing (gate, review or device). The commit and PR
-  carry no tool or AI attribution (unless the project opts in, see below) and follow the repo's PR
-  template when there is one.
-- **Before/after evidence** in `.ai/workflow/<TICKET>/media/before/` and `media/after/`, plus
-  `media/compare.md`. `deliver` fills the template's Before/After table with one row per capture
-  (the file each cell needs) and opens `media/` in Finder; nothing is uploaded, so drag them into
-  the PR.
-- **A log of the run** in `.ai/workflow/<TICKET>/stage-log.md`, with time and tokens per stage in
-  `stage-metrics.json` to spot what was slow or expensive.
+- A PR every time code was written: ready for review when every check passed, or a draft listing what
+  is still open. It follows the repo's PR template and carries no tool or AI attribution unless the
+  project sets `{"attribution": {"enabled": true}}` in `.ai/android-workflow.json` (the CLI then adds
+  the host's `Generated with` line, and a `Co-Authored-By` trailer on Claude Code).
+- Before/after evidence in `.ai/workflow/<TICKET>/media/`, with the PR template's Before/After table
+  filled in. Nothing is uploaded: drag the files into the PR.
+- A log in `.ai/workflow/<TICKET>/stage-log.md`, with time and tokens per stage in `stage-metrics.json`.
 
-Everything under `.ai/workflow/` stays on your machine; it is git-ignored and never committed.
+Everything under `.ai/workflow/` stays on your machine and is git-ignored.
 
-#### AI attribution (opt-in per project)
-
-Off by default: commits, PR bodies and reviews carry no `Generated with …`, `🤖` or agent
-`Co-Authored-By`, and any such line an agent writes is stripped. A project whose team agreed to credit
-the tool turns it on in its `.ai/android-workflow.json`:
-
-```json
-{"attribution": {"enabled": true}}
-```
-
-The CLI (never an agent) then adds the line of the host running the workflow, once:
-
-| Where | What is added |
-| --- | --- |
-| `/android-workflow`: PR body | `🤖 Generated with [Claude Code](https://claude.com/claude-code)` as the last paragraph (Codex, Cursor and Gemini CLI get their own name) |
-| `/android-workflow`: commit | `Co-Authored-By: Claude <noreply@anthropic.com>` (Claude Code only; other hosts add no trailer) |
-| `/android-review`: review body | the same `Generated with` line under the body, shown in `review-draft.md` before your OK. Never on inline comments, thread replies or PR Watcher answers |
-
-Optional keys: `text` (your own line instead of the host's), `commit_trailer` (`""` for none),
-`pull_request: false` or `review: false` (turn one side off). The host is read from its environment;
-`ANDROID_WORKFLOW_HOST=claude|codex|cursor|gemini` forces it.
-
-#### JVM renders: a device only when it is needed
-
-A visible change is proved on a device (5–15 min of emulator, two APK builds). For **static UI**
-(layout, colors, texts, empty/error/long-text/dark/font-scale/RTL states, or a screen not wired to any
-navigation yet) a **JVM render** proves it in 1–3 minutes with no emulator: Robolectric draws the
-composable with Android's real graphics inside the unit-test JVM. The workflow decides by code, per
-acceptance criterion, from the Planner's proof (`unit`, `render`, `device`, `both`):
-
-| Route | When | What runs |
-| --- | --- | --- |
-| `render` | every visible AC is static UI, no navigation/permission/lifecycle/event AC | renders only: no emulator, no APK; the PR table shows `render-*.png` |
-| `both` | some AC need a running app, some states the device cannot reach | the device as before, the renders in parallel (no time added) |
-| `device` | anything else, or unsure | the device, exactly as before |
-| no device | none free or no SDK | renders prove what a screen shows instead of "not verified" |
-
-It stays **off** until Setup runs `CLI render probe --module :feature:x` and the render works there
-within `render.budget_seconds` (240) — a slow or failing module keeps the device. The generated test
-lives in `RUN/render/` and joins the module's test sources only for that Gradle call (an init script),
-so nothing is ever written to or committed from the repository. With a Figma link in the ticket, the
-renders are compared with the frame. `CLI render prefer --mode device` turns it off for a run. The
-same rules apply in `/android-review` (`evidence: render`).
+Static UI (layout, colors, texts, empty, error, dark or RTL states) can be proved by a JVM render in
+1 to 3 minutes instead of a device run: Robolectric draws the composable in the unit-test JVM. It
+stays off until Setup's `CLI render probe` passes in the module, and the CLI picks render, device or
+both per acceptance criterion. `CLI render prefer --mode device` turns it off.
 
 ### 5. After the PR: the PR Watcher
 
-Once the PR is open the workflow keeps following it, so you only add the reviewers you want:
+Once the PR is open the workflow keeps following it:
 
-- **Review comments** (people and review bots such as Cursor Bugbot): it reads each new one with the
-  code it points at. A question gets an answer on the PR; a valid point becomes a fix round
-  (Implementer → gate → delta review → device only when something visible changed), pushed as a new
-  commit, and the thread gets a reply saying what changed and in which commit. It **answers but never
-  resolves** threads: resolving is the reviewer's call. A product decision or a disagreement it cannot
-  settle with the code comes to you in the chat; nothing is posted for it. Your own comments on the PR
-  are left alone.
-- **CI**: a failing check is read (the GitHub Actions log, or the same Gradle task run locally) and
-  called *ours* (fixed), *flaky* (re-run once) or *unrelated* (fails without this change).
-- **Base branch**: when the base moves on or conflicts, it merges the base in (never a rebase or a
-  force-push); conflicts go to the Implementer and the gate before the push.
-- **Merge**: when every reviewer you requested approved, nobody still asks for changes and the
-  required checks passed, it merges with the repository's own method, inside its branch protection.
-  With no reviewer requested it merges once green and open for 30 minutes, so a reviewer you add
-  right after the PR opens is not raced. A draft never merges.
+- Review comments, from people and bots: a question gets an answer on the PR; a valid point becomes a
+  fix round (Implementer, gate, delta review, device only when something visible changed), pushed as
+  a new commit, and the thread gets a reply saying what changed. It answers threads but never resolves
+  them. A product decision or a disagreement the code cannot settle comes to you in the chat.
+- CI: a failing check is classified as ours (fixed), flaky (re-run once) or unrelated.
+- Base branch: when the base moves or conflicts, it merges the base in, never a rebase or force-push.
+- Merge: once approved, nobody still asking for changes and the required checks green, it merges with
+  the repository's method, inside branch protection. A draft or a stacked PR never merges.
 
 To watch a PR that is already open: `/android-workflow APP-123 --watch` (add `--pr 22307` when the
-branch is not checked out). It runs as long as the session is open, up to 72 hours. Per project, in
-`.ai/android-workflow.json`:
-
-```json
-{"watch": {"auto_merge": true, "require_review": true, "unreviewed_merge_after_minutes": 30,
-           "merge_method": null, "max_rounds": 6, "max_hours": 72, "bots": []}}
-```
-
-`require_review` (on by default) waits for an approval, and a PR whose base is not the default branch (stacked) never merges; with `require_review: false` a PR nobody was asked to review merges after `unreviewed_merge_after_minutes`; `auto_merge: false` stops at "ready to merge";
-`merge_method` forces `squash`, `merge` or `rebase`; `bots` lists bots whose top-level comments
-should be answered too (their inline comments always are).
+branch is not checked out). The `watch` keys in `.ai/android-workflow.json` (`auto_merge`,
+`require_review`, `merge_method`, `max_hours`, `bots`) are in the [CLI reference](tools/android-workflow/README.md).
 
 ### 6. Watch the agents work
 
-The workflow keeps a page that shows the run as an isometric office, Habbo style: one desk per agent
-(plus the Tech Lead and extra Implementers when a team works), a corridor and a coffee room. Only the agents doing work sit at their desk; the others follow a
-deterministic routine — coffee, a chat in the corridor, the console in front of the TV, the window,
-a game at their desk —
-and walk back as soon as they get work. It is **live**: each working agent's clock counts second by
-second next to its name, the file the Implementer is editing shows up on its line (and in its
-**Live changes** tab, with lines added and removed) as soon as it is saved, and new activity lands in
-the chat within a couple of seconds, without reloading the page or closing the panel you are reading.
-Tokens are live too: a working agent's count so far (a pulsing dot next to it) is read from the host's
-own transcript — Claude Code (`~/.claude/projects/…/subagents/`) and Codex (`~/.codex/sessions/`) —
-using the same number the host reports when the agent returns. Cursor and Gemini write no per-agent
-token log, so there the count appears when the agent's stage is logged. `ANDROID_WORKFLOW_NO_USAGE=1`
-turns the reading off.
-The page also shows who sent work back for a fix, time and tokens per agent and the run's activity as
-a chat. It is **one office for every app and run**: a **Project** selector (worktrees count as their
-repository) and a **Workflow** selector (running runs first, then past ones) switch the office in place,
-and the address keeps the run (`#run=…`) so a reload or a bookmark reopens it. A review whose verdict
-is posted shows as **watching** (it only follows the PR) and its clock stops at the post; a merged or
-closed PR shows **completed**; a run nothing works on any more (a closed session, a removed worktree)
-shows **unfinished**, its clock stopped at its last update. **Click any desk,
-agent, file card or message** to read what that agent produced, formatted: the plan and acceptance
-criteria, the implementation notes and changed files, every quality-gate check (with the Gradle
-logs), the review's blocking points and suggestions, the device report with before/after
-screenshots (side by side or with a slider), and the PR description.
+Each run has a live page that shows the agents as an office: one desk per agent, its clock and tokens,
+the file the Implementer is editing and the run's activity as a chat. Click a desk to read what that
+agent produced: the plan, the gate's checks, the review, the device report with before/after
+screenshots, the PR description. One page covers every app and run.
 
 ![The agent office: a team of three Implementers works, each with its clock and the file it is editing](docs/office.png)
 
 ![Clicking the Implementer opens its live changes](docs/office-panel.png)
 
-The link appears in the chat when a run starts and again in the final summary, always as the
-same line, `🏢 **Office:** file:///…`, written by the CLI (not worded by the agent); `start` and
-`status` also print it last in their own output. Cmd+click it in the terminal and the office opens
-at that run. To open it yourself:
+The link appears in the chat when a run starts and in the final summary (`🏢 **Office:** file:///…`).
+To open it yourself:
 
 ```bash
 python3 ~/.ai/bin/android-workflow office                 # every app and run
@@ -312,11 +211,8 @@ python3 ~/.ai/bin/android-workflow office --target .      # at this app's curren
 python3 ~/.ai/bin/android-workflow office --prune [--days 30]   # forget removed worktrees (and old runs)
 ```
 
-It is a local file (`~/.local/state/android-workflow/office/office.html`, or `$ANDROID_WORKFLOW_OFFICE_HOME`);
-no server, nothing leaves your machine. Each app's `.ai/workflow/office.html` only opens it at that app's
-run. While a run is live a small background process keeps it current between commands; it stops by
-itself when the run ends. A run stays listed after its worktree is removed until `office --prune`;
-`clean` in an app removes its runs from the office too.
+It is a local file; nothing leaves your machine.
+
 
 ### 7. When it stops to ask you
 
@@ -357,26 +253,22 @@ videos, trusts CI when it passed on the PR head (else the local gate) and, when 
 runs the device on the base APK and on the PR head. Then it shows the review it would post
 (verdict, at most 10 inline comments, `nit:` for non-blocking ones) and posts it **only after your
 OK**.
-With `attribution` on for the project (see [AI attribution](#ai-attribution-opt-in-per-project)), the
-review body ends with the host's `Generated with` line.
+With `attribution` on for the project, the review body ends with the host's `Generated with` line.
 
-After the post it **keeps following the PR by default** until it is merged or closed (`--no-watch`
-stops right after the post; you can also say stop at any time). It uses the same watch as
-`/android-workflow`: the PR is read every minute, slower while nothing changes (up to every 5 min),
-and the watch hands over to you after `watch.max_hours` (72 by default) in `.ai/android-workflow.json`.
-It only wakes up for:
+After the post it keeps following the PR until it is merged or closed (`--no-watch` stops right
+after the post, or say stop at any time):
 
-| What happens on the PR | What it does |
-| --- | --- |
-| New commits | A delta review of only the new commits, checking whether each of our earlier comments was addressed. The Planner runs again only when the PR text changed. The device and the Media analyst run again only when the new commits change UI or the attachments changed; otherwise their earlier result carries over. If we already approved and the new commits raise nothing new, **no second review is posted**: it only offers to resolve our addressed threads (or ends quietly when there are none). |
-| Someone answers a thread we took part in, or @mentions us | Drafts the replies and shows them; posts only after your OK. |
-| One of **our** threads is settled (fix confirmed on the head, or the author was right) | Proposes resolving it, listed in the draft you approve; resolved right after the review or reply posts. `--keep-open T1` (or `R1`) leaves it open. |
-| You comment on the PR by hand | Recorded as `missed` in `review-decisions.jsonl`: what the review did not catch. |
-| Merged or closed | Stops, and the run is marked completed. |
-| `watch.max_hours` passed | Tells you and stops; run `/android-review` again to keep following it. |
+- New commits: a delta review of only those commits, checking whether our earlier comments were
+  addressed. The device and the media check run again only when the commits change UI or the
+  attachments changed. When we already approved and nothing new comes up, no second review is posted;
+  it only offers to resolve our addressed threads.
+- A reply in a thread we took part in, or an @mention: it drafts the answers and posts them after your OK.
+- One of our threads settled: it proposes resolving it in the draft you approve.
+- A comment you write on the PR by hand is recorded as `missed` in `review-decisions.jsonl`, what the
+  review did not catch.
 
 It never resolves another reviewer's thread, never posts or resolves without your OK, and never
-merges. The watch lives in the Claude Code session: closing the session stops it.
+merges. Closing the session stops the watch.
 
 ### Listening for review requests
 

@@ -183,7 +183,7 @@ Implementers of a team with each other (one owner per file).
   the same base gets them at once;
 - each run has its own device: the first time it needs one it leases a ready device nobody uses (an
   emulator already open, a phone), else one more emulator starts just for it, up to
-  `device.max_emulators` (default: one per 12 GB of memory, 2 to 4; a busy or failing `device.avd` falls back to another AVD that is not
+  `device.max_emulators` (default: one per 12 GB of memory, 2 to 4; AVDs in `device.avd` order (a name or a list), then phones before tablets; a busy or failing one falls back to the next AVD that is not
   running, else a second copy runs `-read-only` once the first has booted); past that, `next`
   answers `wait_device` naming who holds each device. `device.dedicated` (default `true`): only
   emulators the workflow started are leased, never the developer's own emulator or phone; one another

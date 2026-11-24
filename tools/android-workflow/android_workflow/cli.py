@@ -4495,7 +4495,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="block until a ready device no other run is using is free for this run (starts one more "
              "emulator first when device.max_emulators > 1)",
     )
-    emulator_parser.add_argument("--avd", help="AVD to start (default: device.avd in the project overrides, else the first)")
+    emulator_parser.add_argument("--avd", help="AVD to start (default: the first free AVD in device.avd order, then phones before tablets)")
     emulator_parser.add_argument("--headless", action="store_true", help="start without a window")
     emulator_parser.add_argument("--timeout", type=float, help="seconds --wait waits for the boot (default 300)")
     office_parser = subparsers.add_parser("office", help="open the page that shows the agents of every app and run")

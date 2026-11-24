@@ -8,8 +8,9 @@ the same device first (`prefer`). `claim` is the one entry point:
 * the run already holds a device → that one (a leased emulator that died is dropped and replaced);
 * a ready device nobody leases (an emulator the developer or another run opened, a phone) → leased;
 * else, below `device.max_emulators` (default: one per 12 GB of memory, 2 to 4) emulators the workflow started → one more, started
-  for this run and leased to it while it boots (the configured AVD; when it is running or failed to
-  boot lately, another AVD that is not running; else the configured AVD again with `-read-only`, once
+  for this run and leased to it while it boots (the first AVD in `rank_avds` order that is not running
+  and did not fail to boot lately: `device.avd` names, then phones, tablets, TV/Wear; else the first
+  again with `-read-only`, once
   its first copy has booted: two copies of one AVD never boot at once);
 * a leased emulator that is gone, or still not booted `device.boot_stall_seconds` (360) after it
   started, is `failed`: closed (when the workflow started it), its lease released, its AVD avoided for
@@ -373,11 +374,69 @@ def status(target: Path) -> dict[str, Any]:
     return {"status": "no_device", "reason": "no device connected"}
 
 
+def _avd_home() -> Path:
+    if os.environ.get("ANDROID_AVD_HOME"):
+        return Path(os.environ["ANDROID_AVD_HOME"]).expanduser()
+    if os.environ.get("ANDROID_USER_HOME"):
+        return Path(os.environ["ANDROID_USER_HOME"]).expanduser() / "avd"
+    return Path.home() / ".android" / "avd"
+
+
+def _avd_config(name: str) -> dict[str, str]:
+    """The AVD's `config.ini` as key → value; empty when it cannot be read."""
+    home = _avd_home()
+    folder = home / f"{name}.avd"
+    try:
+        for line in (home / f"{name}.ini").read_text(encoding="utf-8").splitlines():
+            if line.startswith("path="):
+                folder = Path(line.split("=", 1)[1].strip())
+                break
+    except OSError:
+        pass
+    try:
+        lines = (folder / "config.ini").read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return {}
+    return {key.strip(): value.strip() for key, _, value in (line.partition("=") for line in lines) if _}
+
+
+def avd_kind(name: str) -> str:
+    """`phone`, `tablet` or `other` (TV, Wear, Automotive) from the AVD's config; `phone` when unknown.
+    A tablet is a smallest width of 600 dp or more."""
+    config = _avd_config(name)
+    tag = config.get("tag.id", "").lower()
+    if any(word in tag for word in ("tv", "wear", "automotive")):
+        return "other"
+    try:
+        width, height = int(config["hw.lcd.width"]), int(config["hw.lcd.height"])
+        density = int(config.get("hw.lcd.density") or 160)
+        return "tablet" if min(width, height) * 160 / max(density, 1) >= 600 else "phone"
+    except (KeyError, ValueError):
+        return "tablet" if "tablet" in config.get("hw.device.name", "").lower() else "phone"
+
+
+def _preferred_avds(target: Path) -> list[str]:
+    """`device.avd` as a list: one name or a list of names, in the developer's order."""
+    value = _overrides(target).get("avd")
+    names = [value] if isinstance(value, str) else value if isinstance(value, list) else []
+    return [str(name).strip() for name in names if str(name).strip()]
+
+
+def rank_avds(avds: list[str], preferred: list[str]) -> list[str]:
+    """The developer's `device.avd` names first, in their order; then every other AVD the SDK lists,
+    phones before tablets before TV/Wear, each group in the SDK's order. A new AVD joins its group
+    with no config."""
+    order = {"phone": 0, "tablet": 1, "other": 2}
+    first = [name for name in preferred if name in avds]
+    rest = [name for name in avds if name not in first]
+    return first + sorted(rest, key=lambda name: order[avd_kind(name)])
+
+
 def _pick_avd(target: Path, adb: str, emulator: str, avd: str | None) -> tuple[str | None, bool, list[str]]:
-    """(AVD, read_only, warnings): the configured AVD when it is free; else (it runs, or failed to boot
-    lately) another AVD that is not running; else the configured one again `-read-only` (one AVD can
-    run twice that way), but only once every copy of it has booted: two copies of one AVD booting at
-    once kill the second. `(None, False, [why])` while it must wait for that boot."""
+    """(AVD, read_only, warnings): the first free AVD in `rank_avds` order (`device.avd` names, then
+    phones, tablets, the rest), skipping the ones running or that failed to boot lately; when every
+    AVD runs, a `-read-only` copy of the first, but only once every copy of it has booted: two copies
+    of one AVD booting at once kill the second. `(None, False, [why])` while it must wait for that boot."""
     avds = list_avds(emulator)
     if not avds:
         return None, False, []
@@ -386,11 +445,7 @@ def _pick_avd(target: Path, adb: str, emulator: str, avd: str | None) -> tuple[s
     running = _running_avds(adb, listed) | {str(item.get("avd")) for item in pool}
     booting = {str(item.get("avd")) for item in pool if not _booted(adb, str(item["serial"]))}
     failed = _failures()
-    configured = avd or _overrides(target).get("avd")
     warnings = []
-    if configured and configured not in avds:
-        warnings.append(f"AVD {configured!r} not found; set device.avd in .ai/android-workflow.json to one of {avds}")
-        configured = None
     if avd and avd in avds:
         # Asked for by name (`--avd`): that AVD or nothing, never another one in its place.
         if avd not in running:
@@ -398,28 +453,27 @@ def _pick_avd(target: Path, adb: str, emulator: str, avd: str | None) -> tuple[s
         if avd in booting:
             return None, False, [f"{avd} is still booting: a second copy starts -read-only once it has booted"]
         return avd, True, [*warnings, f"{avd} is already running: starting a -read-only copy of it"]
-    idle = [name for name in avds if name not in running]
+    preferred = _preferred_avds(target)
+    missing = [name for name in preferred if name not in avds]
+    if missing:
+        warnings.append(f"device.avd {missing} not found; the SDK lists {avds}")
+    ranked = rank_avds(avds, preferred)
+    first = next((name for name in preferred if name in avds), None)
+    idle = [name for name in ranked if name not in running]
     fresh = [name for name in idle if name not in failed]
-    if configured and configured in fresh:
-        return configured, False, warnings
-    others = [name for name in (fresh or idle) if name != configured]
-    if configured and others:
-        why = "failed to boot lately" if configured in failed else "is already running"
-        return others[0], False, [*warnings, f"device.avd {configured!r} {why}: using {others[0]!r} instead"]
-    if configured and configured in idle:
-        return configured, False, warnings  # it failed lately, but there is no other AVD to try
-    if not configured and (fresh or idle):
+    if fresh or idle:
         chosen = (fresh or idle)[0]
-        if len(avds) > 1:
-            warnings.append(f"no device.avd configured: using {chosen!r}; pin one in .ai/android-workflow.json")
+        if first and chosen != first:
+            why = "failed to boot lately" if first in failed else "is already running"
+            warnings.append(f"device.avd {first!r} {why}: using {chosen!r} instead")
         return chosen, False, warnings
-    again = [name for name in ([configured] if configured else []) + avds if name not in booting]
+    again = [name for name in ranked if name not in booting]
     if not again:
         names = sorted(booting & set(avds))
         return None, False, [f"{', '.join(names)} is still booting: a second copy starts -read-only once it has booted"]
     chosen = next((name for name in again if name not in failed), again[0])
-    if configured and chosen != configured:
-        warnings.append(f"device.avd {configured!r} is busy: using {chosen!r} -read-only instead")
+    if first and chosen != first:
+        warnings.append(f"device.avd {first!r} is busy: using {chosen!r} -read-only instead")
     return chosen, True, warnings
 
 

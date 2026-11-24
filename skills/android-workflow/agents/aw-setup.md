@@ -87,8 +87,9 @@ activities and the files that build a navigation graph. Run it with `--init` whe
    run needs to reach behavior with nothing to see: the test account the developer approved (by
    name, never a password), content that exercises audio or events, how to turn a setting on
    (its test tag, or that it has none), and the log source that shows analytics events (the tag or
-   class that prints them, checked in code). Pin the AVD: `device.avd` (`emulator -list-avds`; the
-   developer's choice, else the newest API), `device.event_log_source` (the tag or class) when it is known.
+   class that prints them, checked in code). Record `device.event_log_source` (the tag or class) when
+   it is known. `device.avd` only when the developer names one or a list (`["Pixel_9_Pro", "Pixel_Tablet"]`);
+   otherwise leave it out: the CLI ranks the SDK's AVDs itself, phones first.
 5. **JVM renders.** Only when the app uses Compose and its unit tests use Robolectric: find a test
    with `@GraphicsMode(GraphicsMode.Mode.NATIVE)` and the base class it extends (its compose rule field),
    and the app theme composable. Record `"render": {"base_class": "com.x.BaseComposeTest", "rule":
@@ -118,7 +119,7 @@ activities and the files that build a navigation graph. Run it with `--init` whe
   "install": "./gradlew :app:installProdDebug"}, "module_commands": {"compile":
   "./gradlew {module}:compileProdDebugKotlin", "unit_tests": "./gradlew {module}:testProdDebugUnitTest",
   "android_lint": "./gradlew {module}:lintProdDebug"}, "device": {"app_module": ":app",
-  "application_id": "com.example.debug", "launch_activity": ".MainActivity", "avd": "Pixel_8_API_35"}}`.
+  "application_id": "com.example.debug", "launch_activity": ".MainActivity"}}`.
   Leave `max_emulators` out: by default the workflow sizes it from the machine's memory (one emulator
   per 12 GB, 2 to 4); write it only when the developer asks for a number. `dedicated` is
   `true` by default: runs use only emulators the workflow started, never the developer's own emulator
