@@ -203,10 +203,11 @@ CLI cleanup --target T [--all] [--pr N] [--base] [--dry-run]   (worktrees of mer
    `device build`, `pr wait`, an emulator), passed, failed or killed, is followed in that same turn by
    `CLI next` and one line to the developer: a session never goes quiet while the run waits on
    nothing. A gate whose process died is marked not finished by `next`, which runs it again.
-   - `choose_level`: the rules allow express; only the ticket text can say whether it fits (`rule`).
-     Run the `express` or the `standard` command it gives (`CLI next --level …`). The CLI refuses
-     express for a bug, an open question or risk above low, and picks `full` itself.
-   - `update_spec` (express): run `CLI update-spec` with the AC and surfaces from the ticket text (a
+   - The level is the CLI's: `express` for a look-only change (a color, text, size or icon on at most
+     2 files, low risk, not a bug), which skips the Planner, writes no new test, gets a standard-tier
+     review and one render or device capture with no base build; `full` for risky work; `standard`
+     otherwise. Only the developer's `--level` overrides it.
+   - `update_spec` (express): run `CLI update-spec` as `how` says, with the AC and surfaces from the ticket text (a
      visible change is `ui`), then `next`.
    - `spawn`: spawn (or, with `resume`, resume) `agent` with `mode`, `level`, `ids` (fix-round
      finding IDs) and `read` (the reports they come from), as in *How to delegate*. With `tier:

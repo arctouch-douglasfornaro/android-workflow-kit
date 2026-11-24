@@ -28,6 +28,22 @@ FULL_WORDS = frozenset({
     "autenticacao", "senha",
 })
 EXPRESS_TYPES = frozenset({"chore", "feature"})
+EXPRESS_MAX_FILES = 2
+# A look-only change: a color, a text, a size, an icon. English and Portuguese, like FULL_WORDS.
+COSMETIC_WORDS = frozenset({
+    "color", "colour", "colors", "colours", "cor", "cores", "tint", "text", "texto", "textos", "copy", "string",
+    "strings", "label", "labels", "rótulo", "wording", "typo", "title", "título", "padding", "margin", "margins",
+    "spacing", "espaçamento", "margem", "icon", "icons", "ícone", "ícones", "font", "fonte", "typography",
+    "tipografia", "size", "tamanho", "radius", "corner", "border", "borda", "background", "fundo", "alignment",
+    "alinhamento", "elevation", "shadow", "sombra", "style", "estilo", "theme", "tema", "dimen", "drawable",
+})
+# Words that mean behavior, not look: the change needs a plan and a real device check.
+BEHAVIOR_WORDS = frozenset({
+    "when", "quando", "if", "after", "depois", "before", "antes", "loading", "carregando", "state", "estado",
+    "click", "clicking", "tap", "tapping", "toque", "clicar", "navigate", "navigation", "navegar", "show",
+    "shows", "hide", "hides", "mostrar", "esconder", "exibir", "ocultar", "only", "apenas", "unless", "until",
+    "offline", "retry", "event", "evento", "analytics", "sync",
+})
 TEAM_MIN_PARTS = 2
 TEAM_MIN_FILES = 4
 GATE_MAX_FIXES = 2      # the third red gate opens a draft PR
@@ -35,6 +51,7 @@ REVIEW_MAX_FIXES = 1    # still blocking after one fix round: draft
 DEVICE_MAX_FAILS = 2    # the second device FAIL: draft
 BEFORE_BUDGET_SECONDS = 600  # the Device `before` agent stops here: the Implementer is working meanwhile
 AFTER_BUDGET_SECONDS = 300   # the Device `after` agent: replay, judge, a few hand-driven checks
+EXPRESS_AFTER_SECONDS = 180  # express: one capture of the changed screen
 DEVICE_BUDGET_MINUTES = 0    # device time per run (a review: per round); 0 = no limit, else past it no device round starts
 DEVICE_BUDGET_GRACE_SECONDS = 300  # a round already running past the budget finishes the check in hand within this
 REVIEW_DEVICE_MAX_ROUNDS = 2  # a review: the device round and one more, never a third
@@ -83,6 +100,15 @@ def choose_level(spec: dict[str, Any], change_set: dict[str, Any] | None = None)
         blockers.append(f"risk {risk}, complexity {complexity}")
     if blockers:
         return {"level": "standard", "reasons": blockers, "express_allowed": False}
+    words = _words(text)
+    files = [item.get("path") for item in (change_set or {}).get("candidate_files") or [] if isinstance(item, dict)]
+    source_files = [path for path in files if path and "/src/test" not in path and "/src/androidTest" not in path]
+    if change_set is not None and words & COSMETIC_WORDS and not words & BEHAVIOR_WORDS \
+            and 0 < len(source_files) <= EXPRESS_MAX_FILES:
+        # Picked by code: a look-only change on at most two files needs no plan, no new test and a light check.
+        return {"level": "express", "express_allowed": True, "express_auto": True,
+                "reasons": [f"look-only change ({', '.join(sorted(words & COSMETIC_WORDS))}) on "
+                            f"{len(source_files)} file(s), low risk"]}
     return {"level": "standard", "reasons": [f"{spec.get('type')}, low risk"], "express_allowed": True}
 
 
@@ -109,7 +135,10 @@ def apply_level(spec: dict[str, Any], change_set: dict[str, Any] | None = None, 
     if spec.get("level_source") == "flag" and current in RANK:
         return spec
     raise_to = None
-    if chosen["level"] == "full" and current != "full":
+    if chosen.get("express_auto") and current in (None, "standard") and spec.get("level_source") in (None, "cli") \
+            and not spec.get("planner_updated"):
+        raise_to = "express"
+    elif chosen["level"] == "full" and current != "full":
         raise_to = "full"
     elif current == "express" and not chosen["express_allowed"]:
         raise_to = "standard"
@@ -346,17 +375,13 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
         _want_device(agent_dir)
     level = str(spec.get("level") or "standard")
     planner = stages.get("T3") or {}
-    if (level == "standard" and spec.get("express_allowed") and spec.get("level_source") == "cli"
-            and not spec.get("planner_updated") and planner.get("status") != "started"):
-        return _answer(
-            "choose_level", "the rules allow express; only the ticket text says whether it fits",
-            rule="express when the ticket names the screen or file and the change touches 3 files or fewer; "
-                 "otherwise standard",
-            express="CLI next --target TARGET --level express", standard="CLI next --target TARGET --level standard",
-        )
     if level == "express" and not spec.get("planner_updated") and not spec.get("acceptance_criteria"):
         return _answer("update_spec", "express skips the Planner: record the AC and surfaces from the ticket text",
-                       command='CLI update-spec --target TARGET --acceptance "a|b" --surfaces ui', then="CLI next --target TARGET")
+                       command='CLI update-spec --target TARGET --acceptance "a|b" --surfaces ui --proofs "render|render"',
+                       how="one AC per visible change, worded as what the screen shows; `--proofs` one per AC: "
+                           "`render` for what a composable shows (the render runs when the module supports it, else "
+                           "one device capture), `unit` for a logic AC",
+                       then="CLI next --target TARGET")
     planner_done = (bool(spec.get("planner_updated")) or planner.get("note") is not None and planner.get("status") == "completed") \
         and planner.get("status") != "started" and not spec.get("replan")
     if level != "express" and not planner_done:
@@ -408,7 +433,7 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
                           stage="Implementer", slices=ids, level=level, note="build its slice")
         return _spawn("aw-implementer", "write the change and the tests that prove it", stage="Implementer", level=level,
                       note="implement the change and its unit tests",
-                      also=_background(spec, no_device or rendered_only, implementer=True))
+                      also=_background(spec, no_device or rendered_only, implementer=True, target=target))
     if errors:
         return _spawn("aw-implementer", "the Implementer reported done but " + "; ".join(errors), stage="Implementer",
                       level=level, note="finish the change")
@@ -456,7 +481,7 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
             command="CLI gate --target TARGET" if "gate" in todo else None,
             agent="aw-reviewer" if "reviewer" in todo else None,
             mode=("delta" if delta else "full") if "reviewer" in todo else None,
-            tier="standard" if delta and "reviewer" in todo else None,
+            tier="standard" if (delta or level == "express") and "reviewer" in todo else None,
             fixed=[item.get("id") for item in review_blocking(review)] if delta and "reviewer" in todo else None,
             stage="Reviewer" if "reviewer" in todo else None,
             tree=tree,
@@ -590,8 +615,9 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
                            stage="Device", mode="after", serial=serial,
                            replay=_replay_hint(agent_dir),
                            scaffold=None if flows_saved(agent_dir) else "CLI device scaffold --target TARGET",
-                           budget_seconds=AFTER_BUDGET_SECONDS,
-                           note="after: verify the AC on the device")
+                           budget_seconds=EXPRESS_AFTER_SECONDS if level == "express" else AFTER_BUDGET_SECONDS,
+                           note="after, express: one capture of the changed screen per AC, no clips"
+                           if level == "express" else "after: verify the AC on the device")
             if proof["mode"] == "both" and render.verdict_now(target) is None:
                 # The states the device cannot reach are rendered meanwhile: no wall time added.
                 together = render.step(target, proof, record)
@@ -703,12 +729,27 @@ def _fix_round(agent_dir: Path, team: dict[str, Any], findings: list[str], revie
                   note="fix round: " + ", ".join(findings), resume=True, fix_of=fingerprint)
 
 
-def _background(spec: dict[str, Any], no_device: bool, implementer: bool = False) -> list[str]:
+def base_cached(target: Path) -> bool:
+    """The base commit's APK is already built (another run, an earlier ticket): a `before` costs no build."""
+    from android_workflow.base import base_commit, cached, repository
+
+    try:
+        repo, sha = repository(target), base_commit(target)
+        return bool(repo and sha and cached(repo["id"], sha))
+    except Exception:  # noqa: BLE001 - no git or no cache: not cached
+        return False
+
+
+def _background(spec: dict[str, Any], no_device: bool, implementer: bool = False,
+                target: Path | None = None) -> list[str]:
     if "T7" not in (spec.get("route") or []) or no_device:
         return []
     # A change with nothing to see starts no base build: it writes its flows in `after` (or in `before`
-    # when another run's base build is already cached) and leaves the build slot to the gates.
-    steps = ["CLI emulator --target TARGET", *(["CLI prebuild --target TARGET"] if visual(spec) else [])]
+    # when another run's base build is already cached) and leaves the build slot to the gates. Express
+    # builds no base either: its `before` comes only from a base APK already in the cache.
+    express = spec.get("level") == "express"
+    prebuild = visual(spec) and (not express or (target is not None and base_cached(target)))
+    steps = ["CLI emulator --target TARGET", *(["CLI prebuild --target TARGET"] if prebuild else [])]
     if implementer:
         steps.append("CLI next --target TARGET (in the same turn: it says whether to capture the device `before`)")
     return steps
@@ -996,6 +1037,10 @@ def _late_before(target: Path, agent_dir: Path, spec: dict[str, Any], state: dic
     from android_workflow.prebuild import current_status
 
     build = current_status(target)
+    if spec.get("level") == "express" and build.get("status") != "passed" and not base_cached(target):
+        if record:
+            _mark_before(target, "late: skipped, express builds no base (no base APK in the cache)")
+        return None
     if build.get("status") == "running":
         return _answer("wait_prebuild", "the base build is still running; the late before capture needs it",
                        command="CLI prebuild --target TARGET --wait --timeout 900", then="CLI next --target TARGET")

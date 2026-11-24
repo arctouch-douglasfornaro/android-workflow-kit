@@ -132,7 +132,7 @@ command only to change one of them:
 | App | The folder your tool is opened in (it must have `settings.gradle`) | `--target PATH` |
 | Branch | On `main` (or the repo's base branch): creates `<user>/<TICKET>-<slug>` in the same checkout. On any other branch: keeps working on it | `--worktree` to work in a separate folder instead |
 | PR base | The repo's default branch (`origin/HEAD`, else `main`, `master` or `develop`) | `--base BRANCH` |
-| Depth | Chosen from the ticket: `express` for a small, clear change (no Planner); `full` for risky areas (lifecycle, migrations, payments, auth); `standard` otherwise. Bugs are never `express` | `--level express\|standard\|full` |
+| Depth | Chosen by code: `express` for a look-only change (a color, text, size or icon on at most 2 files): no Planner, no new test, a lighter review and one render or screenshot with no extra build; `full` for risky areas (lifecycle, migrations, payments, auth); `standard` otherwise. Bugs are never `express` | `--level express\|standard\|full` |
 | Device check | Runs when the change is visible or happens at runtime (audio and analytics events too, from the filtered logcat). It opens an emulator for the run: `device.avd` first (a name or a list), then phones before tablets. No emulator at all: skipped, and the PR says so | `--no-device` to always skip it |
 | Delivery | Commits, pushes and opens the PR (a draft if some check is still failing) | `--no-pr`, `--no-push` or `--no-commit` to stop earlier |
 | After the PR | The PR Watcher follows it until it is merged (below) | `--no-watch` to stop at the PR |

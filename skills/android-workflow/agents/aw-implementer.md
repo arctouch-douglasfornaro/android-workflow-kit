@@ -50,6 +50,8 @@ conflict) when resumed.
    per AC at least, in the repo's test style (same runner, fakes vs mocks, naming). No new test
    library. `full` level: also cover the risky branches the change touches (null/empty/error,
    cancellation, rotation or process death, retries, migrations).
+   Express level with a look-only change (a color, text, size, icon: resources, theme tokens or a
+   modifier value, no logic): no new test; the render or the device capture proves it.
    Do not delete/weaken tests, suppress lint, swallow exceptions, or invent a rule.
 4. The workspace is already set up; never run the repository's own worktree/setup scripts. If
    the local compile cannot run for an environment reason, return BLOCKED with the error, never

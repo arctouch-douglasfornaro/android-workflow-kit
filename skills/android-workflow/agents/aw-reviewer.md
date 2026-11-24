@@ -38,7 +38,8 @@ compiling, tests and lint are the gate's job, so never wait for it.
 
 ## Checks
 
-- Each AC is implemented and proved by a test that would fail without it. A test that passes
+- Each AC is implemented and proved by a test that would fail without it (express level with a
+  look-only change: the render or device capture proves it, so no test is expected). A test that passes
   without the change (asserts a constant or a mock's own stub, never reaches the new branch) is
   not proof: name the case it misses.
 - Invented business rules, scope leak, unrelated edits, removed/weakened tests.

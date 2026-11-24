@@ -66,9 +66,30 @@ class DeviceReportStatusTests(unittest.TestCase):
 
 
 class LevelTests(unittest.TestCase):
-    def test_a_low_risk_chore_allows_express_but_does_not_pick_it(self) -> None:
-        chosen = choose_level(spec(), CHANGE_SET)
-        self.assertEqual((chosen["level"], chosen["express_allowed"]), ("standard", True))
+    def test_a_look_only_change_on_two_files_or_fewer_picks_express_by_itself(self) -> None:
+        chosen = choose_level(spec(ticket={"title": "Change the save button color on ProfileScreen"}), CHANGE_SET)
+        self.assertEqual((chosen["level"], chosen.get("express_auto")), ("express", True))
+        self.assertIn("color", chosen["reasons"][0])
+
+    def test_express_builds_no_base_unless_its_apk_is_cached(self) -> None:
+        visible = {"route": ["T7"], "surfaces": ["ui"]}
+        self.assertIn("CLI prebuild --target TARGET", decide._background(visible, False, target=Path("/nowhere")))
+        express = {**visible, "level": "express"}
+        with mock.patch.object(decide, "base_cached", return_value=False):
+            self.assertNotIn("CLI prebuild --target TARGET", decide._background(express, False, target=Path("/x")))
+        with mock.patch.object(decide, "base_cached", return_value=True):
+            self.assertIn("CLI prebuild --target TARGET", decide._background(express, False, target=Path("/x")))
+
+    def test_express_stays_allowed_but_unpicked_for_behavior_many_files_or_no_look_words(self) -> None:
+        behavior = choose_level(spec(ticket={"title": "Show the save button color only when loading"}), CHANGE_SET)
+        many = choose_level(spec(ticket={"title": "Change the button color"}), {"candidate_files": [
+            {"path": f"app/src/main/java/com/example/Screen{i}.kt"} for i in range(3)]})
+        plain = choose_level(spec(ticket={"title": "Add sharing to ProfileScreen"}), CHANGE_SET)
+        for chosen in (behavior, many, plain):
+            self.assertEqual((chosen["level"], chosen["express_allowed"], chosen.get("express_auto")),
+                             ("standard", True, None))
+        self.assertEqual(choose_level(spec(type="bug", ticket={"title": "Wrong button color"}), CHANGE_SET)["level"],
+                         "standard")
 
     def test_a_bug_never_allows_express(self) -> None:
         self.assertFalse(choose_level(spec(type="bug"), CHANGE_SET)["express_allowed"])
@@ -167,15 +188,16 @@ class RunTests(unittest.TestCase):
         cli("log", "--target", self.target, "--stage", "Device", "--status", "completed", "--tokens", "1", "--note", verdict)
 
     def test_the_level_is_written_at_start_and_a_flag_wins(self) -> None:
-        self.assertEqual(self.start()["level"], "standard")
-        self.assertEqual(self.start("--level", "express")["level_source"], "flag")
+        self.assertEqual(self.start()["level"], "express")  # "Change ProfileScreen title": look-only, one file
+        self.assertEqual(self.start("--level", "standard")["level_source"], "flag")
+        self.assertEqual(self.start("--level", "standard")["level"], "standard")
 
-    def test_the_orchestrator_chooses_express_only_when_the_rules_allow_it(self) -> None:
+
+    def test_the_cli_picks_express_itself_and_refuses_it_for_a_bug(self) -> None:
         self.start()
         answer = self.next()
-        self.assertEqual(answer["next"], "choose_level")
-        self.assertNotIn("logged", answer)  # nothing started yet
-        self.assertEqual(self.next("--level", "express")["next"], "update_spec")
+        self.assertEqual(answer["next"], "update_spec")  # express, picked by code: no question to the orchestrator
+        self.assertIn("--proofs", answer["command"])
         cli("start", "--target", self.target, "--id", "D-1", "--title", "Fix ProfileScreen", "--type", "bug",
             "--reproduction", "open it")
         with self.assertRaises(SystemExit):

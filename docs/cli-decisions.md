@@ -7,7 +7,7 @@ tune the CLI. The code wins where the two differ.
 ## android-workflow (`android_workflow/decide.py`)
 
 level `full` for high risk or complexity, lifecycle/room_migration/workmanager surfaces or a
-payments/auth ticket, express only when allowed; Planner unless express; a team for 2+
+payments/auth ticket; express picked by code for a look-only change (a color, text, size or icon word, no behavior word, at most 2 likely source files, low risk, not a bug): no Planner, no new test, a standard-tier review, `--proofs render` for its AC, a 180 s device check and no base build unless its APK is cached; Planner unless express; a team for 2+
 independent parts and 4+ files (`update-spec --parallel-parts/--parallel-files`); gate and
 Reviewer together, one fix round for both; a draft after the third red gate in a row, a review
 still blocking after one fix, the second device FAIL in a row, a BLOCKED device, the device budget
