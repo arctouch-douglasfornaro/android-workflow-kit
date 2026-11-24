@@ -162,7 +162,9 @@ def scaffold(target: Path, config: dict[str, Any] | None = None) -> dict[str, An
     except OSError:
         plan = ""
     lines = recipe(plan)
-    names = evidence_names(lines) or [f"{agent_dir.name.lower()}-after"]
+    # A bug triage has no plan yet: its flow reproduces the bug (`repro`), and the fix replays it `after`.
+    names = evidence_names(lines) or ["repro" if (agent_dir / "bug-report.json").is_file()
+                                      else f"{agent_dir.name.lower()}-after"]
     written: list[str] = []
     kept: list[str] = []
 

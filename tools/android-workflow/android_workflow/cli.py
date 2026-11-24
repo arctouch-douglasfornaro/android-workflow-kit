@@ -4550,6 +4550,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     review_parser.add_argument("--answer", help="answer: the developer's answer")
     review_parser.add_argument("--require", help="device: why the device must run although no UI file changed")
     review_parser.add_argument("--skip", help="ticket: go on without the Jira ticket, and why")
+    triage_parser = subparsers.add_parser("triage", help="android-bug-triage: reproduce a bug, find its cause, draft the ticket")
+    triage_parser.add_argument("triage_action", choices=("start", "next", "report", "posted", "repro", "ticket"))
+    triage_parser.add_argument("--target", required=True, type=Path)
+    triage_parser.add_argument("--input", help="start: a ticket key or link (Jira or Linear), a stack trace or a description")
+    triage_parser.add_argument("--no-device", action="store_true", dest="no_device")
+    triage_parser.add_argument("--dry-run", action="store_true", dest="dry_run")
+    triage_parser.add_argument("--draft-id", dest="draft_id", help="posted: the draft id the developer approved")
+    triage_parser.add_argument("--url", help="posted: the comment or ticket link")
+    triage_parser.add_argument("--skip", help="posted / repro / ticket: go on without it, and why")
+    triage_parser.add_argument("--again", action="store_true", help="repro: reproduce again")
+    triage_parser.add_argument("--accept-blocked", action="store_true", dest="accept_blocked",
+                               help="repro: go on to the cause from the code alone")
     evidence_parser = subparsers.add_parser("evidence")
     evidence_parser.add_argument("action", choices=("capture", "ingest", "compare", "list"))
     evidence_parser.add_argument("--target", required=True, type=Path)
@@ -4848,6 +4860,10 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
         if args.review_action == "answer" and not args.question:
             raise ValueError("review answer needs --question")
         return dispatch_review(target, args)
+    if args.command == "triage":
+        from android_workflow.triage import dispatch as dispatch_triage
+
+        return dispatch_triage(target, args)
     if args.command == "evidence":
         from android_workflow.evidence import dispatch_evidence
 
@@ -4894,7 +4910,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.target:
             refresh_office(args.target.resolve())
         banner = None
-        if args.command in OFFICE_URL_COMMANDS and isinstance(result, dict):
+        if (args.command in OFFICE_URL_COMMANDS or (args.command == "triage" and args.triage_action == "start")) \
+                and isinstance(result, dict):
             from android_workflow.hub import office_banner, office_message, office_url
 
             target = args.target.resolve() if args.target else None

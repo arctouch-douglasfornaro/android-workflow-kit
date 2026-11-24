@@ -64,6 +64,7 @@ The repository mirrors `~/.ai`, which is where every host reads it from.
 | `skills/android-workflow/SKILL.md` | The workflow: stages, agents, levels, stops and delivery rules (single source of truth). |
 | `skills/android-workflow/agents/` | The nine `aw-*` agents: setup, planner, tech lead, implementer, reviewer, device, media, delivery, PR watcher. |
 | `skills/device-driving/` | How the Device agent drives the phone or emulator (Maestro first, adb fallback). |
+| `skills/android-bug-triage/` | Bug triage: reproduces a reported bug on the device, finds the cause and drafts the ticket, then hands the run to `/android-workflow`. |
 | `skills/investigate-first/` | Finding the cause of a bug or crash before editing: symptom, traced path, ranked hypotheses, cause with `file:line` or the blocker. |
 | `skills/create-ticket/` | Writes a ticket (title, description, acceptance criteria, tech detail) as text; filing it in a tracker is a separate step. |
 | `skills/android/` | Universal Android skills (Compose, Compose performance, performance, navigation, edge-to-edge, screenshots, Android CLI, ktlint) and `catalog.json`, the topics each one covers. The workflow picks them per ticket. |
@@ -306,6 +307,24 @@ With new commits it offers `/android-review 22307` for a delta round. It posts a
 
 Details: [`skills/android-review/SKILL.md`](skills/android-review/SKILL.md) and the design in
 [`docs/android-review-design.md`](docs/android-review-design.md).
+
+## Triaging a bug
+
+```text
+/android-bug-triage APP-123          # a Jira or Linear key or link, a stack trace, or a description
+```
+
+Before anyone fixes a bug, the triage tells you whether it is real and where it comes from. It reads the
+ticket (the tracker is detected from the key or link), builds the base branch in its own checkout and
+tries the reported steps on an emulator with a Maestro flow, with a video and the app's filtered logcat.
+Then the Planner traces the cause through the code (`file:line`, ranked hypotheses) and plans the fix.
+The result goes to `.ai/workflow/<ID>/triage-report.md`, and a comment for the ticket (or a new ticket,
+with the `create-ticket` skill) is shown to you and posted only after your OK.
+
+It never writes code. When it found the cause, it offers `/android-workflow <ID>`, which continues the
+same run: the plan is ready and the reproduction flow becomes the device proof of the fix. A bug that
+does not reproduce ends with what was tried and the questions to ask the reporter. Emails and tokens
+are redacted from the report and the draft; reproduce with test accounts only.
 
 ## Tests
 

@@ -2,7 +2,7 @@
 
 ## Rule: run the evals after changing an agent's instructions
 
-A change to `skills/android-workflow/SKILL.md`, `skills/android-review/SKILL.md`,
+A change to `skills/android-workflow/SKILL.md`, `skills/android-review/SKILL.md`, `skills/android-bug-triage/SKILL.md`,
 `skills/android-workflow/agents/aw-*.md` or `skills/device-driving/SKILL.md` changes how the workflow
 agents behave, and the unit tests do not see it. Before you commit such a change:
 
