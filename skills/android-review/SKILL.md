@@ -25,7 +25,7 @@ says (*How to delegate, per host*: `aw-<role>`, `AW_STAGE`, tiers).
 You are the **orchestrator**: keep your context small (paths and ≤10-line returns; never read the
 diff, logs or media yourself). **Nothing reaches GitHub before the developer's OK**, and the OK is
 for one exact draft id. The one exception is the CLI's: `next` returns `post` for an APPROVE or
-COMMENT draft with nothing left unchecked (device, every AC, no security finding; CI is never waited for), unless the
+COMMENT draft (concerns and nits included) with nothing left unchecked (device, every AC, no security finding; CI is never waited for), unless the
 developer already edited a draft of this head or `review.auto_post` is false.
 
 ## Invocation

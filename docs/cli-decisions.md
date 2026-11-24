@@ -130,8 +130,8 @@ device APK build never build in the same checkout at once.
   carries the developer's comment and thread edits (by finding and thread, not by C1/R1/T1) and reports
   `edits_kept` / `edits_not_kept`: an edited body or event is composed again, since both summarize the
   checks. `draft` run again on unchanged checks starts over with no edits.
-- **Auto post**: `next` returns `post` instead of `ask_user` when the draft is APPROVE or COMMENT and
-  its `gaps` is empty (CI is not one): the device
+- **Auto post**: `next` returns `post` instead of `ask_user` when the draft is APPROVE or COMMENT (with its
+  concerns and nits as comments) and its `gaps` is empty (CI is not one): the device
   PASS when the PR changes UI (or the Planner's waiver), no AC `unverified`, `unmet`, `unchecked` or
   `open`, and no security finding. REQUEST_CHANGES, any gap, a draft the developer edited on this head
   (`touched` carries over a redraft) or `review.auto_post: false` keeps the `ask_user`, whose `why`

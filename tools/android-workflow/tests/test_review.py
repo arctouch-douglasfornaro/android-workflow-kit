@@ -1071,6 +1071,16 @@ class AutoPostTests(unittest.TestCase):
         self.assertIn(f"--draft-id {out['drafted']['draft_id']}", out["next"]["command"])
         self.assertEqual(out["next"]["show"], f"RUN/{review.DRAFT_MD}")
 
+    def test_comments_and_nits_are_posted_by_themselves(self) -> None:
+        findings = {"status": "approved", "blocking": [], "acceptance": [{"id": "AC1", "status": "met"}],
+                    "concerns": [{"file": REPO, "line": 3, "problem": "name is vague", "fix": "rename"}],
+                    "suggestions": [{"file": REPO, "line": 3, "problem": "nit: trailing blank line"}]}
+        for config, event in (({}, "APPROVE"), ({"approve_with_concerns": False}, "COMMENT")):
+            with Project({REPO: "package com.example\n\nclass ProfileRepository\n"}) as project:
+                out = self.drafted(project, findings, config=config)
+            self.assertEqual((out["draft"]["event"], out["draft"]["gaps"]), (event, []))
+            self.assertEqual(out["next"]["next"], "post")
+
     def test_request_changes_waits_for_the_ok(self) -> None:
         with Project({REPO: "package com.example\n\nclass ProfileRepository\n"}) as project:
             out = self.drafted(project, {"status": "changes_requested", "blocking": [

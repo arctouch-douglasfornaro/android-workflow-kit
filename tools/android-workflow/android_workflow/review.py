@@ -1269,7 +1269,7 @@ def _decide(target: Path, record: bool, no_device: bool) -> dict[str, Any]:
                                 "stop → resolve nothing"])
     if (review_config(target)["auto_post"] and draft.get("event") in {"APPROVE", "COMMENT"}
             and draft.get("gaps") == [] and not draft.get("edited") and not draft.get("touched")):
-        return _answer("post", f"{draft['event']} with every check done (CI, device, each AC): posted without "
+        return _answer("post", f"{draft['event']} with every check done (device, each AC), comments and nits included: posted without "
                                "asking; print the draft, then post it",
                        command=f"CLI review post --target TARGET --draft-id {draft['id']}",
                        show=f"RUN/{DRAFT_MD}", draft_id=draft["id"], then="CLI review next --target TARGET")
