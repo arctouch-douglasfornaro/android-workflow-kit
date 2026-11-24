@@ -14,7 +14,7 @@ agents behave, and the unit tests do not see it. Before you commit such a change
    drop is expected. A smaller drop is noise until one rerun confirms it.
 3. Put the scores and their deltas in your final message to the developer.
 
-No case covers the agent you changed (today `aw-setup`, `aw-planner`, `aw-reviewer` (workflow and `pr` mode), `aw-delivery` and `aw-pr-watcher` (mode `triage`) have cases): say so in
+No case covers the agent you changed (today `aw-setup`, `aw-planner` (normal and `triage` mode, i.e. android-bug-triage), `aw-reviewer` (workflow and `pr` mode), `aw-delivery` and `aw-pr-watcher` (mode `triage`) have cases): say so in
 that message, and add a case when the change is about behavior a case could check
 (`skills/eval-playbook/SKILL.md` → Add a case).
 

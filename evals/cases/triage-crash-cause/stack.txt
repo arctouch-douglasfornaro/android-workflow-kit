@@ -1,0 +1,11 @@
+Crash when opening a shared note link (reported from the beta channel, several users).
+FATAL EXCEPTION: main
+Process: com.notes.app, PID: 12873
+java.lang.RuntimeException: Unable to start activity ComponentInfo{com.notes.app/com.notes.app.NoteDetailActivity}: java.util.NoSuchElementException: Collection contains no element matching the predicate.
+	at android.app.ActivityThread.performLaunchActivity(ActivityThread.java:3782)
+	at android.app.ActivityThread.handleLaunchActivity(ActivityThread.java:3922)
+Caused by: java.util.NoSuchElementException: Collection contains no element matching the predicate.
+	at com.notes.feature.notes.data.NotesRepository.find(NotesRepository.kt:17)
+	at com.notes.app.NoteDetailActivity.onCreate(NoteDetailActivity.kt:22)
+	at android.app.Activity.performCreate(Activity.java:8595)
+	at android.app.ActivityThread.performLaunchActivity(ActivityThread.java:3764)

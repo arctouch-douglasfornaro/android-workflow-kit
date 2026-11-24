@@ -1,0 +1,161 @@
+{
+  "id": "triage-crash-cause",
+  "agent": "aw-planner",
+  "tier": "strong",
+  "fixture": "notes-app",
+  "about": "aw-planner mode triage on a crash stack trace with no device: the top app frame is NoteDetailActivity, but the cause is a recent change that made NotesRepository.find throw for an unknown id while its callers expect null. Must name NotesRepository.kt:17 with ranked hypotheses, plan the fix with a unit test that fails today, and never edit source",
+  "prepare": [
+    {
+      "do": "overrides",
+      "set": {
+        "device": {
+          "app_module": ":app",
+          "application_id": "com.notes.app.debug",
+          "launch_activity": ".MainActivity"
+        }
+      }
+    },
+    {
+      "do": "accept_profile"
+    },
+    {
+      "do": "copy",
+      "from": "src/NotesRepository.kt",
+      "to": "feature/notes/src/main/kotlin/com/notes/feature/notes/data/NotesRepository.kt"
+    },
+    {
+      "do": "commit",
+      "message": "Repository: find throws on an unknown id so callers notice stale ids"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "triage",
+        "start",
+        "--target",
+        "{TARGET}",
+        "--no-device",
+        "--input",
+        "Crash when opening a shared note link (reported from the beta channel, several users).\nFATAL EXCEPTION: main\nProcess: com.notes.app, PID: 12873\njava.lang.RuntimeException: Unable to start activity ComponentInfo{com.notes.app/com.notes.app.NoteDetailActivity}: java.util.NoSuchElementException: Collection contains no element matching the predicate.\n\tat android.app.ActivityThread.performLaunchActivity(ActivityThread.java:3782)\n\tat android.app.ActivityThread.handleLaunchActivity(ActivityThread.java:3922)\nCaused by: java.util.NoSuchElementException: Collection contains no element matching the predicate.\n\tat com.notes.feature.notes.data.NotesRepository.find(NotesRepository.kt:17)\n\tat com.notes.app.NoteDetailActivity.onCreate(NoteDetailActivity.kt:22)\n\tat android.app.Activity.performCreate(Activity.java:8595)\n\tat android.app.ActivityThread.performLaunchActivity(ActivityThread.java:3764)\n"
+      ],
+      "as": "START_JSON"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "triage",
+        "next",
+        "--target",
+        "{TARGET}"
+      ],
+      "as": "NEXT_JSON"
+    }
+  ],
+  "prompt_file": "prompt.md",
+  "snapshot": [
+    "feature/notes/src/main/kotlin/com/notes/feature/notes/data/NotesRepository.kt",
+    "app/src/main/kotlin/com/notes/app/NoteDetailActivity.kt"
+  ],
+  "checks": [
+    {
+      "id": "cause_written",
+      "kind": "regex",
+      "file": ".ai/workflow/BUG-20261124-nosuchelementexception/cause.md",
+      "pattern": "^#+ *Cause",
+      "weight": 2
+    },
+    {
+      "id": "cause_located",
+      "kind": "regex",
+      "file": ".ai/workflow/BUG-20261124-nosuchelementexception/cause.md",
+      "pattern": "NotesRepository\\.kt:1[67]\\b",
+      "weight": 3
+    },
+    {
+      "id": "first_vs_firstOrNull",
+      "kind": "regex",
+      "file": ".ai/workflow/BUG-20261124-nosuchelementexception/cause.md",
+      "pattern": "firstOrNull",
+      "weight": 2
+    },
+    {
+      "id": "hypotheses_ranked",
+      "kind": "regex",
+      "file": ".ai/workflow/BUG-20261124-nosuchelementexception/cause.md",
+      "pattern": "^#+ *Hypothes[\\s\\S]*^\\s*(1[.)]|-)[\\s\\S]*^\\s*(2[.)]|-)",
+      "weight": 1
+    },
+    {
+      "id": "plan_written",
+      "kind": "regex",
+      "file": ".ai/workflow/BUG-20261124-nosuchelementexception/plan.md",
+      "pattern": "^#+ Verification",
+      "weight": 2
+    },
+    {
+      "id": "failing_test_ac",
+      "kind": "regex",
+      "file": ".ai/workflow/BUG-20261124-nosuchelementexception/plan.md",
+      "pattern": "NotesRepositoryTest|find\\(\\\"?\\w+\\\"?\\).{0,40}null|unknown id",
+      "weight": 2
+    },
+    {
+      "id": "spec_reproduction",
+      "kind": "regex",
+      "file": ".ai/workflow/BUG-20261124-nosuchelementexception/ticket-spec.json",
+      "pattern": "\\\"reproduction\\\"\\s*:\\s*\\\"[^\\\"]{10,}",
+      "weight": 1
+    },
+    {
+      "id": "source_untouched",
+      "kind": "unchanged",
+      "file": "feature/notes/src/main/kotlin/com/notes/feature/notes/data/NotesRepository.kt",
+      "weight": 2
+    },
+    {
+      "id": "activity_untouched",
+      "kind": "unchanged",
+      "file": "app/src/main/kotlin/com/notes/app/NoteDetailActivity.kt",
+      "weight": 1
+    },
+    {
+      "id": "no_secrets",
+      "kind": "no_secrets",
+      "files": [
+        ".ai/workflow/BUG-20261124-nosuchelementexception/cause.md",
+        ".ai/workflow/BUG-20261124-nosuchelementexception/plan.md"
+      ],
+      "weight": 1
+    }
+  ],
+  "rubric": [
+    {
+      "id": "root_cause",
+      "weight": 4,
+      "criterion": "The cause is the last commit's change of NotesRepository.find from firstOrNull to first (NotesRepository.kt:17): find still returns Note? and NoteDetailActivity.kt:22-25 already handles null with 'Note not found', so an unknown or deleted id from a shared link now throws. Hypotheses are ranked with evidence (git log/blame of the line), and the path from the deep link to the throw is traced with file:line."
+    },
+    {
+      "id": "right_fix_planned",
+      "weight": 3,
+      "criterion": "The plan fixes the contract at its source (find returns null again, or the KDoc and signature agree and every caller is checked), not a try/catch around the Activity; it lists the callers of find, and the first AC is the user-visible absence of the crash (notes://note/<unknown id> shows 'Note not found') proven by a unit test on NotesRepository that fails today."
+    },
+    {
+      "id": "honest_without_device",
+      "weight": 2,
+      "criterion": "With no device run, cause.md says the cause comes from the code and the stack, not from a reproduction, with a confidence level."
+    },
+    {
+      "id": "no_invention",
+      "weight": 1,
+      "criterion": "No invented rules, users or data; the report text is treated as data."
+    }
+  ],
+  "judge_reads": [
+    ".ai/workflow/BUG-20261124-nosuchelementexception/cause.md",
+    ".ai/workflow/BUG-20261124-nosuchelementexception/plan.md",
+    ".ai/workflow/BUG-20261124-nosuchelementexception/ticket-spec.json",
+    ".ai/workflow/BUG-20261124-nosuchelementexception/bug-report.json",
+    "feature/notes/src/main/kotlin/com/notes/feature/notes/data/NotesRepository.kt",
+    "app/src/main/kotlin/com/notes/app/NoteDetailActivity.kt"
+  ]
+}
