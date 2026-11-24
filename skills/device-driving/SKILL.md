@@ -76,7 +76,7 @@ adb exec-out uiautomator dump /dev/tty 2>/dev/null \
   | grep -oE '(text|resource-id|content-desc)="[^"]*"|bounds="[^"]*"'
 ```
 
-The `tr '<' '\n'` is what makes the filter work at all. Without it every pipeline below returns the whole document. Measured on one real screen: the same lookup returned **43,873 chars (~11k tokens) without the split, and 57 chars (~14 tokens) with it**.
+The `tr '<' '\n'` is what makes the filter work at all. Without it every pipeline below returns the whole document.
 
 **Two silent-failure traps around this command:**
 
@@ -123,21 +123,9 @@ Everything concrete about *which* app you are driving — debug package, entry a
 and host, an in-app developer console and what it can launch, known test data — is **project data, not
 skill content**. Read it from the project's `project-profile` skill when it has one.
 
-When the project ships no profile, derive the same facts and record how:
+When the project ships no profile, derive them from the manifest (`LAUNCHER` and `VIEW` intent
+filters) and the Gradle `applicationId`; ask for test data, never fabricate credentials.
 
-| Fact | Where to derive it |
-|---|---|
-| Debug package | `adb shell pm list packages -3`, or the Gradle `applicationId` + debug suffix |
-| Entry activity | `AndroidManifest.xml` → the `LAUNCHER` intent filter |
-| Deep-link scheme / host | `AndroidManifest.xml` → `VIEW` intent filters and their `data` elements |
-| Reachable-only-in-app screens | activities with no exported route; look for an in-app debug console |
-| Test data | ask; never fabricate credentials or account data |
-
-Two build lessons that are **not** project-specific, and bite anywhere:
-
-- **A worktree build needs its submodules populated** — `git worktree add` does not initialize them, and
-  `git submodule update` can fail on an SSH-vs-HTTPS remote mismatch. Copying the content from the primary
-  checkout is the reliable fallback.
 - **Verify the install landed; don't trust the log.** Piping the build into `tail` hides its exit code, so
   a failed build reads as a success. Check the device instead:
   `adb shell dumpsys package <pkg> | grep lastUpdateTime` and confirm the timestamp is *now*.
@@ -155,10 +143,10 @@ Only what is not already stated where you would hit it — the `am start` / non-
 
 ## 8.5. Keep device sessions token-cheap
 
-The device session is the most expensive part of a workflow run in both time and tokens — on one measured run device work was ~62% of total agent time and ~65% of total tokens, almost entirely because every `uiautomator dump`, `screencap`, and `logcat -d` call injects a large blob back into context, and that happens dozens of times per run. None of these are needed at full size most of the time — trim before it becomes a habit, not after the context is already bloated:
+Every dump, screenshot and `logcat -d` lands in context; keep each one small:
 
 - **Reuse recorded bounds instead of re-dumping.** If the Maestro flow or `device-report.md` already has a node's `bounds="[x1,y1][x2,y2]"` for a tap target you need again, tap it directly — don't re-run `uiautomator dump` to rediscover coordinates you (or the `before` capture) already found. Only re-dump when the UI has genuinely changed (a new screen, a different app state) or the recorded bounds fail.
-- **Filter `uiautomator dump` at the source, splitting it into lines first** — the §2 pipeline, not a bare `grep`. Unsplit, the dump is one line and every filter returns the whole tree: measured, 11k tokens versus 14 for the same lookup.
+- **Filter `uiautomator dump` at the source, splitting it into lines first** — the §2 pipeline, not a bare `grep`. Unsplit, every filter returns the whole tree.
 - **Prefer a small state check over a full screenshot for intermediate verification.** `adb shell dumpsys activity activities | grep -iE "topResumedActivity|mResumedActivity"` (a few lines) confirms "did navigation land where expected" just as well as a screenshot + visual inspection, for a fraction of the tokens. Reserve actual `screencap` calls for moments that are genuinely evidence-worthy (the final state recorded in `device-report.md`), not every intermediate tap.
   **But only when the hop crosses an activity.** `topResumedActivity` is blind to anything that happens *inside* one — a Compose destination, a bottom sheet, a dialog, a server-driven modal all leave it unchanged, so it will happily report success for a navigation that never occurred. For an in-activity hop the cheap check is the §2 pipeline reduced to text (`… | tr '<' '\n' | grep -oE 'text="[^"]+"'`), which is still two orders of magnitude smaller than a screenshot; a Maestro `assertVisible` on the expected string is cheaper still, since it costs nothing beyond the run's one-line output.
   Cheapest first, for the same question: `assertVisible` in the flow → filtered text dump → `dumpsys` (cross-activity only) → screenshot (evidence only).

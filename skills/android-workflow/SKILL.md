@@ -275,31 +275,7 @@ CLI cleanup --target T [--all] [--pr N] [--base] [--dry-run]   (worktrees of mer
    `start` on a run that is not finished resumes it: every AC, stage, verdict and metric stays; a new
    AC is only appended.
 
-   What the CLI decides, for reference (change it in `android_workflow/decide.py`, not here):
-   level `full` for high risk or complexity, lifecycle/room_migration/workmanager surfaces or a
-   payments/auth ticket, express only when allowed; Planner unless express; a team for 2+
-   independent parts and 4+ files (`update-spec --parallel-parts/--parallel-files`); gate and
-   Reviewer together, one fix round for both; a draft after the third red gate in a row, a review
-   still blocking after one fix, the second device FAIL in a row, a BLOCKED device, the device budget
-   spent when the developer set one (`device.budget_minutes`, default 0 = no limit, every Device round
-   together: no round starts past it, a round already running gets 5 more minutes to finish the check
-   in hand, then the CLI writes a PARTIAL/BLOCKED report of what was verified) or a fix round that changed nothing (in a PR round: `ask_user`, push nothing, never a draft); an approved review kept
-   when only formatting changed since; a device route for `ui`, navigation, lifecycle… and for `audio`
-   and `analytics` (an AC about sound or events adds them back whatever the Planner's list says); the
-   base build only for a visual change; the device `before` only with a passed base build and a
-   device, else a late `before` that replays the `after` flows on the base APK; a Device PASS
-   only on flows replayed for the current source (or `Maestro: unavailable — <why>`); a PASS with
-   Anomalies, or `PARTIAL`, asks the developer; no device → an emulator is started for the run, and
-   `finish --skip-device "<reason>"` only when there is no SDK or AVD to start one.
-   The gate itself: formatter (fixing first when it can), then compile, unit tests, detekt and lint
-   for the touched modules in one build, plus compile and unit tests for modules that use a changed
-   declaration, a secret scan, and the developer's local review rules on the lines the change adds
-   (see Review rules: a `block` rule fails the gate as `G-rules`, a `warn` one is only reported). Lint or format findings only in files the change does not touch,
-   and Android lint findings on lines of a touched file that the change did not write, are
-   **waived** and disclosed in the PR; never "fix" a waived finding: it widens the diff. Gradle failing
-   by itself (a lock timeout, a daemon that died or ran out of memory, "Could not create service") is
-   retried once and never a fix round; still failing, `next` asks the developer. The gate and the
-   device APK build never build in the same checkout at once.
+   The rules `next` applies live in `android_workflow/decide.py` (summary: `docs/cli-decisions.md`).
 
 5. **Watch the PR** (unless `--no-watch` or a `--no-*` flag stopped before the PR; `--watch` starts
     here for a ticket whose run exists, and with no run: `CLI start` with the PR's title, then this).
@@ -378,61 +354,17 @@ CLI cleanup --target T [--all] [--pr N] [--base] [--dry-run]   (worktrees of mer
     are a review too (you checking the PR): the watcher answers them like anyone else's (`own: true`),
     and never answers its own replies. Threads are answered, never resolved.
 
-Overlaps that cannot race on the working tree are safe: Planner and Implementer with the base build
-(it builds the base commit in its own checkout, `~/.cache/android-workflow/base/<repo>/`, never in
-TARGET) and the emulator boot, the Implementer with the `before` capture, the gate with the Reviewer,
-Implementers of a team with each other (one owner per file).
-
-**Two runs at once** (two tickets, two worktrees) share the machine, and the CLI keeps them apart:
-- heavy builds (gate, base build, Device build) take one of `execution.max_parallel_builds` slots
-  (default 2; `ANDROID_WORKFLOW_BUILD_SLOTS`) and wait for a free one, logged in the stage log;
-- one base build per repository at a time; its APKs are cached by base commit, so the second run on
-  the same base gets them at once;
-- each run has its own device: the first time it needs one it leases a ready device nobody uses (an
-  emulator already open, a phone), else one more emulator starts just for it, up to
-  `device.max_emulators` (default: one per 12 GB of memory, 2 to 4; a busy or failing `device.avd` falls back to another AVD that is not
-  running, else a second copy runs `-read-only` once the first has booted); past that, `next`
-  answers `wait_device` naming who holds each device. `device.dedicated` (default `true`): only
-  emulators the workflow started are leased, never the developer's own emulator or phone; one another
-  run gave back is still reused. `false` (or `ANDROID_WORKFLOW_DEDICATED_DEVICE=0`) lets a run lease an
-  emulator already open or a phone. A run holds its device only while it is on it: the `next` that
-  answers anything else (the Implementer, the gate, the review, a question, delivery) gives it back
-  (a command still installing keeps it until it exits) and the emulator stays open for whoever needs
-  one. The next device step asks for the same device first, else another of the same AVD, else any free
-  one; a `before` captured on another model is set aside and replayed on the new device, so the PR pairs
-  like with like. A leased emulator that dies, or is not booted after `device.boot_stall_seconds`
-  (360), is closed and replaced. `emulator --stop` closes only what this run held: an emulator another run
-  holds is refused by name;
-- the Device APK is built before the device is held (`CLI device build`, started with the gate):
-  holding the device costs an `adb install`, not a Gradle build;
-- with 3 or more runs, keep `max_parallel_builds` at 2 (or 1) and close Android Studio: a cold
-  build of a large app per run, plus emulators, swaps the machine.
+Two runs at once (two tickets, two worktrees) are kept apart by the CLI: build slots, one
+device leased per run (`wait_device` names who holds each), base APKs cached by commit. With 3 or
+more runs, tell the developer to keep `execution.max_parallel_builds` at 2 or less and close
+Android Studio.
 
 ## How visible AC are proved (JVM render or device)
 
-Decided by code in `CLI next` (`android_workflow/render.py`), zero tokens. A **render** draws a
-composable with Android's real graphics in the unit-test JVM (Robolectric `GraphicsMode.NATIVE` +
-`captureToImage`), in 1–3 minutes, with no emulator: the generated test lives in `RUN/render/` and joins
-the module's test sources through a Gradle init script for that one call, so the repository is never
-written and the source fingerprint never moves. It is never proof of behavior.
-
-- **Off** until `CLI render probe` passed in a module within `render.budget_seconds` (240): with no probe
-  on record every route is the device, exactly as before. The probe result lives in
-  `.ai/android-workflow.json` → `render.modules`; `render.base_class`, `render.rule`, `render.theme`
-  (`{"wrap": "AppTheme(darkTheme = $DARK) { $CONTENT }", "imports": [...]}`) and `render.qualifiers`
-  come from Setup.
-- The Planner's `--proofs` (one per AC: `unit | render | device | both`) decide the **route**:
-  - `render`: every visible AC is `render` and no runtime surface (navigation, deep link, permissions,
-    lifecycle, notifications, WorkManager, Room migration, audio, analytics). No device `before`, no
-    APK, no emulator; the Render analyst's verdict becomes `device-report.md` (`Proof: JVM render`) and
-    its images go to `media/after/render-*.png`, so finish, the PR table and the office read it as usual.
-  - `both`: device AC and render AC. The device runs as before; the renders run in parallel (no wall
-    time added) for the states it cannot reach. A failing render is a fix round (`R1`).
-  - `device`: anything else, and whenever unsure.
-  - No device at all (none free or no SDK) and renders on: the renders prove what a screen shows
-    instead of nothing; device-only AC stay not verified (a PARTIAL the developer decides on).
-- The developer overrides with `CLI render prefer --mode device|render|auto` (`device` = never render).
-- A Figma link in the ticket → `fetch_design` once, and the Render analyst compares against it.
+`CLI next` picks the route (`device`, `render` or `both`) by code from the Planner's `--proofs`;
+act on its `spawn`. A render draws a composable in the unit-test JVM, never proof of behavior,
+and is off until `CLI render probe` passed in the module. The developer overrides with
+`CLI render prefer --mode device|render|auto`.
 
 ## Review rules (the developer's, local)
 
@@ -462,55 +394,21 @@ When the developer asks for patterns or a new rule ("review patterns", "vira reg
 
 Never put user or student data in a rule; a rule's `message` names the API, not a person or PR text.
 
-## Run files
-
-Everything the run writes lives in `RUN` (gitignored, never committed): `ticket-spec.json`,
-`change-set-map.json`, `plan.md`, `implementation-notes.md`, `gate-report.json`, `review.json`,
-`device-report.md`, `pr-description.md`, `stage-log.md`, `stage-metrics.json` and
-`media/{before,after}/`, `skills.json`; a team adds `team-plan.json`, `team-report.json` and
-`slices/S<n>.md`. The PR Watcher adds `pr-watch.json` (its state: PR, replies posted, comments
-handled, check verdicts), `pr-inbox.json` (the comments and checks to handle now), `pr-feedback.json`
-and `pr-ci/` (failed CI logs).
-
 ## Android skills
 
-Nobody asks for them: `start`, `update-spec` and every Implementer `started` refresh
-`RUN/skills.json`, which names the skills each agent reads and why. The candidates are the app's own
-skills (`TARGET/.ai/skills`, `.claude/skills`, `.agents/skills`) and the kit's
-(`~/.ai/skills/android/`: Compose, Compose performance, performance, navigation, edge-to-edge,
-screenshots, Android CLI, ktlint). The signals are the ticket text and surfaces, the likely files
-and the code already changed, and a failing gate. A project skill on the same topic wins, at most 4
-go to the Implementer (`skills.max` in `.ai/android-workflow.json`), and the Planner can correct the
-list (`CLI skills --add/--drop`). Never copy a project's skills into the kit. The shared cache is `TARGET/.ai/workflow/_cache/`; `current.json`
-points at the active ticket. A new ticket gets a new folder.
+`RUN/skills.json` names the skills each agent reads; the CLI refreshes it (`start`, `update-spec`,
+every Implementer `started`) and the Planner corrects it (`CLI skills --add/--drop`). A project
+skill on the same topic wins. Never copy a project's skills into the kit.
 
 ## Chat log and telemetry
 
 Right before you spawn or resume an agent that `CLI next` did not already log (its answer says
-`logged`; Setup, the PR Watcher and team slices are yours: Setup's logs before `start` wait for that
-`start`, never land in the previous ticket's run), run `CLI log --stage <Role> --status started --note
-"<one line: what it will do>"`. It costs nothing, it starts that agent's clock (the office counts it
-second by second), and it is what lights up its desk on the office page. The page updates itself
-while the run is live, files the Implementers edit included; you never refresh it.
-
-Speak in **role names**, never bare T-codes. One line per stage:
-`{Role}: {result} → {artifact}`. Example: `Reviewer: approved, 0 blocking → review.json`.
-Durable log: `RUN/stage-log.md`; time and tokens per stage: `RUN/stage-metrics.json` (used to
-debug runs and find improvements). Every `log` for an agent stage passes the token total that
-agent's result reports (`--tokens N`); never estimate. When the host's transcript names the agent
-(Claude Code, Codex) the CLI's own reading wins and a different `--tokens` is kept as
-`tokens_reported`; `processed_tokens` adds up every request of the round (cached input included). When the agent already logged its own
-`completed` (with `--file`), log `completed` again with `--tokens`: a second `completed` of the same
-round merges into the first, it is not counted twice (and the chat log keeps one line). A `log …
---status started` that warns the toolkit code changed since `start` → run `CLI start` for the ticket
-again before the gate (it keeps the Planner's decisions, an approved review and a PASS device report
-of the unchanged source, and archives the earlier metrics). Edits to role files or this skill never
-block the gate. `log` answers with a `warnings` entry
-when an agent stage has none; if the host truly exposes no count, say so once in the final
-summary. When you paused to ask the user, add `--wait-seconds S` so waiting is not counted.
-While an agent works, the office reads its tokens so far from the host's own transcript (Claude
-Code, Codex), and a `completed` without `--tokens` takes them from there; you still pass `--tokens`
-whenever the agent's result reports them.
+`logged`; Setup, the PR Watcher and team slices are yours), run `CLI log --stage <Role> --status
+started --note "<one line>"`: it starts that agent's clock and lights its desk in the office.
+Every `completed` passes the token total the agent's result reports (`--tokens N`), never an
+estimate; add `--wait-seconds S` when you paused to ask the user. A `log … --status started` that
+warns the toolkit code changed since `start` → run `CLI start` for the ticket again before the gate.
+Speak in role names, one line per stage: `Reviewer: approved, 0 blocking → review.json`.
 
 ## Stop
 
