@@ -255,6 +255,22 @@ def run_check(check: dict[str, Any], run: dict[str, Any]) -> tuple[bool, str]:
     if kind == "json_contains":
         actual = dotted(read_json(path), check["path"]) if path.is_file() else None
         return isinstance(actual, list) and check["value"] in actual, f"{check['path']} = {actual!r}"
+    if kind == "mutation":
+        # Undo the behavior in `file` (regex `find` -> `replace`), run `command`: the agent's tests must fail
+        # on the mutant. The file is restored whatever happens.
+        original = path.read_text(encoding="utf-8") if path.is_file() else None
+        if original is None:
+            return False, "file missing"
+        mutant, count = re.subn(check["find"], check["replace"], original)
+        if not count:
+            return False, "the mutation found nothing to change"
+        try:
+            path.write_text(mutant, encoding="utf-8")
+            done = subprocess.run(check["command"], shell=True, cwd=workdir, text=True, capture_output=True,
+                                  timeout=int(check.get("timeout", 900)), check=False)
+        finally:
+            path.write_text(original, encoding="utf-8")
+        return done.returncode != 0, f"tests on the mutant exited {done.returncode}"
     if kind == "file_exists":
         return path.is_file(), str(path.relative_to(workdir))
     if kind == "file_absent":

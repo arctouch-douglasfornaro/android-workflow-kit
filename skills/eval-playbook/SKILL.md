@@ -63,7 +63,8 @@ that case once before blaming an edit.
 import is the base, a commit is e.g. the PR head of a `pr` review), `branch`, `git` (`args`), `cli` with `as` to fill `{NAME}` in the prompt (`field` keeps one value of its answer); `{FAKEBIN}` is a
 folder next to the workspace for stand-ins like a logging `gh`, put first on the prompt's CLI `PATH`), `snapshot` (files compared by `unchanged`),
 `prompt_file`, `answers` (what the developer says to a NEEDS_INPUT, optional), `checks` (`json_equals`, `json_contains`, `file_exists`, `file_absent`, `regex`,
-`not_regex`, `cli`, `unchanged`, `sections_unchanged`, `no_secrets`, `map_row`, `not_mapped`, each with
+`not_regex`, `cli`, `mutation` (undo the behavior with `find`/`replace` in `file`, run `command`: the agent's tests
+must fail), `unchanged`, `sections_unchanged`, `no_secrets`, `map_row`, `not_mapped`, each with
 a `weight`), `rubric` (`id`, `weight`, `criterion` the judge scores 0–10 against the code), `judge_reads`.
 The prompt reads like the host's real spawn and never says eval, test, grade or rubric; the fixture
 is synthetic (no real app code, no user data, no real accounts). `python3 -m unittest skill_eval_test`

@@ -48,7 +48,9 @@ conflict) when resumed.
 2. Smallest coherent change. Out-of-plan files need one line of justification in the notes.
 3. Tests that fail without the behavior (unit, Compose, Robolectric per repo convention), one
    per AC at least, in the repo's test style (same runner, fakes vs mocks, naming). No new test
-   library. `full` level: also cover the risky branches the change touches (null/empty/error,
+   library. Build each input so only the new behavior passes it: an order test lists the items out
+   of that order, a filter test includes an item that must be dropped. Prove it once: undo the new
+   line(s), run the test class, see it fail, restore, and say so in the notes. `full` level: also cover the risky branches the change touches (null/empty/error,
    cancellation, rotation or process death, retries, migrations).
    Express level with a look-only change (a color, text, size, icon: resources, theme tokens or a
    modifier value, no logic): no new test; the render or the device capture proves it.

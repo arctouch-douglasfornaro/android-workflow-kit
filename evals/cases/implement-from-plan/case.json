@@ -1,0 +1,221 @@
+{
+  "id": "implement-from-plan",
+  "agent": "aw-implementer",
+  "tier": "standard",
+  "fixture": "notes-app",
+  "about": "aw-implementer on a ready plan (archive sorted by last edit): writes the smallest change in the planned files plus unit tests that fail without it, keeps to the pattern, fills implementation-notes.md; the real gate must pass",
+  "prepare": [
+    {
+      "do": "overrides",
+      "set": {
+        "device": {
+          "app_module": ":app",
+          "application_id": "com.notes.app.debug",
+          "launch_activity": ".MainActivity"
+        }
+      }
+    },
+    {
+      "do": "accept_profile"
+    },
+    {
+      "do": "commit",
+      "message": "Workflow config"
+    },
+    {
+      "do": "branch",
+      "name": "notes-22-archive-order"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "start",
+        "--target",
+        "{TARGET}",
+        "--id",
+        "NOTES-22",
+        "--title",
+        "Archive lists the most recently edited note first"
+      ],
+      "as": "START_JSON"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "update-spec",
+        "--target",
+        "{TARGET}",
+        "--type",
+        "feature",
+        "--risk",
+        "low",
+        "--complexity",
+        "low",
+        "--surfaces",
+        "logic",
+        "--level",
+        "standard",
+        "--acceptance",
+        "Archive shows only archived notes, ordered by last edit, newest first|With nothing archived, Archive shows no rows",
+        "--proofs",
+        "unit|unit",
+        "--parallel-parts",
+        "1",
+        "--parallel-files",
+        "0"
+      ],
+      "as": "SPEC_JSON"
+    },
+    {
+      "do": "copy",
+      "from": "plan.md",
+      "to": ".ai/workflow/NOTES-22/plan.md"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "log",
+        "--target",
+        "{TARGET}",
+        "--stage",
+        "Planner",
+        "--status",
+        "completed",
+        "--note",
+        "2 AC"
+      ],
+      "as": "PLAN_LOG"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "next",
+        "--target",
+        "{TARGET}"
+      ],
+      "as": "NEXT_JSON"
+    }
+  ],
+  "prompt_file": "prompt.md",
+  "snapshot": [
+    "app/src/main/kotlin/com/notes/app/NoteDetailActivity.kt",
+    "app/src/main/kotlin/com/notes/app/MainActivity.kt",
+    "feature/settings/src/main/kotlin/com/notes/feature/settings/SettingsActivity.kt",
+    "feature/notes/src/main/kotlin/com/notes/feature/notes/data/NotesRepository.kt",
+    "feature/notes/src/main/kotlin/com/notes/feature/notes/ArchiveScreen.kt"
+  ],
+  "checks": [
+    {
+      "id": "gate_passes",
+      "kind": "cli",
+      "args": [
+        "gate",
+        "--target",
+        "{TARGET}"
+      ],
+      "field": "gate.status",
+      "value": "passed",
+      "weight": 4
+    },
+    {
+      "id": "tests_fail_without_sort",
+      "kind": "mutation",
+      "file": "feature/notes/src/main/kotlin/com/notes/feature/notes/NotesListViewModel.kt",
+      "find": "(fun archivedNotes[^{=]*[={][^\\n]*(?:\\n[^\\n]*){0,4}?)\\s*\\.sortedByDescending\\s*\\{\\s*it\\.editedAtMillis\\s*\\}",
+      "replace": "\\1",
+      "command": "./gradlew --console=plain -q :feature:notes:testDebugUnitTest",
+      "weight": 3
+    },
+    {
+      "id": "tests_fail_without_filter",
+      "kind": "mutation",
+      "file": "feature/notes/src/main/kotlin/com/notes/feature/notes/NotesListViewModel.kt",
+      "find": "(fun archivedNotes[^\\n]*\\n?[^\\n]*?)\\.filter\\s*\\{\\s*it\\.archived\\s*\\}",
+      "replace": "\\1",
+      "command": "./gradlew --console=plain -q :feature:notes:testDebugUnitTest",
+      "weight": 2
+    },
+    {
+      "id": "sort_implemented",
+      "kind": "regex",
+      "file": "feature/notes/src/main/kotlin/com/notes/feature/notes/NotesListViewModel.kt",
+      "pattern": "archived[\\s\\S]{0,200}sortedByDescending\\s*\\{\\s*it\\.editedAtMillis",
+      "weight": 2
+    },
+    {
+      "id": "archive_uses_it",
+      "kind": "regex",
+      "file": "feature/notes/src/main/kotlin/com/notes/feature/notes/NotesNavGraph.kt",
+      "pattern": "archivedNotes\\(",
+      "weight": 1
+    },
+    {
+      "id": "tests_added",
+      "kind": "regex",
+      "file": "feature/notes/src/test/kotlin/com/notes/feature/notes/NotesListViewModelTest.kt",
+      "pattern": "fun `[^`]*archiv[\\s\\S]*fun `[^`]*archiv",
+      "weight": 2
+    },
+    {
+      "id": "notes_written",
+      "kind": "regex",
+      "file": ".ai/workflow/NOTES-22/implementation-notes.md",
+      "pattern": "NotesListViewModelTest|archivedNotes",
+      "weight": 1
+    },
+    {
+      "id": "untouched_0",
+      "kind": "unchanged",
+      "file": "app/src/main/kotlin/com/notes/app/NoteDetailActivity.kt",
+      "weight": 1
+    },
+    {
+      "id": "untouched_1",
+      "kind": "unchanged",
+      "file": "app/src/main/kotlin/com/notes/app/MainActivity.kt",
+      "weight": 1
+    },
+    {
+      "id": "untouched_2",
+      "kind": "unchanged",
+      "file": "feature/settings/src/main/kotlin/com/notes/feature/settings/SettingsActivity.kt",
+      "weight": 1
+    },
+    {
+      "id": "untouched_3",
+      "kind": "unchanged",
+      "file": "feature/notes/src/main/kotlin/com/notes/feature/notes/data/NotesRepository.kt",
+      "weight": 1
+    },
+    {
+      "id": "untouched_4",
+      "kind": "unchanged",
+      "file": "feature/notes/src/main/kotlin/com/notes/feature/notes/ArchiveScreen.kt",
+      "weight": 1
+    }
+  ],
+  "rubric": [
+    {
+      "id": "tests_prove_it",
+      "weight": 4,
+      "criterion": "The new tests fail without the change: the AC1 test's input lists an older archived note before a newer one (or otherwise needs the sort to pass), and the AC2 test checks an empty result. A test that would pass with an unsorted filter does not count."
+    },
+    {
+      "id": "smallest_change",
+      "weight": 3,
+      "criterion": "Only the planned files change (NotesListViewModel, NotesNavGraph, the test); the new function sits next to visibleNotes as the plan says; no new dependency, no unrelated edits."
+    },
+    {
+      "id": "notes_honest",
+      "weight": 3,
+      "criterion": "implementation-notes.md says what changed and which test proves each AC, and claims nothing the code does not show."
+    }
+  ],
+  "judge_reads": [
+    "feature/notes/src/main/kotlin/com/notes/feature/notes/NotesListViewModel.kt",
+    "feature/notes/src/main/kotlin/com/notes/feature/notes/NotesNavGraph.kt",
+    "feature/notes/src/test/kotlin/com/notes/feature/notes/NotesListViewModelTest.kt",
+    ".ai/workflow/NOTES-22/implementation-notes.md",
+    ".ai/workflow/NOTES-22/plan.md"
+  ]
+}

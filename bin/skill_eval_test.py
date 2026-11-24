@@ -19,7 +19,7 @@ class SkillEvalTests(unittest.TestCase):
 
     def test_every_case_has_a_prompt_rubric_and_known_checks(self):
         kinds = {"json_equals", "json_contains", "file_exists", "file_absent", "regex", "not_regex", "cli",
-                 "unchanged", "sections_unchanged", "no_secrets", "map_row", "not_mapped"}
+                 "unchanged", "sections_unchanged", "no_secrets", "map_row", "not_mapped", "mutation"}
         for case in skill_eval.cases().values():
             with self.subTest(case=case["id"]):
                 self.assertTrue(Path(case["_dir"], case["prompt_file"]).is_file())
