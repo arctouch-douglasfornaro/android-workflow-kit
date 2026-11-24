@@ -277,14 +277,27 @@ def _stall_limit(target: Path) -> float:
         return DEFAULT_BOOT_STALL
 
 
-def _stalled(target: Path, record: dict[str, Any] | None, lease: dict[str, Any] | None) -> str | None:
+UNAUTHORIZED_GRACE_SECONDS = 60.0  # an emulator the workflow started that adb still calls unauthorized
+
+
+def _adb_state(listed: list[dict[str, Any]], serial: str) -> str | None:
+    return next((str(item["state"]) for item in listed if item["serial"] == serial), None)
+
+
+def _stalled(target: Path, record: dict[str, Any] | None, lease: dict[str, Any] | None,
+             state: str | None = None) -> str | None:
     """Why a held device that has not booted is given up, or None while it may still boot: the
     emulator the workflow started has been booting past `device.boot_stall_seconds` (from its start;
-    a device it did not start: from the lease)."""
+    a device it did not start: from the lease), or adb still calls it `unauthorized` a minute after it
+    started: nobody accepts that prompt on an emulator, so it never boots for adb (a Play Store image
+    whose guest does not trust this machine's adb key)."""
     began = (record or {}).get("started_at") or (lease or {}).get("since")
     if not isinstance(began, (int, float)):
         return None
     waited = time.time() - float(began)
+    if record and state == "unauthorized" and waited >= UNAUTHORIZED_GRACE_SECONDS:
+        return (f"the emulator {record.get('serial')} ({record.get('avd')}) is still unauthorized for adb after "
+                f"{int(waited)}s: its image does not trust this machine's adb key")
     if waited < _stall_limit(target):
         return None
     what = f"the emulator {record.get('serial')} ({record.get('avd')})" if record else "the device"
@@ -345,7 +358,7 @@ def status(target: Path) -> dict[str, Any]:
             return {**(record or {}), "status": "ready" if record else "connected", "serial": serial,
                     "devices": ready, "started_by_workflow": bool(record), "leased": True}
         if record or any(item["serial"] == serial for item in listed):
-            stuck = _stalled(target, record, held.get(serial))
+            stuck = _stalled(target, record, held.get(serial), _adb_state(listed, serial))
             if stuck:
                 return {**(record or {}), "status": "failed", "serial": serial, "devices": ready,
                         "started_by_workflow": bool(record), "leased": True, "reason": stuck}
@@ -400,6 +413,12 @@ def _avd_config(name: str) -> dict[str, str]:
     return {key.strip(): value.strip() for key, _, value in (line.partition("=") for line in lines) if _}
 
 
+def avd_play_store(name: str) -> bool:
+    """A Play Store image: adb must be authorized inside the guest, which a headless emulator can fail."""
+    config = _avd_config(name)
+    return config.get("PlayStore.enabled", "").lower() in {"true", "yes"} or "playstore" in config.get("tag.id", "")
+
+
 def avd_kind(name: str) -> str:
     """`phone`, `tablet` or `other` (TV, Wear, Automotive) from the AVD's config; `phone` when unknown.
     A tablet is a smallest width of 600 dp or more."""
@@ -424,12 +443,13 @@ def _preferred_avds(target: Path) -> list[str]:
 
 def rank_avds(avds: list[str], preferred: list[str]) -> list[str]:
     """The developer's `device.avd` names first, in their order; then every other AVD the SDK lists,
-    phones before tablets before TV/Wear, each group in the SDK's order. A new AVD joins its group
+    phones before tablets before TV/Wear, and in each kind the images without the Play Store first
+    (theirs never wait on an adb authorization), else in the SDK's order. A new AVD joins its group
     with no config."""
     order = {"phone": 0, "tablet": 1, "other": 2}
     first = [name for name in preferred if name in avds]
     rest = [name for name in avds if name not in first]
-    return first + sorted(rest, key=lambda name: order[avd_kind(name)])
+    return first + sorted(rest, key=lambda name: (order[avd_kind(name)], avd_play_store(name)))
 
 
 def _pick_avd(target: Path, adb: str, emulator: str, avd: str | None) -> tuple[str | None, bool, list[str]]:
@@ -548,7 +568,7 @@ def claim(target: Path, record: bool = True, avd: str | None = None, headless: b
                 return {**pool.get(serial, {}), "status": "ready" if serial in pool else "connected", "serial": serial,
                         "devices": ready, "started_by_workflow": serial in pool, "leased": True}
             if serial in pool or any(item["serial"] == serial for item in listed):
-                stuck = _stalled(target, pool.get(serial), held.get(serial))
+                stuck = _stalled(target, pool.get(serial), held.get(serial), _adb_state(listed, serial))
                 if stuck and record:
                     return _give_up(target, adb, run, serial, pool.get(serial), stuck)
                 if stuck:
@@ -571,7 +591,7 @@ def claim(target: Path, record: bool = True, avd: str | None = None, headless: b
                     "devices": ready, "started_by_workflow": serial in pool, "leased": record}
         held = leases()
         idle_booting = [serial for serial in pool if serial not in held  # every booted free one was taken above
-                        and not _stalled(target, pool[serial], None)]
+                        and not _stalled(target, pool[serial], None, _adb_state(listed, serial))]
         if idle_booting:
             if record:
                 acquire(idle_booting[0], run)

@@ -66,7 +66,7 @@ Optional overrides read by the newer commands (all may be left out):
 
 | Key | Default | Used by |
 |---|---|---|
-| `device.avd` | none: phones, then tablets, then TV/Wear, from `emulator -list-avds` and each AVD's `config.ini` | `emulator`: the AVD, or a list in order of preference, to open first; AVDs left out (new ones included) follow, phones before tablets |
+| `device.avd` | none: phones, then tablets, then TV/Wear, from `emulator -list-avds` and each AVD's `config.ini` | `emulator`: the AVD, or a list in order of preference, to open first; AVDs left out (new ones included) follow, phones before tablets and, of each kind, images without the Play Store first; an emulator adb still calls `unauthorized` a minute after it started is closed and the next AVD tried |
 | `device.emulator_headless` | `false` (a window you can watch) | `emulator`: `true` starts it with `-no-window` |
 | `device.boot_timeout_seconds` | `300` | `emulator --wait` |
 | `device.flow_timeout_seconds` | `180` | `device replay`: one flow's time limit |

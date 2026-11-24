@@ -1088,7 +1088,8 @@ class AvdRankTests(unittest.TestCase):
         return root
 
     AVDS = {"A_Tablet": (2560, 1600, 320, "google_apis"), "B_Phone": (1080, 2280, 440, "google_apis"),
-            "C_Tv": (1920, 1080, 320, "android-tv"), "D_Phone": (720, 1280, 320, "google_apis")}
+            "C_Tv": (1920, 1080, 320, "android-tv"), "D_Phone": (720, 1280, 320, "google_apis"),
+            "E_Phone_Play": (1280, 2856, 480, "google_apis_playstore")}
 
     def pick(self, folder, preferred=None, running=(), failed=()):
         from unittest import mock
@@ -1115,7 +1116,7 @@ class AvdRankTests(unittest.TestCase):
                 mock.patch.dict("os.environ", {"ANDROID_AVD_HOME": str(self.home(folder, self.AVDS))}):
             kinds = {name: emulator.avd_kind(name) for name in [*self.AVDS, "Missing"]}
         self.assertEqual(kinds, {"A_Tablet": "tablet", "B_Phone": "phone", "C_Tv": "other", "D_Phone": "phone",
-                                 "Missing": "phone"})
+                                 "E_Phone_Play": "phone", "Missing": "phone"})
 
     def test_with_no_config_a_phone_opens_before_a_tablet(self) -> None:
         import tempfile
@@ -1123,7 +1124,7 @@ class AvdRankTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             self.assertEqual(self.pick(folder), ("B_Phone", False, []))
         with tempfile.TemporaryDirectory() as folder:
-            self.assertEqual(self.pick(folder, running=("B_Phone", "D_Phone"))[:2], ("A_Tablet", False))
+            self.assertEqual(self.pick(folder, running=("B_Phone", "D_Phone", "E_Phone_Play"))[:2], ("A_Tablet", False))
 
     def test_a_preference_list_comes_first_then_phones_before_tablets(self) -> None:
         import tempfile
@@ -1136,6 +1137,32 @@ class AvdRankTests(unittest.TestCase):
         self.assertIn("'D_Phone' is already running", warnings[0])
         with tempfile.TemporaryDirectory() as folder:  # a single name, failed lately: the next phone, not the tablet
             self.assertEqual(self.pick(folder, preferred="A_Tablet", failed=("A_Tablet",))[0], "B_Phone")
+
+    def test_a_play_store_phone_comes_after_the_other_phones(self) -> None:
+        import tempfile
+        from unittest import mock
+
+        from android_workflow import emulator
+
+        with tempfile.TemporaryDirectory() as folder, \
+                mock.patch.dict("os.environ", {"ANDROID_AVD_HOME": str(self.home(folder, self.AVDS))}):
+            ranked = emulator.rank_avds(["E_Phone_Play", "A_Tablet", "B_Phone", "C_Tv", "D_Phone"], [])
+        self.assertEqual(ranked, ["B_Phone", "D_Phone", "E_Phone_Play", "A_Tablet", "C_Tv"])
+
+    def test_an_emulator_adb_keeps_calling_unauthorized_is_given_up_after_a_minute(self) -> None:
+        import time
+        from unittest import mock
+
+        from android_workflow import emulator
+
+        record = {"serial": "emulator-5554", "avd": "E_Phone_Play"}
+        with mock.patch.object(emulator, "_stall_limit", return_value=360.0):
+            self.assertIsNone(emulator._stalled(Path("/app"), {**record, "started_at": time.time() - 30}, None,
+                                                "unauthorized"))
+            stuck = emulator._stalled(Path("/app"), {**record, "started_at": time.time() - 90}, None, "unauthorized")
+            self.assertIn("unauthorized", stuck)
+            self.assertIsNone(emulator._stalled(Path("/app"), {**record, "started_at": time.time() - 90}, None,
+                                                "offline"))  # still booting: the stall limit applies
 
     def test_every_avd_running_starts_a_read_only_copy_of_the_first(self) -> None:
         import tempfile
