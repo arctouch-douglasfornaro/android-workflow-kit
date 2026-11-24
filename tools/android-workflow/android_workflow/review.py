@@ -7,7 +7,8 @@ stage log all work unchanged. What is mechanical lives here, with no agent in th
 - `start`: worktree at the PR head, `pr-context.json` (PR text, files, checks, earlier threads, the
   PR template's checklist), the media attached to the PR downloaded locally, the UI-change rule;
 - `next`: the one thing the orchestrator does now (spec, checks, device, draft, OK, post);
-- `ci`: trust CI when every required check passed on the PR head, else wait or run the local gate;
+- `ci`: one read of the PR's checks, shown in the body as information: the review never waits for CI,
+  never runs the local gate because of it, and CI never changes the verdict;
 - `draft` / `edit`: the review as it will be posted (verdict by code, comment cap, `nit:` prefix);
 - `post`: one review through the GitHub API, pinned to the reviewed commit, only with the draft id
   the developer approved; refused when the PR head moved since;
@@ -58,7 +59,6 @@ DEFAULT_REVIEW = {
     "max_inline_comments": 10,
     "allow_approve": True,
     "media_max_mb": 100,
-    "ci_wait_minutes": 30,
     "nits_inline": True,
     # Concerns alone approve (posted as comments): what developers did by hand on every run that had them.
     "approve_with_concerns": True,
@@ -83,8 +83,6 @@ RISK_CODE = re.compile(r"@(Module|Provides|Binds|InstallIn|Component|Subcomponen
 MAX_INLINE_LIMIT = 15
 EVENTS = ("APPROVE", "COMMENT", "REQUEST_CHANGES")
 SEVERITY_ORDER = {"blocking": 0, "concern": 1, "nit": 2}
-# A diff of only these files cannot change the build: CI is not waited for and the local gate never runs.
-DOC_SUFFIXES = (".md", ".mdx", ".markdown", ".txt", ".rst", ".adoc")
 
 # Hosts the PR's attachments may live on. Anything else in the PR text is never fetched.
 AUTH_MEDIA_HOSTS = {"github.com"}
@@ -243,11 +241,6 @@ def checks_of(pr: dict[str, Any]) -> tuple[str | None, list[dict[str, Any]]]:
         return None, []
     nodes = (((commit.get("statusCheckRollup") or {}).get("contexts") or {}).get("nodes")) or []
     return commit.get("oid"), [_check(node) for node in nodes if node]
-
-
-def docs_only(files: list[str]) -> bool:
-    """Whether every changed file is documentation (Markdown, text): nothing CI builds or tests."""
-    return bool(files) and all(path.lower().endswith(DOC_SUFFIXES) for path in files)
 
 
 def claims_hash(title: str, body: str, jira: list[str]) -> str:
@@ -822,11 +815,11 @@ def start(main_target: Path, pr_ref: str, worktree: Path | None = None, download
 
 
 def assess_ci(context: dict[str, Any], checks: list[dict[str, Any]], checks_commit: str | None) -> dict[str, Any]:
-    """`passed` (trusted: no local gate), `failed`, `pending`, or `none` (the local gate runs)."""
+    """`passed`, `failed`, `pending` or `none`: information for the body, never a step or the verdict."""
     if checks_commit and checks_commit != context.get("head"):
         return {"status": "pending", "reason": "the checks ran on another commit", "checks": []}
     if not checks:
-        return {"status": "none", "reason": "no CI check ran on the PR head: the local gate runs instead", "checks": []}
+        return {"status": "none", "reason": "no CI check ran on the PR head", "checks": []}
     required = [check for check in checks if check.get("required")]
     considered = required or checks
     # Only a required check (every check when none is required) fails CI; an optional failure is info.
@@ -843,12 +836,12 @@ def assess_ci(context: dict[str, Any], checks: list[dict[str, Any]], checks_comm
     if pending:
         return {"status": "pending", "waiting_for": [c.get("name") for c in pending], "checks": summary, **info}
     if not passed:
-        return {"status": "none", "reason": "every check was skipped: the local gate runs instead", "checks": summary,
+        return {"status": "none", "reason": "every check was skipped", "checks": summary,
                 **info}
     return {"status": "passed", "trusted": True, "passed": len(passed), "checks": summary, **info}
 
 
-def ci(target: Path, wait: bool = False, timeout: float = 540, interval: float = 30) -> dict[str, Any]:
+def ci(target: Path) -> dict[str, Any]:
     from android_workflow.watch import _remote, github_env
 
     agent_dir = agent_dir_for(target)
@@ -857,28 +850,15 @@ def ci(target: Path, wait: bool = False, timeout: float = 540, interval: float =
         raise ValueError("no review context: run `CLI review start` first")
     _, repo = _remote(target)
     env = github_env(target)
-    deadline = time.monotonic() + timeout
-    while True:
-        pr = fetch_pr(env, repo, int(context["number"]))
-        if pr.get("headRefOid") != context.get("head"):
-            report = {"status": "head_moved", "head": pr.get("headRefOid"),
-                      "next": f"new commits: CLI review start --target {_read(agent_dir / STATE_FILE).get('main')} "
-                              f"--pr {context['number']}"}
-            break
+    pr = fetch_pr(env, repo, int(context["number"]))
+    if pr.get("headRefOid") != context.get("head"):
+        report = {"status": "head_moved", "head": pr.get("headRefOid"),
+                  "next": f"new commits: CLI review start --target {_read(agent_dir / STATE_FILE).get('main')} "
+                          f"--pr {context['number']}"}
+    else:
         commit, checks = checks_of(pr)
         report = assess_ci(context, checks, commit)
-        if report["status"] != "pending" or not wait or time.monotonic() >= deadline:
-            break
-        time.sleep(interval)
     report["at"] = int(time.time())
-    if report["status"] == "passed":
-        state = _read(agent_dir / STATE_FILE)
-        if context["head"] not in (state.get("ci_passed_heads") or []):
-            state["ci_passed_heads"] = [*(state.get("ci_passed_heads") or []), context["head"]][-10:]
-            _write(agent_dir / STATE_FILE, state)
-    started = _read(agent_dir / CI_FILE).get("first_pending_at")
-    if report["status"] == "pending":
-        report["first_pending_at"] = started or report["at"]
     _write(agent_dir / CI_FILE, report)
     return report
 
@@ -1027,17 +1007,6 @@ def _device_needed(agent_dir: Path, context: dict[str, Any], state: dict[str, An
         return False
     return bool((context.get("ui_change") or {}).get("ui") or state.get("device_forced") or review.get("device_required")
                 or device_acceptance(agent_dir))
-
-
-def ci_not_needed(context: dict[str, Any], state: dict[str, Any]) -> str | None:
-    """Why CI need not be waited for (nor the local gate run), or None: the PR changes only documentation,
-    or CI passed on the previous head and the new commits change only documentation."""
-    if docs_only(context.get("files") or []):
-        return "only documentation changed: nothing for CI to build or test"
-    previous = state.get("previous_head")
-    if docs_only(context.get("delta_files") or []) and previous in (state.get("ci_passed_heads") or []):
-        return f"CI passed on {str(previous)[:7]} and the new commits change only documentation"
-    return None
 
 
 def _earlier_approval(state: dict[str, Any], head: str) -> dict[str, Any] | None:
@@ -1247,20 +1216,6 @@ def _decide(target: Path, record: bool, no_device: bool) -> dict[str, Any]:
             _write(agent_dir / STATE_FILE, state)
             _log_posted(agent_dir, f"no new review: {why}")
         return _done(state, context, why)
-    skip_ci = bool(quiet) or bool(ci_not_needed(context, state))
-    if ci_report.get("status") == "pending" and not skip_ci:
-        waited = time.time() - float(ci_report.get("first_pending_at") or time.time())
-        limit = float(review_config(target)["ci_wait_minutes"]) * 60
-        if waited < limit:
-            return _answer("wait_ci", "CI is still running on the PR head: " + ", ".join(ci_report.get("waiting_for") or []),
-                           command="CLI review ci --target TARGET --wait", then="CLI review next --target TARGET")
-        if _read(agent_dir / "gate-report.json").get("status") not in {"passed", "failed", "blocked"}:
-            return _answer("gate", f"CI still pending after {int(waited // 60)} min: the local gate runs instead",
-                           command="CLI gate --target TARGET", then="CLI review next --target TARGET")
-    if ci_report.get("status") == "none" and not skip_ci:
-        if _read(agent_dir / "gate-report.json").get("status") not in {"passed", "failed", "blocked"}:
-            return _answer("gate", ci_report.get("reason") or "no CI on the PR head",
-                           command="CLI gate --target TARGET", then="CLI review next --target TARGET")
     if waiting:
         return _answer("wait", "waiting for " + ", ".join(waiting), agents=waiting)
 
@@ -1616,25 +1571,20 @@ def _comment_body(item: dict[str, Any]) -> str:
     return body
 
 
-def verdict(findings: list[dict[str, Any]], ci_report: dict[str, Any], gate: dict[str, Any], device: str | None,
-            acceptance: list[dict[str, Any]], context: dict[str, Any], allow_approve: bool,
-            approve_with_concerns: bool = False, ci_waived: bool = False,
+def verdict(findings: list[dict[str, Any]], device: str | None, acceptance: list[dict[str, Any]],
+            context: dict[str, Any], allow_approve: bool, approve_with_concerns: bool = False,
             max_event: str | None = None) -> tuple[str, list[str]]:
     """The event, by rule: approve with comments unless the PR itself introduces a blocker. Changes are
-    requested only for a blocking finding, failing required CI or local gate, a device FAIL, or an unmet AC
-    the PR claims (never a PR-template item, never a failure the base has too); an AC waiting for an
-    answer, an unproven claim while CI is not green, or CI still pending comments; concerns comment unless
-    `approve_with_concerns`; nits never change it. A BLOCKED or PARTIAL device does not hold the approval
-    when CI (or the local gate) passed and nothing blocks: the body says what it could not verify.
+    requested only for a blocking finding, a device FAIL, or an unmet AC the PR claims (never a
+    PR-template item, never a failure the base has too); an AC waiting for an answer comments; concerns
+    comment unless `approve_with_concerns`; nits never change it. CI never changes it: its state is in the
+    body. A BLOCKED or PARTIAL device, or an unproven claim, does not hold the approval: the body says what
+    could not be verified, and `unchecked` keeps such a draft for the developer's OK.
     `max_event` caps what the CLI picks by itself (`edit --event` still goes higher)."""
     reasons: list[str] = []
     blocking = [f for f in findings if f["severity"] == "blocking"]
     if blocking:
         reasons.append(f"{len(blocking)} blocking finding(s)")
-    if ci_report.get("status") == "failed":
-        reasons.append("CI failing: " + ", ".join(ci_report.get("failed") or []))
-    if ci_report.get("status") in {"none", "pending"} and gate.get("status") == "failed":
-        reasons.append("the local gate failed")
     if device == "fail":
         reasons.append("the device check failed")
     # A checked PR-template item is a checklist, not what the PR delivers: listed, never the verdict.
@@ -1644,24 +1594,12 @@ def verdict(findings: list[dict[str, Any]], ci_report: dict[str, Any], gate: dic
         reasons.append(f"{len(unmet)} acceptance criterion/criteria not met")
     event = "REQUEST_CHANGES" if reasons else "APPROVE"
     if event == "APPROVE":
-        ci_ok = ci_report.get("status") == "passed" or gate.get("status") == "passed" or ci_waived
-        # Our device could not finish: CI is green and nothing blocks, so the gap is ours, not the author's.
-        device_gap = device in {"partial", "blocked"} and ci_ok
         concerns = [f for f in findings if f["severity"] == "concern"]
-        # An unproven claim with CI (or the local gate) green and nothing blocking is listed in the body
-        # (⚠️ not verified), never a reason to withhold the approval: the developers approved by hand every time.
-        unverified = [a for a in claimed if a.get("status") == "unverified" and not ci_ok]
         waiting = [a for a in claimed if a.get("status") == "open"]
         if concerns and not approve_with_concerns:
             reasons.append(f"{len(concerns)} concern(s)")
-        if unverified:
-            reasons.append(f"{len(unverified)} claim(s) without evidence")
         if waiting:
             reasons.append(f"{len(waiting)} acceptance criterion/criteria waiting for an answer")
-        if device in {"partial", "blocked"} and not device_gap:
-            reasons.append(f"device check {device}")
-        if ci_report.get("status") == "pending" and gate.get("status") != "passed" and not ci_waived:
-            reasons.append("CI still pending")
         if reasons:
             event = "COMMENT"
         elif not allow_approve:
@@ -1926,7 +1864,6 @@ def draft(target: Path, allow_quiet: bool = True) -> dict[str, Any]:
         if why:
             dropped_suggestions.append({"finding": item["id"], "reason": why})
     ci_report = _read(agent_dir / CI_FILE)
-    gate = _read(agent_dir / "gate-report.json")
     device_needed = _device_needed(agent_dir, context, state)
     waived = device_waived(agent_dir, context, state)
     carried = device_carried(agent_dir, context, state)
@@ -1944,12 +1881,10 @@ def draft(target: Path, allow_quiet: bool = True) -> dict[str, Any]:
     failing = {key for key, value in device_scenarios(report).items() if value == "fail"}
     if device == "fail" and failing and failing <= device_on_base(report):
         device_for_verdict = "pass"  # every failing scenario fails on the base too: not this PR's doing
-    ci_waived = ci_not_needed(context, state)
-    event, reasons = verdict(findings, ci_report, gate, device_for_verdict, acceptance, context,
-                             bool(config["allow_approve"]), bool(config["approve_with_concerns"]), bool(ci_waived),
-                             config.get("max_event"))
+    event, reasons = verdict(findings, device_for_verdict, acceptance, context, bool(config["allow_approve"]),
+                             bool(config["approve_with_concerns"]), config.get("max_event"))
 
-    gaps = unchecked(ci_report, gate, ci_waived, device_needed, waived, carried, device, device_for_verdict,
+    gaps = unchecked(device_needed, waived, carried, device, device_for_verdict,
                      acceptance, findings, state)
     lines: list[str] = []
     counts = {severity: sum(1 for f in findings if f["severity"] == severity) for severity in SEVERITY_ORDER}
@@ -1968,11 +1903,9 @@ def draft(target: Path, allow_quiet: bool = True) -> dict[str, Any]:
                         if optional_failed else ""))
     elif ci_report.get("status") == "failed":
         lines.append("**Checks:** failing on CI: " + ", ".join(ci_report.get("failed") or []) + ".")
-    elif ci_waived:
-        lines.append(f"**Checks:** CI {ci_report.get('status') or 'not read'} on {context['head'][:7]}, not waited for: "
-                     f"{ci_waived}.")
-    elif gate.get("status") and gate.get("status") != "not_run":
-        lines.append(f"**Checks:** no complete CI run on {context['head'][:7]}; local gate {gate.get('status')}.")
+    elif ci_report.get("status") == "pending":
+        lines.append(f"**Checks:** CI still running on {context['head'][:7]} when reviewed: "
+                     + ", ".join(ci_report.get("waiting_for") or ["checks"]) + ".")
     else:
         lines.append(f"**Checks:** CI {ci_report.get('status') or 'not read'}.")
     if waived:
@@ -2073,14 +2006,11 @@ def draft(target: Path, allow_quiet: bool = True) -> dict[str, Any]:
                          if security else None), **replayed}
 
 
-def unchecked(ci_report: dict[str, Any], gate: dict[str, Any], ci_waived: str | None, device_needed: bool,
-              waived: str | None, carried: Any, device: str | None, device_for_verdict: str | None,
+def unchecked(device_needed: bool, waived: str | None, carried: Any, device: str | None, device_for_verdict: str | None,
               acceptance: list[dict[str, Any]], findings: list[dict[str, Any]], state: dict[str, Any]) -> list[str]:
-    """What the review could not check: any item keeps the draft for the developer's OK (no auto post)."""
+    """What the review could not check: any item keeps the draft for the developer's OK (no auto post).
+    CI is not one: the review does not depend on it."""
     gaps: list[str] = []
-    ci = ci_report.get("status")
-    if not (ci == "passed" or ci_waived or (ci in {None, "none", "pending"} and gate.get("status") == "passed")):
-        gaps.append(f"CI {ci or 'not read'}" + (f", local gate {gate['status']}" if gate.get("status") else ""))
     if device_needed and not waived:
         if carried:
             if device != "pass":
@@ -2120,7 +2050,7 @@ def _review_body(value: dict[str, Any]) -> str:
     return _signed(value.get("body") or "", value.get("footer"))
 
 
-DRAFT_INPUT_FILES = (SPEC_FILE, "review.json", MEDIA_FILE, "device-report.md", "gate-report.json", "render-review.json")
+DRAFT_INPUT_FILES = (SPEC_FILE, "review.json", MEDIA_FILE, "device-report.md", "render-review.json")
 
 
 def draft_inputs(agent_dir: Path) -> dict[str, str]:
@@ -3012,7 +2942,7 @@ def dispatch(target: Path, args: Any) -> tuple[dict[str, Any], int]:
     if action == "next":
         return next_action(target, record=not args.dry_run, no_device=args.no_device), 0
     if action == "ci":
-        return ci(target, wait=args.wait, timeout=args.timeout), 0
+        return ci(target), 0
     if action == "draft":
         return draft(target), 0
     if action == "edit":

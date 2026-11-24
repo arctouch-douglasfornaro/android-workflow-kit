@@ -152,46 +152,33 @@ class PureRuleTests(unittest.TestCase):
         nit = {"severity": "nit"}
         concern = {"severity": "concern"}
         blocking = {"severity": "blocking"}
-        ci_ok = {"status": "passed"}
-        self.assertEqual(review.verdict([nit], ci_ok, {}, None, [], {}, True)[0], "APPROVE")
-        self.assertEqual(review.verdict([concern], ci_ok, {}, None, [], {}, True)[0], "COMMENT")
-        self.assertEqual(review.verdict([blocking, nit], ci_ok, {}, "pass", [], {}, True)[0], "REQUEST_CHANGES")
-        self.assertEqual(review.verdict([], {"status": "failed", "failed": ["build"]}, {}, None, [], {}, True)[0],
-                         "REQUEST_CHANGES")
-        self.assertEqual(review.verdict([], ci_ok, {}, "fail", [], {}, True)[0], "REQUEST_CHANGES")
-        # our device could not finish: with CI green and nothing blocking, the gap does not hold the approval
-        self.assertEqual(review.verdict([], ci_ok, {}, "partial", [], {}, True)[0], "APPROVE")
-        self.assertEqual(review.verdict([], ci_ok, {}, "blocked", [{"status": "unverified", "evidence": "device"}],
-                                        {}, True)[0], "APPROVE")
-        self.assertEqual(review.verdict([], {"status": "pending"}, {}, "blocked", [], {}, True)[0], "COMMENT")
-        self.assertEqual(review.verdict([], {"status": "none"}, {"status": "passed"}, "blocked", [], {}, True)[0], "APPROVE")
-        # an unproven claim with CI green is listed in the body, never a reason to withhold the approval
-        self.assertEqual(review.verdict([], ci_ok, {}, None, [{"status": "unverified"}], {}, True)[0], "APPROVE")
-        self.assertEqual(review.verdict([], {"status": "failed_optional"}, {}, None, [{"status": "unverified"}], {}, True)[0],
-                         "COMMENT")
-        self.assertEqual(review.verdict([], ci_ok, {}, None, [{"status": "follow_up"}], {}, True)[0], "APPROVE")
-        self.assertEqual(review.verdict([], ci_ok, {}, None, [{"status": "unmet"}], {}, True)[0], "REQUEST_CHANGES")
+        self.assertEqual(review.verdict([nit], None, [], {}, True)[0], "APPROVE")
+        self.assertEqual(review.verdict([concern], None, [], {}, True)[0], "COMMENT")
+        self.assertEqual(review.verdict([blocking, nit], "pass", [], {}, True)[0], "REQUEST_CHANGES")
+        self.assertEqual(review.verdict([], "fail", [], {}, True)[0], "REQUEST_CHANGES")
+        # our device could not finish, or a claim is unproven: listed in the body, never the verdict
+        self.assertEqual(review.verdict([], "partial", [], {}, True)[0], "APPROVE")
+        self.assertEqual(review.verdict([], "blocked", [{"status": "unverified", "evidence": "device"}], {}, True)[0],
+                         "APPROVE")
+        self.assertEqual(review.verdict([], None, [{"status": "unverified"}], {}, True)[0], "APPROVE")
+        self.assertEqual(review.verdict([], None, [{"status": "follow_up"}], {}, True)[0], "APPROVE")
+        self.assertEqual(review.verdict([], None, [{"status": "unmet"}], {}, True)[0], "REQUEST_CHANGES")
         # only what the PR itself introduces blocks: a template item, a failure the base has too, an open question
         template = {"status": "unmet", "source": "template"}
-        self.assertEqual(review.verdict([], ci_ok, {}, None, [template, {**template, "status": "unverified"}], {}, True),
+        self.assertEqual(review.verdict([], None, [template, {**template, "status": "unverified"}], {}, True),
                          ("APPROVE", []))
-        self.assertEqual(review.verdict([], ci_ok, {}, None, [{"status": "unmet", "on_base": True}], {}, True)[0], "APPROVE")
-        self.assertEqual(review.verdict([], ci_ok, {}, None, [{"status": "open"}], {}, True)[0], "COMMENT")
+        self.assertEqual(review.verdict([], None, [{"status": "unmet", "on_base": True}], {}, True)[0], "APPROVE")
+        self.assertEqual(review.verdict([], None, [{"status": "open"}], {}, True)[0], "COMMENT")
         # review.max_event caps what the CLI picks by itself
-        capped = review.verdict([blocking], ci_ok, {}, None, [], {}, True, max_event="COMMENT")
+        capped = review.verdict([blocking], None, [], {}, True, max_event="COMMENT")
         self.assertEqual(capped[0], "COMMENT")
         self.assertIn("edit --event REQUEST_CHANGES", capped[1][-1])
-        self.assertEqual(review.verdict([nit], ci_ok, {}, None, [], {}, True, max_event="COMMENT")[0], "APPROVE")
-        self.assertEqual(review.verdict([], ci_ok, {}, None, [], {}, False)[0], "COMMENT")
-        self.assertEqual(review.verdict([blocking], ci_ok, {}, None, [], {"own_pr": True}, True)[0], "COMMENT")
-        # approve_with_concerns: concerns ride along an approval, unproven claims too while CI is green
-        self.assertEqual(review.verdict([concern, nit], ci_ok, {}, None, [], {}, True, True), ("APPROVE", []))
-        self.assertEqual(review.verdict([concern], ci_ok, {}, None, [{"status": "unverified"}], {}, True, True)[0],
-                         "APPROVE")
-        # CI still running holds the approval, unless the change cannot affect the build
-        pending = {"status": "pending"}
-        self.assertEqual(review.verdict([], pending, {}, None, [], {}, True)[0], "COMMENT")
-        self.assertEqual(review.verdict([], pending, {}, None, [], {}, True, ci_waived=True)[0], "APPROVE")
+        self.assertEqual(review.verdict([nit], None, [], {}, True, max_event="COMMENT")[0], "APPROVE")
+        self.assertEqual(review.verdict([], None, [], {}, False)[0], "COMMENT")
+        self.assertEqual(review.verdict([blocking], None, [], {"own_pr": True}, True)[0], "COMMENT")
+        # approve_with_concerns: concerns ride along an approval
+        self.assertEqual(review.verdict([concern, nit], None, [], {}, True, True), ("APPROVE", []))
+        self.assertEqual(review.verdict([concern], None, [{"status": "unverified"}], {}, True, True)[0], "APPROVE")
 
     def test_headline_follows_the_event(self) -> None:
         counts = {"blocking": 0, "concern": 2, "nit": 1}
@@ -199,15 +186,6 @@ class PureRuleTests(unittest.TestCase):
                          "Looks good to me. 2 point(s) worth a look below, none blocking. 1 optional nit(s).")
         self.assertEqual(review.headline("COMMENT", counts, ["2 concern(s)"]), "A few points to look at. (2 concern(s))")
         self.assertEqual(review.headline("APPROVE", {"nit": 2}, []), "Looks good to me. 2 optional nit(s), none blocking.")
-
-    def test_docs_only_changes(self) -> None:
-        self.assertTrue(review.docs_only(["README.md", ".ai/skills/x/SKILL.md", "docs/a.txt"]))
-        self.assertFalse(review.docs_only(["README.md", "app/build.gradle.kts"]))
-        self.assertFalse(review.docs_only([]))
-        self.assertTrue(review.ci_not_needed({"files": ["README.md"]}, {}))
-        delta = {"files": ["A.kt", "README.md"], "delta_files": ["README.md"]}
-        self.assertIsNone(review.ci_not_needed(delta, {"previous_head": "abc"}))
-        self.assertIn("CI passed on abc", review.ci_not_needed(delta, {"previous_head": "abc", "ci_passed_heads": ["abc"]}))
 
     def test_manual_comments_are_what_the_developer_wrote_by_hand_after_the_post(self) -> None:
         state = {"posted": [{"at": 1793822000, "url": "https://g/pull/7#pullrequestreview-1"}],
@@ -594,7 +572,7 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(drafted["security"]["findings"], ["B1"])
         self.assertTrue(value["comments"][0]["body"].startswith("**Blocking:** logs the user's email"))
 
-    def test_no_ci_runs_the_local_gate(self) -> None:
+    def test_no_ci_does_not_run_the_local_gate(self) -> None:
         with Project(self.CHANGE) as project:
             pr = fake_pr(project.head, commits={"nodes": []})
             result = project.start(pr)
@@ -609,8 +587,8 @@ class FlowTests(unittest.TestCase):
             log_stage(worktree, "Reviewer", "completed", "done", "host")
             with mock.patch.object(review, "fetch_pr", return_value=pr):
                 self.assertEqual(review.ci(worktree)["status"], "none")
-            gate = review.next_action(worktree)
-        self.assertEqual((gate["next"], gate["command"]), ("gate", "CLI gate --target TARGET"))
+            step = review.next_action(worktree)
+        self.assertEqual(step["next"], "draft")  # no CI: the local gate does not run either
 
     def test_new_commits_start_a_delta_round(self) -> None:
         with Project(self.CHANGE) as project:
@@ -833,7 +811,7 @@ class DraftEditTests(unittest.TestCase):
         self.assertEqual((edits[0]["rewritten"][0]["before"], edits[0]["rewritten"][0]["after"]), ("p", "shorter"))
         self.assertIn("+Approving, thanks!", edits[1]["body"]["diff"])
 
-    def test_a_docs_only_pr_does_not_wait_for_ci(self) -> None:
+    def test_pending_ci_is_not_waited_for(self) -> None:
         with Project({"README.md": "# Benchmarks\n"}) as project:
             pending = {"nodes": [{"commit": {"oid": project.head, "statusCheckRollup": {"contexts": {"nodes": [
                 {"__typename": "CheckRun", "name": "build", "status": "IN_PROGRESS", "conclusion": None, "isRequired": True}]}}}}]}
@@ -854,7 +832,7 @@ class DraftEditTests(unittest.TestCase):
             drafted = review.draft(worktree)
             body = read_json(agent_dir / review.DRAFT_FILE)["body"]
         self.assertEqual(drafted["event"], "APPROVE")
-        self.assertIn("not waited for: only documentation changed", body)
+        self.assertIn("CI still running on", body)
 
 
 class DeviceTests(unittest.TestCase):
@@ -975,8 +953,9 @@ class DeviceTests(unittest.TestCase):
         self.assertEqual(drafted["event"], "APPROVE")
         self.assertIn("fails on the base too: not introduced by this PR", value["body"])
         with Project(ui) as project:
-            drafted, _ = self.drafted_with_device(project, blocked, [{"id": "AC1"}], ci={"status": "pending"})
-        self.assertEqual(drafted["event"], "COMMENT")  # CI not green yet: the gap still holds it
+            drafted, value = self.drafted_with_device(project, blocked, [{"id": "AC1"}], ci={"status": "pending"})
+        self.assertEqual(drafted["event"], "APPROVE")  # CI still running changes nothing: the body says so
+        self.assertIn("CI still running on", value["body"])
 
     def test_the_device_line_says_what_actually_ran(self) -> None:
         ui = {SCREEN: "package com.example\n\n@Composable\nfun ProfileScreen() {}\n"}
@@ -1099,13 +1078,13 @@ class AutoPostTests(unittest.TestCase):
         self.assertEqual(out["draft"]["event"], "REQUEST_CHANGES")
         self.assertEqual(out["next"]["next"], "ask_user")
 
-    def test_a_failed_ci_or_an_unverified_ac_waits_for_the_ok(self) -> None:
+    def test_an_unverified_ac_waits_for_the_ok_but_ci_never_does(self) -> None:
         with Project({REPO: "package com.example\n\nclass ProfileRepository\n"}) as project:
             out = self.drafted(project, {"status": "approved", "blocking": [],
                                          "acceptance": [{"id": "AC1", "status": "unverified"}]}, ci="failed")
         self.assertEqual(out["next"]["next"], "ask_user")
-        self.assertTrue(any(g.startswith("CI failed") for g in out["draft"]["gaps"]), out["draft"]["gaps"])
-        self.assertIn("AC AC1 unverified", out["draft"]["gaps"])
+        self.assertEqual(out["draft"]["gaps"], ["AC AC1 unverified"])  # failing CI is no gap
+        self.assertEqual(out["draft"]["event"], "APPROVE")
         self.assertIn("not checked:", out["next"]["why"])
 
     def test_auto_post_off_always_asks(self) -> None:
@@ -1403,7 +1382,7 @@ class SignalTests(unittest.TestCase):
         self.assertEqual((rows["AC3"]["status"], rows["AC3"].get("on_base")), ("unmet", None))
         self.assertEqual((rows["AC4"]["status"], rows["AC4"]["question"]), ("open", "Which copy?"))
         self.assertTrue(rows["AC5"]["on_base"])
-        event, reasons = review.verdict([], {"status": "passed"}, {}, None, list(rows.values()), {}, True)
+        event, reasons = review.verdict([], None, list(rows.values()), {}, True)
         self.assertEqual((event, reasons), ("REQUEST_CHANGES", ["1 acceptance criterion/criteria not met"]))  # AC3 only
 
     def test_max_event_config(self) -> None:
@@ -1418,7 +1397,7 @@ class SignalTests(unittest.TestCase):
 
     def test_nits_alone_approve(self) -> None:
         nit = [{"id": "S1", "severity": "nit", "problem": "rename", "path": REPO, "line": 4}]
-        event, reasons = review.verdict(nit, {"status": "passed"}, {}, "pass",
+        event, reasons = review.verdict(nit, "pass",
                                         [{"id": "AC1", "status": "met"}, {"id": "AC2", "status": "unchecked"}],
                                         {"own_pr": False}, True)
         self.assertEqual((event, reasons), ("APPROVE", []))

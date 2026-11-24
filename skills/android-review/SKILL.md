@@ -3,7 +3,7 @@ name: android-review
 description: >-
   Review someone else's open GitHub PR on an Android app end to end: what the
   PR claims (body, Jira or Linear ticket, PR template), an independent code review
-  (architecture, side effects), the attached screenshots and videos, CI, and a
+  (architecture, side effects), the attached screenshots and videos, and a
   device check of base vs PR head when the PR changes UI. Posts one review
   (inline comments, verdict): an APPROVE or COMMENT with every check done goes
   out by itself; REQUEST_CHANGES or anything left unchecked waits for the developer's OK. Use when the user
@@ -25,7 +25,7 @@ says (*How to delegate, per host*: `aw-<role>`, `AW_STAGE`, tiers).
 You are the **orchestrator**: keep your context small (paths and ≤10-line returns; never read the
 diff, logs or media yourself). **Nothing reaches GitHub before the developer's OK**, and the OK is
 for one exact draft id. The one exception is the CLI's: `next` returns `post` for an APPROVE or
-COMMENT draft with nothing left unchecked (CI, device, every AC, no security finding), unless the
+COMMENT draft with nothing left unchecked (device, every AC, no security finding; CI is never waited for), unless the
 developer already edited a draft of this head or `review.auto_post` is false.
 
 ## Invocation
@@ -59,7 +59,7 @@ CLI review start  --target MAIN --pr N|BRANCH [--worktree PATH] [--no-media]  (w
 CLI review status --target MAIN --pr N|BRANCH                            (were our comments addressed? no worktree)
 CLI setup         --target WT --source-repo MAIN                          (inherits the main checkout's profile)
 CLI review next   --target WT [--no-device]                               (the one thing to do now)
-CLI review ci     --target WT [--wait]                                    (trust CI, or wait, or the local gate)
+CLI review ci     --target WT                                             (one read of the PR's checks, for the body)
 CLI review draft  --target WT                                             (RUN/review-draft.md + draft id)
 CLI review edit   --target WT [--drop C2]… [--set C3 "text"]… [--keep-open T1]… [--event COMMENT] [--body "…"]
 CLI review shown  --target WT --draft-id ID                               (the developer saw this draft)
@@ -103,7 +103,6 @@ CLI review finish --target MAIN --pr N                                   (merged
      PR-head APK when the PR changes UI).
    - `fetch_design` / `spawn` with `with_agent` / `aw-media` mode `render`: as in android-workflow
      (*Execute*); every `then` is `CLI review next --target WT`.
-   - `wait_ci`: run `command` (polls up to 9 min), then `next`. `gate`: run `command` (long timeout).
    - `wait` / `wait_device` / `wait_prebuild` / `replay_before`: as in android-workflow.
    - `ask_user` with `question` list (Planner): ask once, `CLI review answer` each, then `next`.
    - `draft`: run `command`, then `next`.
@@ -194,7 +193,7 @@ head and proposes resolving the addressed ones). A run of that PR on disk also g
 
 ## What the CLI decides
 
-Device, reviewer tier, CI trust, verdict, carry-over, drafts and thread resolution are decided in
+Device, reviewer tier, verdict, carry-over, drafts and thread resolution are decided in
 `android_workflow/review.py`; act on what `review next` returns. Summary and config keys:
 `docs/cli-decisions.md`.
 
@@ -202,7 +201,7 @@ Device, reviewer tier, CI trust, verdict, carry-over, drafts and thread resoluti
 
 In `RUN`: `pr-context.json` (with `copies`), `ticket/<KEY>.md`, `copy-diff/*.diff`, `review-state.json` (rounds, heads, posted reviews), `review-spec.json`,
 `plan.md` (UI only), `review.json`, `media-review.json`, `media/pr/`, `ci-report.json`,
-`gate-report.json` (local gate only), `device-report.md` and `media/{before,after}/` (UI only),
+`device-report.md` and `media/{before,after}/` (UI only),
 `review-draft.json` / `review-draft.md`, `review-delta.diff` (delta rounds), `review-inbox.json`,
 `review-replies.json` (agent) / `review-replies-draft.json` / `review-replies.md` (watch),
 `review-status.md` (`review status`), `stage-log.md`.

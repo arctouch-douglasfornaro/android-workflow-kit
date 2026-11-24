@@ -87,12 +87,10 @@ device APK build never build in the same checkout at once.
   and every attachment is the same (link, status, SHA-256); any change runs the Media analyst again.
   The device is this run's own lease, as in android-workflow; with `device.dedicated` (default `true`) it is
   always an emulator the workflow started, never the developer's own emulator or phone.
-- **CI** is trusted when every required check (else every check) on the PR head passed; only those
-  fail it, an optional check failing is listed in the body as info. Pending →
-  wait up to `review.ci_wait_minutes` (30), then the local gate; no check at all, or all skipped →
-  the local gate for the touched modules. **Documentation only** (every changed file `.md`/`.txt`/…,
-  or CI passed on the previous head and the new commits are docs only) → CI is not waited for, the
-  gate never runs, and pending CI does not hold the approval (the body says why).
+- **CI** never holds the review: it is read once (`review ci`) and shown in the body (passed, failing,
+  still running or none, an optional failure as info). The review never waits for it, never runs the
+  local gate because of it, and it changes neither the verdict nor the auto post. A PR-template check
+  left unfilled or a check still running does not stop the run.
 - **Acceptance** is reconciled at draft time with what ran after the Reviewer: a device scenario
   `ACn …: PASS` proves an AC (FAIL makes it unmet), media shown proves it, and an attachment the tool
   could not download is marked "not checked", never held against the author. Each AC keeps its
@@ -101,13 +99,12 @@ device APK build never build in the same checkout at once.
   fails the same way (a device line `ACn …: FAIL, also fails on base` does the same), and an AC that
   waits for a product or design answer gets `status: open` (or `question: "…"`): shown as ❓ with it.
 - **Verdict** — approve with comments unless the PR itself introduces a blocker: a blocking finding,
-  failing required CI, a failed local gate, a device FAIL, or an unmet AC the PR claims →
+  a device FAIL, or an unmet AC the PR claims →
   `REQUEST_CHANGES`. Never from a PR-template item (listed only), a failure the base has too, or a
   device FAIL whose every failing scenario is on the base, nor from an AC the Planner marked
   `follow_up` (deferred by the ticket or the PR: ⏭️ in the body; media or render findings about it are
-  at most concerns). An AC waiting for an answer, CI still pending, or an unproven claim while CI is
-  not green → `COMMENT`; else `APPROVE`. With CI (or the local gate) green and nothing blocking, an
-  unproven claim (⚠️) and a BLOCKED or PARTIAL device do not hold the approval: the body says what
+  at most concerns). An AC waiting for an answer → `COMMENT`; else `APPROVE`. CI never changes it. With
+  nothing blocking, an unproven claim (⚠️) and a BLOCKED or PARTIAL device do not hold the approval: the body says what
   could not be verified. **Concerns and nits approve** (posted with it as comments;
   `review.approve_with_concerns: false` makes concerns `COMMENT` again). `review.max_event: "COMMENT"`
   caps what the CLI picks: `REQUEST_CHANGES` is then only the developer's `edit --event`. Own PR →
@@ -134,7 +131,7 @@ device APK build never build in the same checkout at once.
   `edits_kept` / `edits_not_kept`: an edited body or event is composed again, since both summarize the
   checks. `draft` run again on unchanged checks starts over with no edits.
 - **Auto post**: `next` returns `post` instead of `ask_user` when the draft is APPROVE or COMMENT and
-  its `gaps` is empty: CI passed (or waived for docs, or the local gate passed with no CI), the device
+  its `gaps` is empty (CI is not one): the device
   PASS when the PR changes UI (or the Planner's waiver), no AC `unverified`, `unmet`, `unchecked` or
   `open`, and no security finding. REQUEST_CHANGES, any gap, a draft the developer edited on this head
   (`touched` carries over a redraft) or `review.auto_post: false` keeps the `ask_user`, whose `why`
@@ -164,7 +161,7 @@ device APK build never build in the same checkout at once.
   skipped items are handled; `ask_user` items stay open until the developer answers.
 
 Config, per project in `.ai/android-workflow.json`:
-`{"review": {"max_inline_comments": 10, "allow_approve": true, "media_max_mb": 100, "ci_wait_minutes": 30,
+`{"review": {"max_inline_comments": 10, "allow_approve": true, "media_max_mb": 100,
 "nits_inline": true, "approve_with_concerns": true, "max_event": null, "auto_post": true}}`.
 
 Attachments of a private repo download through the signed URL GitHub renders in the PR's
