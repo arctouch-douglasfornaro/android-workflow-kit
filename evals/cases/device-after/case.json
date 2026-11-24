@@ -1,0 +1,292 @@
+{
+  "id": "device-after",
+  "agent": "aw-device",
+  "tier": "standard",
+  "fixture": "notes-app",
+  "about": "aw-device mode after on a real emulator leased by the CLI: a reviewed UI change on note detail, the plan's recipe opens notes://note/1 and notes://note/999 by deep link. Must write Maestro flows that start from the deep link, replay them with the CLI on the leased serial, capture the named evidence and write device-report.md with a verdict per AC. Needs a free emulator; the case's lease is given back after",
+  "prepare": [
+    {
+      "do": "overrides",
+      "set": {
+        "device": {
+          "app_module": ":app",
+          "application_id": "com.notes.app.debug",
+          "launch_activity": ".MainActivity"
+        }
+      }
+    },
+    {
+      "do": "accept_profile"
+    },
+    {
+      "do": "copy",
+      "from": "feature-map.md",
+      "to": ".ai/feature-map.md"
+    },
+    {
+      "do": "commit",
+      "message": "Workflow config"
+    },
+    {
+      "do": "branch",
+      "name": "notes-12-edited-date"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "start",
+        "--target",
+        "{TARGET}",
+        "--id",
+        "NOTES-12",
+        "--title",
+        "Show when a note was last edited on the note detail screen"
+      ],
+      "as": "START_JSON"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "update-spec",
+        "--target",
+        "{TARGET}",
+        "--type",
+        "feature",
+        "--risk",
+        "low",
+        "--complexity",
+        "low",
+        "--surfaces",
+        "ui",
+        "--level",
+        "standard",
+        "--visual",
+        "yes",
+        "--acceptance",
+        "Opening note 1 shows Edited on Nov 14, 2023 under the title (tag note_detail_edited)|Opening an unknown note shows Note not found and no edited line",
+        "--proofs",
+        "device|device",
+        "--parallel-parts",
+        "1",
+        "--parallel-files",
+        "0"
+      ],
+      "as": "SPEC_JSON"
+    },
+    {
+      "do": "copy",
+      "from": "plan.md",
+      "to": ".ai/workflow/NOTES-12/plan.md"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "log",
+        "--target",
+        "{TARGET}",
+        "--stage",
+        "Planner",
+        "--status",
+        "completed",
+        "--note",
+        "2 AC"
+      ],
+      "as": "PLAN_LOG"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "log",
+        "--target",
+        "{TARGET}",
+        "--stage",
+        "Implementer",
+        "--status",
+        "started",
+        "--note",
+        "edited date"
+      ],
+      "as": "IMPL_START"
+    },
+    {
+      "do": "copy",
+      "from": "src/NoteDetailActivity.kt",
+      "to": "app/src/main/kotlin/com/notes/app/NoteDetailActivity.kt"
+    },
+    {
+      "do": "copy",
+      "from": "implementation-notes.md",
+      "to": ".ai/workflow/NOTES-12/implementation-notes.md"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "log",
+        "--target",
+        "{TARGET}",
+        "--stage",
+        "Implementer",
+        "--status",
+        "completed",
+        "--note",
+        "edited date done"
+      ],
+      "as": "IMPL_LOG"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "next",
+        "--target",
+        "{TARGET}"
+      ],
+      "as": "TREE",
+      "field": "tree"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "gate",
+        "--target",
+        "{TARGET}"
+      ],
+      "as": "GATE_JSON"
+    },
+    {
+      "do": "copy",
+      "from": "review.json",
+      "to": ".ai/workflow/NOTES-12/review.json",
+      "render": true
+    },
+    {
+      "do": "cli",
+      "args": [
+        "log",
+        "--target",
+        "{TARGET}",
+        "--stage",
+        "Reviewer",
+        "--status",
+        "completed",
+        "--note",
+        "approved, 0 blocking"
+      ],
+      "as": "REVIEW_LOG"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "device",
+        "build",
+        "--target",
+        "{TARGET}"
+      ],
+      "as": "BUILD_JSON"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "emulator",
+        "--target",
+        "{TARGET}",
+        "--wait-free",
+        "--timeout",
+        "400"
+      ],
+      "as": "EMU_JSON"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "next",
+        "--target",
+        "{TARGET}"
+      ],
+      "as": "NEXT_JSON"
+    }
+  ],
+  "prompt_file": "prompt.md",
+  "snapshot": [
+    "app/src/main/kotlin/com/notes/app/NoteDetailActivity.kt"
+  ],
+  "checks": [
+    {
+      "id": "report_written",
+      "kind": "regex",
+      "file": ".ai/workflow/NOTES-12/device-report.md",
+      "pattern": "AC1[\\s\\S]*AC2",
+      "weight": 2
+    },
+    {
+      "id": "ac1_pass",
+      "kind": "regex",
+      "file": ".ai/workflow/NOTES-12/device-report.md",
+      "pattern": "AC1[^\\n]{0,200}\\bPASS\\b",
+      "weight": 2
+    },
+    {
+      "id": "ac2_pass",
+      "kind": "regex",
+      "file": ".ai/workflow/NOTES-12/device-report.md",
+      "pattern": "AC2[^\\n]{0,200}\\bPASS\\b",
+      "weight": 2
+    },
+    {
+      "id": "replay_ran",
+      "kind": "file_exists",
+      "file": ".ai/workflow/NOTES-12/replay.json",
+      "weight": 2
+    },
+    {
+      "id": "edited_capture",
+      "kind": "regex",
+      "file": ".ai/workflow/NOTES-12/replay.json",
+      "pattern": "note-detail-edited",
+      "weight": 1
+    },
+    {
+      "id": "source_untouched",
+      "kind": "unchanged",
+      "file": "app/src/main/kotlin/com/notes/app/NoteDetailActivity.kt",
+      "weight": 2
+    },
+    {
+      "id": "flow_has_deep_link",
+      "kind": "regex",
+      "file": ".ai/workflow/NOTES-12/media/flows/*.yaml",
+      "pattern": "notes://note/1[\\s\\S]*notes://note/999|notes://note/999[\\s\\S]*notes://note/1",
+      "weight": 2
+    },
+    {
+      "id": "no_launch_after_link",
+      "kind": "not_regex",
+      "file": ".ai/workflow/NOTES-12/media/flows/*.yaml",
+      "pattern": "openLink[\\s\\S]*launchApp",
+      "weight": 1
+    }
+  ],
+  "rubric": [
+    {
+      "id": "deep_link_first",
+      "weight": 3,
+      "criterion": "The flows in RUN/media/flows/ reach note detail by the deep link (notes://note/1 and notes://note/999, through the scaffold's .sh or openLink) instead of tapping through the list, and never launchApp after the link."
+    },
+    {
+      "id": "verdict_from_evidence",
+      "weight": 4,
+      "criterion": "Each AC's verdict in device-report.md cites the replayed flow and capture (the edited line reads 'Edited on Nov 14, 2023'; the unknown note shows 'Note not found' and no edited line), on the leased serial, not on a hand-driven guess."
+    },
+    {
+      "id": "stays_in_role",
+      "weight": 3,
+      "criterion": "No source edited, no build run by the agent itself (the CLI installs), only the leased serial used, and the report stays within its format."
+    }
+  ],
+  "judge_reads": [
+    ".ai/workflow/NOTES-12/device-report.md",
+    ".ai/workflow/NOTES-12/replay.json",
+    ".ai/workflow/NOTES-12/plan.md",
+    ".ai/workflow/NOTES-12/media/flows/note-detail-edited.yaml",
+    ".ai/workflow/NOTES-12/media/after/note-detail-edited.png"
+  ]
+}

@@ -276,7 +276,10 @@ def run_check(check: dict[str, Any], run: dict[str, Any]) -> tuple[bool, str]:
     if kind == "file_absent":
         return not path.exists(), str(path.relative_to(workdir))
     if kind in ("regex", "not_regex"):
-        text = path.read_text(encoding="utf-8") if path.is_file() else ""
+        if "*" in check["file"]:  # a glob: every matching file, e.g. the flows an agent named itself
+            text = "\n".join(item.read_text(encoding="utf-8", errors="replace") for item in sorted(workdir.glob(check["file"])))
+        else:
+            text = path.read_text(encoding="utf-8") if path.is_file() else ""
         found = re.search(check["pattern"], text, re.M | re.I)
         return (bool(found) if kind == "regex" else not found), (found.group(0)[:80] if found else "no match")
     if kind == "cli":
