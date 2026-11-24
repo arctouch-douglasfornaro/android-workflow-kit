@@ -575,7 +575,8 @@ class FlowTests(unittest.TestCase):
         self.assertEqual([r["thread"] for r in value["thread_replies"]], ["T_carol"])
         self.assertEqual({d["reason"] for d in drafted["replies_dropped"]}, {"thread already resolved", "unknown thread"})
         self.assertIn("## Replies in others' threads (1)", shown)
-        self.assertIn("1 reply(ies) in others' threads", ask["question"])
+        # An approval with every check done is posted without asking.
+        self.assertEqual((ask["next"], ask["draft_id"]), ("post", drafted["draft_id"]))
         self.assertEqual(graphql.call_count, 1)  # the retry posts nothing twice
         self.assertEqual(graphql.call_args.kwargs["thread"], "T_carol")
         self.assertEqual(posted["thread_replies"], [{"id": "R1", "url": "https://x/r"}])
@@ -1047,10 +1048,10 @@ class DeviceTests(unittest.TestCase):
             log_stage(worktree, "Reviewer", "completed", "done", "host")
             (agent_dir / review.CI_FILE).write_text(json.dumps({"status": "passed", "passed": 1, "at": 1}))
             review.draft(worktree)
-            self.assertEqual(review.next_action(worktree)["next"], "ask_user")
+            self.assertEqual(review.next_action(worktree)["next"], "post")  # every check done
             (agent_dir / review.CI_FILE).write_text(json.dumps({"status": "passed", "passed": 1, "at": 2}))
-            self.assertEqual(review.next_action(worktree)["next"], "ask_user")
-            review.edit(worktree, body="Edited.")
+            self.assertEqual(review.next_action(worktree)["next"], "post")
+            review.edit(worktree, body="Edited.")  # the developer is in the loop: asked again
             self.assertEqual(review.next_action(worktree)["next"], "ask_user")
             (agent_dir / "device-report.md").write_text("# Status\n\nPASS\n")
             redraft = review.next_action(worktree)
@@ -1058,6 +1059,60 @@ class DeviceTests(unittest.TestCase):
             review.draft(worktree)
             self.assertEqual(review.next_action(worktree)["next"], "ask_user")
 
+
+
+class AutoPostTests(unittest.TestCase):
+    """APPROVE or COMMENT with every check done posts without asking; anything else waits for the OK."""
+
+    def drafted(self, project: Project, review_json: dict, ci: str = "passed", config: dict | None = None,
+                acceptance: list | None = None) -> dict:
+        result = project.start()
+        worktree, agent_dir = Path(result["worktree_path"]), Path(result["run"])
+        write_profile(worktree)
+        if config is not None:
+            (worktree / ".ai/android-workflow.json").write_text(json.dumps({"review": config}))
+        review.next_action(worktree)
+        (agent_dir / review.SPEC_FILE).write_text(json.dumps({"status": "ready", "acceptance": acceptance or [
+            {"id": "AC1", "text": "load() returns 1", "evidence": "test"}]}))
+        log_stage(worktree, "Planner", "completed", "1 AC", "host")
+        review.next_action(worktree)
+        (agent_dir / "review.json").write_text(json.dumps(review_json))
+        log_stage(worktree, "Reviewer", "completed", "done", "host")
+        (agent_dir / review.CI_FILE).write_text(json.dumps({"status": ci, "passed": 1, "failed": ["build"], "at": 1}))
+        drafted = review.draft(worktree)
+        return {"draft": read_json(agent_dir / review.DRAFT_FILE), "next": review.next_action(worktree),
+                "drafted": drafted}
+
+    def test_an_approval_with_every_check_done_is_posted(self) -> None:
+        with Project({REPO: "package com.example\n\nclass ProfileRepository\n"}) as project:
+            out = self.drafted(project, {"status": "approved", "blocking": [],
+                                         "acceptance": [{"id": "AC1", "status": "met"}]})
+        self.assertEqual((out["draft"]["event"], out["draft"]["gaps"]), ("APPROVE", []))
+        self.assertEqual(out["next"]["next"], "post")
+        self.assertIn(f"--draft-id {out['drafted']['draft_id']}", out["next"]["command"])
+        self.assertEqual(out["next"]["show"], f"RUN/{review.DRAFT_MD}")
+
+    def test_request_changes_waits_for_the_ok(self) -> None:
+        with Project({REPO: "package com.example\n\nclass ProfileRepository\n"}) as project:
+            out = self.drafted(project, {"status": "changes_requested", "blocking": [
+                {"id": "B1", "file": REPO, "line": 3, "problem": "crashes on null", "fix": "guard"}]})
+        self.assertEqual(out["draft"]["event"], "REQUEST_CHANGES")
+        self.assertEqual(out["next"]["next"], "ask_user")
+
+    def test_a_failed_ci_or_an_unverified_ac_waits_for_the_ok(self) -> None:
+        with Project({REPO: "package com.example\n\nclass ProfileRepository\n"}) as project:
+            out = self.drafted(project, {"status": "approved", "blocking": [],
+                                         "acceptance": [{"id": "AC1", "status": "unverified"}]}, ci="failed")
+        self.assertEqual(out["next"]["next"], "ask_user")
+        self.assertTrue(any(g.startswith("CI failed") for g in out["draft"]["gaps"]), out["draft"]["gaps"])
+        self.assertIn("AC AC1 unverified", out["draft"]["gaps"])
+        self.assertIn("not checked:", out["next"]["why"])
+
+    def test_auto_post_off_always_asks(self) -> None:
+        with Project({REPO: "package com.example\n\nclass ProfileRepository\n"}) as project:
+            out = self.drafted(project, {"status": "approved", "blocking": [],
+                                         "acceptance": [{"id": "AC1", "status": "met"}]}, config={"auto_post": False})
+        self.assertEqual(out["next"]["next"], "ask_user")
 
 
 class CarryOverTests(unittest.TestCase):

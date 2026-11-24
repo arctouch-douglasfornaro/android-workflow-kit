@@ -252,8 +252,10 @@ Checks the PR out in its own worktree, derives what it claims (PR body, Jira, th
 checked items), reviews the code (architecture, side effects), reads the attached screenshots and
 videos, trusts CI when it passed on the PR head (else the local gate) and, when the PR changes UI,
 runs the device on the base APK and on the PR head. Then it shows the review it would post
-(verdict, at most 10 inline comments, `nit:` for non-blocking ones) and posts it **only after your
-OK**.
+(verdict, at most 10 inline comments, `nit:` for non-blocking ones) and posts it by itself when it
+is an APPROVE or COMMENT with every check done (CI, device, each acceptance criterion). A
+REQUEST_CHANGES, or anything left unchecked, waits for **your OK**
+(`"review": {"auto_post": false}` always asks).
 With `attribution` on for the project, the review body ends with the host's `Generated with` line.
 
 After the post it keeps following the PR until it is merged or closed (`--no-watch` stops right
@@ -268,7 +270,7 @@ after the post, or say stop at any time):
 - A comment you write on the PR by hand is recorded as `missed` in `review-decisions.jsonl`, what the
   review did not catch.
 
-It never resolves another reviewer's thread, never posts or resolves without your OK, and never
+It never resolves another reviewer's thread, never requests changes or posts a partly checked review without your OK, and never
 merges. Closing the session stops the watch.
 
 ### Listening for review requests
@@ -280,7 +282,7 @@ merges. Closing the session stops the watch.
 With no PR, `/android-review` reviews nothing itself. It listens for open PRs in this repository
 that request **your** review and opens each one in a new Terminal.app or iTerm tab running
 `claude -n "review PR-N" "/android-review N"`. Each tab is an ordinary review: it stops at the draft
-and posts only after your OK **in that tab**. With Terminal One, the listener also adds one task per PR
+and posts by itself only a fully checked APPROVE or COMMENT; the rest waits for your OK **in that tab**. With Terminal One, the listener also adds one task per PR
 to the board.
 
 - It picks up direct review requests, plus PRs assigned to you. Team requests are off by default.

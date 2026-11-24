@@ -68,6 +68,9 @@ DEFAULT_REVIEW = {
     # The highest event the CLI picks by itself: "COMMENT" makes REQUEST_CHANGES the developer's call
     # (`CLI review edit --event REQUEST_CHANGES`). Unset: no cap.
     "max_event": None,
+    # An APPROVE or COMMENT draft with nothing left unchecked (CI, device, every AC, no security finding)
+    # is posted without asking; REQUEST_CHANGES or any gap still waits for the developer's OK.
+    "auto_post": True,
 }
 SMALL_DIFF_FILES = 5
 # Areas whose side effects a small diff hides: DI, persistence and serialization, navigation, the build,
@@ -1309,7 +1312,15 @@ def _decide(target: Path, record: bool, no_device: bool) -> dict[str, Any]:
                                 "keep one open → CLI review edit --target TARGET --keep-open T1, then show it again",
                                 "post a review anyway → CLI review edit --target TARGET --event APPROVE, then show it again",
                                 "stop → resolve nothing"])
-    return _answer("ask_user", "show the draft and wait for the developer's OK; nothing is posted before it",
+    if (review_config(target)["auto_post"] and draft.get("event") in {"APPROVE", "COMMENT"}
+            and draft.get("gaps") == [] and not draft.get("edited") and not draft.get("touched")):
+        return _answer("post", f"{draft['event']} with every check done (CI, device, each AC): posted without "
+                               "asking; print the draft, then post it",
+                       command=f"CLI review post --target TARGET --draft-id {draft['id']}",
+                       show=f"RUN/{DRAFT_MD}", draft_id=draft["id"], then="CLI review next --target TARGET")
+    gaps = draft.get("gaps") or []
+    return _answer("ask_user", "show the draft and wait for the developer's OK; nothing is posted before it"
+                   + (": not checked: " + "; ".join(gaps) if gaps else ""),
                    question=f"Post this review? ({draft['event']}, {len(draft.get('comments') or [])} inline comment(s)"
                             + (f", {suggested} with a suggested change" if (suggested := sum(
                                 1 for c in draft.get("comments") or [] if c.get("suggestion"))) else "")
@@ -1865,6 +1876,8 @@ def draft(target: Path, allow_quiet: bool = True) -> dict[str, Any]:
     previous = _read(agent_dir / DRAFT_FILE)
     carried_edits = (previous.get("edits") if previous.get("head") == context["head"] and not previous.get("quiet")
                      and inputs_changed(previous, agent_dir) else None)
+    # The developer already edited a draft of this head: the redraft waits for their OK too.
+    touched = bool(previous.get("head") == context["head"] and (previous.get("edited") or previous.get("touched")))
     quiet = quiet_round(agent_dir, context, state) if allow_quiet else None
     if quiet:
         # Already approved and nothing new: no review, only our addressed threads resolved after the OK.
@@ -1936,6 +1949,8 @@ def draft(target: Path, allow_quiet: bool = True) -> dict[str, Any]:
                              bool(config["allow_approve"]), bool(config["approve_with_concerns"]), bool(ci_waived),
                              config.get("max_event"))
 
+    gaps = unchecked(ci_report, gate, ci_waived, device_needed, waived, carried, device, device_for_verdict,
+                     acceptance, findings, state)
     lines: list[str] = []
     counts = {severity: sum(1 for f in findings if f["severity"] == severity) for severity in SEVERITY_ORDER}
     first = headline(event, counts, reasons)
@@ -2037,7 +2052,8 @@ def draft(target: Path, allow_quiet: bool = True) -> dict[str, Any]:
         comments.append(comment)
     result = _save_draft(agent_dir, {"schema_version": 1, "pr": context["number"], "url": context.get("url"),
                                      "head": context["head"], "event": event, "reasons": reasons, "body": body,
-                                     "headline": first, "counts": counts,
+                                     "headline": first, "counts": counts, "gaps": gaps,
+                                     **({"touched": True} if touched else {}),
                                      "comments": comments, "resolve": resolve, "overflow": len(overflow),
                                      "thread_replies": thread_replies,
                                      **({"footer": footer} if footer else {}),
@@ -2055,6 +2071,30 @@ def draft(target: Path, allow_quiet: bool = True) -> dict[str, Any]:
             "in_body": len(overflow), "resolve": len(resolve), "show": str(agent_dir / DRAFT_MD),
             "security": ({"findings": security, "note": "possible security issue: also raise it in #security"}
                          if security else None), **replayed}
+
+
+def unchecked(ci_report: dict[str, Any], gate: dict[str, Any], ci_waived: str | None, device_needed: bool,
+              waived: str | None, carried: Any, device: str | None, device_for_verdict: str | None,
+              acceptance: list[dict[str, Any]], findings: list[dict[str, Any]], state: dict[str, Any]) -> list[str]:
+    """What the review could not check: any item keeps the draft for the developer's OK (no auto post)."""
+    gaps: list[str] = []
+    ci = ci_report.get("status")
+    if not (ci == "passed" or ci_waived or (ci in {None, "none", "pending"} and gate.get("status") == "passed")):
+        gaps.append(f"CI {ci or 'not read'}" + (f", local gate {gate['status']}" if gate.get("status") else ""))
+    if device_needed and not waived:
+        if carried:
+            if device != "pass":
+                gaps.append(f"device {device} (carried)")
+        elif device is None:
+            gaps.append("device not run: " + str(state.get("device_skipped") or "no device available"))
+        elif device_for_verdict != "pass":
+            gaps.append(f"device {device}")
+    for row in acceptance:
+        if row.get("status") in {"unverified", "unmet", "unchecked", "open"}:
+            gaps.append(f"AC {row.get('id')} {row['status']}")
+    if any(item.get("security") for item in findings):
+        gaps.append("possible security issue: the developer decides")
+    return gaps
 
 
 def _draft_id(value: dict[str, Any]) -> str:

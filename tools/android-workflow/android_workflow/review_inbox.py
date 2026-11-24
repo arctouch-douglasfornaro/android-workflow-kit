@@ -4,7 +4,7 @@
 this app's repository that request a review from the developer (directly, and optionally through a
 team) or are assigned to them. Each new PR gets its own agent session in a new terminal tab
 (`CLI review launch --pr N`), running the ordinary `/android-review N`, so the review itself is the
-unchanged workflow: it stops at the draft and posts nothing without the developer's OK.
+unchanged workflow: a fully checked APPROVE or COMMENT posts by itself, anything else waits for the developer's OK.
 
 State lives in `TARGET/.ai/workflow/_cache/review-inbox.json`; each launched session writes its PID to
 `_cache/review-launch/PR-<n>.pid` (the launcher script `exec`s the agent), so the listener knows

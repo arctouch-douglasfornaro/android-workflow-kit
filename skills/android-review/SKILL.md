@@ -5,7 +5,8 @@ description: >-
   PR claims (body, Jira or Linear ticket, PR template), an independent code review
   (architecture, side effects), the attached screenshots and videos, CI, and a
   device check of base vs PR head when the PR changes UI. Posts one review
-  (inline comments, verdict) only after the developer's OK. Use when the user
+  (inline comments, verdict): an APPROVE or COMMENT with every check done goes
+  out by itself; REQUEST_CHANGES or anything left unchecked waits for the developer's OK. Use when the user
   types /android-review, asks to review a PR (by number, URL or branch), or
   asks whether our review comments on a PR were addressed ("were my comments
   addressed?", "tudo foi addressado?"). With no PR it listens for PRs that
@@ -23,7 +24,9 @@ says (*How to delegate, per host*: `aw-<role>`, `AW_STAGE`, tiers).
 
 You are the **orchestrator**: keep your context small (paths and ≤10-line returns; never read the
 diff, logs or media yourself). **Nothing reaches GitHub before the developer's OK**, and the OK is
-for one exact draft id.
+for one exact draft id. The one exception is the CLI's: `next` returns `post` for an APPROVE or
+COMMENT draft with nothing left unchecked (CI, device, every AC, no security finding), unless the
+developer already edited a draft of this head or `review.auto_post` is false.
 
 ## Invocation
 
@@ -60,7 +63,7 @@ CLI review ci     --target WT [--wait]                                    (trust
 CLI review draft  --target WT                                             (RUN/review-draft.md + draft id)
 CLI review edit   --target WT [--drop C2]… [--set C3 "text"]… [--keep-open T1]… [--event COMMENT] [--body "…"]
 CLI review shown  --target WT --draft-id ID                               (the developer saw this draft)
-CLI review post   --target WT --draft-id ID                               (only after the developer's OK)
+CLI review post   --target WT --draft-id ID                               (after the developer's OK, or when `next` returns `post`)
 CLI review answer --target WT --question "q" --answer "a"
 CLI review device --target WT --require "why"                             (Reviewer: UI effect the rule missed)
 CLI review ticket --target WT --skip "why"                                (go on without the ticket)
@@ -104,7 +107,9 @@ CLI review finish --target MAIN --pr N                                   (merged
    - `wait` / `wait_device` / `wait_prebuild` / `replay_before`: as in android-workflow.
    - `ask_user` with `question` list (Planner): ask once, `CLI review answer` each, then `next`.
    - `draft`: run `command`, then `next`.
-   - `ask_user` with `show` (the draft): print `RUN/review-draft.md` **as is** (event, body, each
+   - `post`: print `RUN/review-draft.md` **as is**, then run `command` (`CLI review post` with that
+     draft id) and `then`. Tell the developer it was posted by itself because every check passed.
+   - `ask_user` with `show` (the draft; `why` lists what was not checked): print `RUN/review-draft.md` **as is** (event, body, each
      inline comment with `file:line`, and in a delta round the *Threads to resolve*) and ask the
      developer: post, edit, or stop. Edits → `CLI review edit …` (`--keep-open T1` leaves one of
      those threads open), then `CLI review next` again: it returns the new draft with `show`; print it,
@@ -146,8 +151,8 @@ CLI review finish --target MAIN --pr N                                   (merged
 ## Inbox (no PR given)
 
 `/android-review` with no PR is a **listener**: it never reviews by itself. Each PR gets its own
-agent session in a new terminal tab running the ordinary `/android-review N`, which stops at the draft
-and posts nothing without the developer's OK in that tab.
+agent session in a new terminal tab running the ordinary `/android-review N`: an APPROVE or COMMENT
+with every check done posts by itself; anything else stops at the draft for the developer's OK in that tab.
 
 1. First chat line: the repository, what is listened for (direct requests; teams and assignments per
    `review.inbox`), and that each review opens in a new tab. Then `CLI review inbox --target MAIN`
