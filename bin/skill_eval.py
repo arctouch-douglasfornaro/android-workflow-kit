@@ -126,6 +126,11 @@ def git(workdir: Path, *args: str) -> None:
     subprocess.run(["git", "-C", str(workdir), *args], check=True, capture_output=True, text=True)
 
 
+def git_head(workdir: Path) -> str:
+    done = subprocess.run(["git", "-C", str(workdir), "rev-parse", "HEAD"], check=True, capture_output=True, text=True)
+    return done.stdout.strip()
+
+
 def sections(text: str) -> dict[str, str]:
     parts = re.split(r"^## ", text, flags=re.M)
     return {part.split("\n", 1)[0].strip(): part.split("\n", 1)[1].strip() if "\n" in part else "" for part in parts[1:]}
@@ -152,7 +157,7 @@ def prepare(case_id: str) -> dict[str, Any]:
     git(workdir, "init", "-q", "-b", "main")
     git(workdir, "-c", "user.name=Dev", "-c", "user.email=dev@localhost", "add", "-A")
     git(workdir, "-c", "user.name=Dev", "-c", "user.email=dev@localhost", "commit", "-q", "-m", "Initial import")
-    values: dict[str, str] = {"TARGET": str(workdir), "CLI": CLI_TEXT}
+    values: dict[str, str] = {"TARGET": str(workdir), "CLI": CLI_TEXT, "BASE_SHA": git_head(workdir)}
     for step in case.get("prepare", []):
         kind = step["do"]
         if kind == "overrides":
@@ -168,6 +173,15 @@ def prepare(case_id: str) -> dict[str, Any]:
             target = workdir / step["to"]
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(Path(case["_dir"]) / step["from"], target)
+            if step.get("render"):  # fill {BASE_SHA}, {HEAD_SHA}, {TARGET}… known at this point
+                text = target.read_text(encoding="utf-8")
+                for key, value in values.items():
+                    text = text.replace("{" + key + "}", value)
+                target.write_text(text, encoding="utf-8")
+        elif kind == "commit":  # e.g. the PR head of an android-review case; the import stays the base
+            git(workdir, "-c", "user.name=Dev", "-c", "user.email=dev@localhost", "add", "-A")
+            git(workdir, "-c", "user.name=Dev", "-c", "user.email=dev@localhost", "commit", "-q", "--allow-empty", "-m", step["message"])
+            values["HEAD_SHA"] = git_head(workdir)
         elif kind == "accept_profile":
             sys.path.insert(0, str(KIT / "bin"))
             import feature_setup  # noqa: PLC0415

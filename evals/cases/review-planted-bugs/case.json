@@ -1,0 +1,252 @@
+{
+  "id": "review-planted-bugs",
+  "about": "aw-reviewer (full) on a diff with two planted bugs: runCatching around a suspend call swallows cancellation, and the Duplicate button has no guard against a second tap (two copies). Must request changes and name both with file:line, inventing no other blocker",
+  "agent": "aw-reviewer",
+  "tier": "strong",
+  "fixture": "notes-app",
+  "prepare": [
+    {
+      "do": "overrides",
+      "set": {
+        "device": {
+          "app_module": ":app",
+          "application_id": "com.notes.app.debug",
+          "launch_activity": ".MainActivity"
+        }
+      }
+    },
+    {
+      "do": "accept_profile"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "start",
+        "--target",
+        "{TARGET}",
+        "--id",
+        "NOTES-21",
+        "--title",
+        "Duplicate a note from the note detail screen"
+      ],
+      "as": "START_JSON"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "update-spec",
+        "--target",
+        "{TARGET}",
+        "--type",
+        "feature",
+        "--risk",
+        "low",
+        "--complexity",
+        "low",
+        "--surfaces",
+        "ui",
+        "--level",
+        "standard",
+        "--acceptance",
+        "Note detail shows a Duplicate button (tag note_detail_duplicate) for an existing note, none for Note not found|Tapping it creates one active copy titled <title> (copy) with the same body and a new id, edited now|After the copy is saved, the screen closes and the copy's detail screen opens|If saving fails, the screen stays and shows Couldn't duplicate the note (tag note_detail_error)",
+        "--proofs",
+        "device|unit|device|unit",
+        "--parallel-parts",
+        "1",
+        "--parallel-files",
+        "0"
+      ],
+      "as": "SPEC_JSON"
+    },
+    {
+      "do": "copy",
+      "from": "plan.md",
+      "to": ".ai/workflow/NOTES-21/plan.md"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "log",
+        "--target",
+        "{TARGET}",
+        "--stage",
+        "Planner",
+        "--status",
+        "completed",
+        "--note",
+        "4 AC"
+      ],
+      "as": "PLAN_LOG"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "log",
+        "--target",
+        "{TARGET}",
+        "--stage",
+        "Implementer",
+        "--status",
+        "started",
+        "--note",
+        "duplicate"
+      ],
+      "as": "IMPL_START"
+    },
+    {
+      "do": "copy",
+      "from": "src/NotesRepository.kt",
+      "to": "feature/notes/src/main/kotlin/com/notes/feature/notes/data/NotesRepository.kt"
+    },
+    {
+      "do": "copy",
+      "from": "src/NoteDetailViewModel.kt",
+      "to": "feature/notes/src/main/kotlin/com/notes/feature/notes/NoteDetailViewModel.kt"
+    },
+    {
+      "do": "copy",
+      "from": "src/NotesRepositoryTest.kt",
+      "to": "feature/notes/src/test/kotlin/com/notes/feature/notes/data/NotesRepositoryTest.kt"
+    },
+    {
+      "do": "copy",
+      "from": "src/NoteDetailActivity.kt",
+      "to": "app/src/main/kotlin/com/notes/app/NoteDetailActivity.kt"
+    },
+    {
+      "do": "copy",
+      "from": "implementation-notes.md",
+      "to": ".ai/workflow/NOTES-21/implementation-notes.md"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "log",
+        "--target",
+        "{TARGET}",
+        "--stage",
+        "Implementer",
+        "--status",
+        "completed",
+        "--note",
+        "duplicate done"
+      ],
+      "as": "IMPL_LOG"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "next",
+        "--target",
+        "{TARGET}"
+      ],
+      "as": "NEXT_JSON"
+    }
+  ],
+  "prompt_file": "prompt.md",
+  "snapshot": [
+    "feature/notes/src/main/kotlin/com/notes/feature/notes/NoteDetailViewModel.kt",
+    "app/src/main/kotlin/com/notes/app/NoteDetailActivity.kt",
+    "feature/notes/src/main/kotlin/com/notes/feature/notes/data/NotesRepository.kt"
+  ],
+  "checks": [
+    {
+      "id": "review_written",
+      "kind": "file_exists",
+      "file": ".ai/workflow/NOTES-21/review.json",
+      "weight": 1
+    },
+    {
+      "id": "changes_requested",
+      "kind": "json_equals",
+      "file": ".ai/workflow/NOTES-21/review.json",
+      "path": "status",
+      "value": "changes_requested",
+      "weight": 3
+    },
+    {
+      "id": "cancel_named",
+      "kind": "regex",
+      "file": ".ai/workflow/NOTES-21/review.json",
+      "pattern": "CancellationException|swallow\\w*[^\\\"]{0,40}cancel|cancel\\w*[^\\\"]{0,40}swallow",
+      "weight": 2
+    },
+    {
+      "id": "cancel_located",
+      "kind": "regex",
+      "file": ".ai/workflow/NOTES-21/review.json",
+      "pattern": "NoteDetailViewModel\\.kt[\\\"\\s,:line]*2[3-7]\\b",
+      "weight": 2
+    },
+    {
+      "id": "double_tap_named",
+      "kind": "regex",
+      "file": ".ai/workflow/NOTES-21/review.json",
+      "pattern": "twice|double[- ]?tap|second tap|more than once|in[- ]flight|re-?entr|multiple (taps|copies)|two copies|tapped again",
+      "weight": 2
+    },
+    {
+      "id": "double_tap_located",
+      "kind": "regex",
+      "file": ".ai/workflow/NOTES-21/review.json",
+      "pattern": "NoteDetailActivity\\.kt[\\\"\\s,:line]*4[5-9]\\b|NoteDetailViewModel\\.kt[\\\"\\s,:line]*2[3-5]\\b|NotesRepository\\.kt[\\\"\\s,:line]*3[0-6]\\b",
+      "weight": 2
+    },
+    {
+      "id": "tree_recorded",
+      "kind": "regex",
+      "file": ".ai/workflow/NOTES-21/review.json",
+      "pattern": "\\\"reviewed_tree\\\"\\s*:\\s*\\\"[0-9a-f]{40}\\\"",
+      "weight": 1
+    },
+    {
+      "id": "source_untouched_0",
+      "kind": "unchanged",
+      "file": "feature/notes/src/main/kotlin/com/notes/feature/notes/NoteDetailViewModel.kt",
+      "weight": 1
+    },
+    {
+      "id": "source_untouched_1",
+      "kind": "unchanged",
+      "file": "app/src/main/kotlin/com/notes/app/NoteDetailActivity.kt",
+      "weight": 1
+    },
+    {
+      "id": "source_untouched_2",
+      "kind": "unchanged",
+      "file": "feature/notes/src/main/kotlin/com/notes/feature/notes/data/NotesRepository.kt",
+      "weight": 1
+    }
+  ],
+  "rubric": [
+    {
+      "id": "both_bugs_blocking",
+      "weight": 4,
+      "criterion": "Both planted bugs are `blocking` with a concrete failure: (1) `runCatching` around the suspend `repository.duplicate` in `NoteDetailViewModel.duplicate` catches `CancellationException` when the screen closes mid-save, so the coroutine reports a failure or keeps running instead of cancelling; the fix rethrows cancellation (try/catch that rethrows, or `ensureActive`). (2) The Duplicate button can be tapped again during the 300 ms save, creating two copies and opening two screens; the fix disables the button or ignores calls while a copy is in flight."
+    },
+    {
+      "id": "no_invented_blockers",
+      "weight": 3,
+      "criterion": "No other item is `blocking` unless it is a real defect with a concrete failure (a missing unit test for AC4's failure path is a legitimate finding at any severity). Hardcoded strings match the existing screens of this repo, so they are at most a suggestion and never called a repo requirement. Concerns and suggestions are few and real."
+    },
+    {
+      "id": "claims_checked",
+      "weight": 2,
+      "criterion": "The review checks the implementation notes against the code: the note's claim that the button is safe to tap more than once is contradicted with evidence, not adopted."
+    },
+    {
+      "id": "actionable",
+      "weight": 1,
+      "criterion": "Each finding has file and line on the changed code, a one-sentence problem and one concrete fix."
+    }
+  ],
+  "judge_reads": [
+    ".ai/workflow/NOTES-21/review.json",
+    ".ai/workflow/NOTES-21/plan.md",
+    ".ai/workflow/NOTES-21/implementation-notes.md",
+    "feature/notes/src/main/kotlin/com/notes/feature/notes/NoteDetailViewModel.kt",
+    "app/src/main/kotlin/com/notes/app/NoteDetailActivity.kt",
+    "feature/notes/src/main/kotlin/com/notes/feature/notes/data/NotesRepository.kt",
+    "feature/notes/src/test/kotlin/com/notes/feature/notes/data/NotesRepositoryTest.kt"
+  ]
+}

@@ -1,0 +1,221 @@
+{
+  "id": "review-clean-diff",
+  "about": "aw-reviewer (full) on a small correct diff with tests that fail without it: must approve with no blocking and only real concerns, if any",
+  "agent": "aw-reviewer",
+  "tier": "strong",
+  "fixture": "notes-app",
+  "prepare": [
+    {
+      "do": "overrides",
+      "set": {
+        "device": {
+          "app_module": ":app",
+          "application_id": "com.notes.app.debug",
+          "launch_activity": ".MainActivity"
+        }
+      }
+    },
+    {
+      "do": "accept_profile"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "start",
+        "--target",
+        "{TARGET}",
+        "--id",
+        "NOTES-22",
+        "--title",
+        "Archive lists the most recently edited note first"
+      ],
+      "as": "START_JSON"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "update-spec",
+        "--target",
+        "{TARGET}",
+        "--type",
+        "feature",
+        "--risk",
+        "low",
+        "--complexity",
+        "low",
+        "--surfaces",
+        "logic",
+        "--level",
+        "standard",
+        "--acceptance",
+        "Archive shows only archived notes, ordered by last edit, newest first|With nothing archived, Archive shows no rows",
+        "--proofs",
+        "unit|unit",
+        "--parallel-parts",
+        "1",
+        "--parallel-files",
+        "0"
+      ],
+      "as": "SPEC_JSON"
+    },
+    {
+      "do": "copy",
+      "from": "plan.md",
+      "to": ".ai/workflow/NOTES-22/plan.md"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "log",
+        "--target",
+        "{TARGET}",
+        "--stage",
+        "Planner",
+        "--status",
+        "completed",
+        "--note",
+        "2 AC"
+      ],
+      "as": "PLAN_LOG"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "log",
+        "--target",
+        "{TARGET}",
+        "--stage",
+        "Implementer",
+        "--status",
+        "started",
+        "--note",
+        "archive order"
+      ],
+      "as": "IMPL_START"
+    },
+    {
+      "do": "copy",
+      "from": "src/NotesListViewModel.kt",
+      "to": "feature/notes/src/main/kotlin/com/notes/feature/notes/NotesListViewModel.kt"
+    },
+    {
+      "do": "copy",
+      "from": "src/NotesNavGraph.kt",
+      "to": "feature/notes/src/main/kotlin/com/notes/feature/notes/NotesNavGraph.kt"
+    },
+    {
+      "do": "copy",
+      "from": "src/NotesListViewModelTest.kt",
+      "to": "feature/notes/src/test/kotlin/com/notes/feature/notes/NotesListViewModelTest.kt"
+    },
+    {
+      "do": "copy",
+      "from": "implementation-notes.md",
+      "to": ".ai/workflow/NOTES-22/implementation-notes.md"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "log",
+        "--target",
+        "{TARGET}",
+        "--stage",
+        "Implementer",
+        "--status",
+        "completed",
+        "--note",
+        "archive order done"
+      ],
+      "as": "IMPL_LOG"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "next",
+        "--target",
+        "{TARGET}"
+      ],
+      "as": "NEXT_JSON"
+    }
+  ],
+  "snapshot": [
+    "feature/notes/src/main/kotlin/com/notes/feature/notes/NotesListViewModel.kt",
+    "feature/notes/src/main/kotlin/com/notes/feature/notes/NotesNavGraph.kt",
+    "feature/notes/src/test/kotlin/com/notes/feature/notes/NotesListViewModelTest.kt"
+  ],
+  "prompt_file": "prompt.md",
+  "checks": [
+    {
+      "id": "review_written",
+      "kind": "file_exists",
+      "file": ".ai/workflow/NOTES-22/review.json",
+      "weight": 1
+    },
+    {
+      "id": "approved",
+      "kind": "json_equals",
+      "file": ".ai/workflow/NOTES-22/review.json",
+      "path": "status",
+      "value": "approved",
+      "weight": 4
+    },
+    {
+      "id": "no_blocking",
+      "kind": "json_equals",
+      "file": ".ai/workflow/NOTES-22/review.json",
+      "path": "blocking",
+      "value": [],
+      "weight": 3
+    },
+    {
+      "id": "tree_recorded",
+      "kind": "regex",
+      "file": ".ai/workflow/NOTES-22/review.json",
+      "pattern": "\\\"reviewed_tree\\\"\\s*:\\s*\\\"[0-9a-f]{40}\\\"",
+      "weight": 1
+    },
+    {
+      "id": "source_untouched_0",
+      "kind": "unchanged",
+      "file": "feature/notes/src/main/kotlin/com/notes/feature/notes/NotesListViewModel.kt",
+      "weight": 1
+    },
+    {
+      "id": "source_untouched_1",
+      "kind": "unchanged",
+      "file": "feature/notes/src/main/kotlin/com/notes/feature/notes/NotesNavGraph.kt",
+      "weight": 1
+    },
+    {
+      "id": "source_untouched_2",
+      "kind": "unchanged",
+      "file": "feature/notes/src/test/kotlin/com/notes/feature/notes/NotesListViewModelTest.kt",
+      "weight": 1
+    }
+  ],
+  "rubric": [
+    {
+      "id": "calibrated",
+      "weight": 5,
+      "criterion": "The verdict is approved with no blocking item. Concerns, if any, each state a plausible user-visible or maintenance risk that is true of this diff; style the formatter owns, restating the PR, and 'consider adding tests' without naming a missing case count against it. Zero concerns is a full score."
+    },
+    {
+      "id": "verified_not_assumed",
+      "weight": 3,
+      "criterion": "The review shows it checked the claims instead of adopting them: the AC1 test fails without the sort (d is newer but comes after c), the only caller of the archive list is NotesNavGraph, and archivedNotes follows the visibleNotes pattern."
+    },
+    {
+      "id": "no_false_rules",
+      "weight": 2,
+      "criterion": "Nothing is presented as a repo rule unless the repo writes it (project-profile.md Blocking conventions); preferences are phrased as preferences."
+    }
+  ],
+  "judge_reads": [
+    ".ai/workflow/NOTES-22/review.json",
+    ".ai/workflow/NOTES-22/plan.md",
+    ".ai/workflow/NOTES-22/implementation-notes.md",
+    "feature/notes/src/main/kotlin/com/notes/feature/notes/NotesListViewModel.kt",
+    "feature/notes/src/main/kotlin/com/notes/feature/notes/NotesNavGraph.kt",
+    "feature/notes/src/test/kotlin/com/notes/feature/notes/NotesListViewModelTest.kt"
+  ]
+}

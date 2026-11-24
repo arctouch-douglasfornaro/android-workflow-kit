@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "status": "ready",
+  "intent": "While searching, archived notes that match the query appear in the notes list; without a query the list still shows only active notes.",
+  "change_kind": "feature",
+  "device": "no",
+  "device_reason": "logic in a pure function covered by JVM tests",
+  "acceptance": [
+    {"id": "AC1", "text": "While a search query is set, matching archived notes are listed with the active ones, newest edit first", "source": "ticket", "evidence": "unit"},
+    {"id": "AC2", "text": "With an empty query the notes list shows only active notes", "source": "ticket", "evidence": "unit"}
+  ],
+  "template_items": [],
+  "questions": [],
+  "out_of_scope": ["Marking archived rows differently in the list"]
+}
