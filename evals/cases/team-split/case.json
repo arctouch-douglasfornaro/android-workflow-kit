@@ -1,0 +1,186 @@
+{
+  "id": "team-split",
+  "agent": "aw-tech-lead",
+  "tier": "standard",
+  "fixture": "notes-app",
+  "about": "aw-tech-lead mode split on a plan with two independent parts in different modules: writes team-plan.json with two slices, one owner per file (tests included), the AC split by slice, no invented seam, and `CLI team` answers ready",
+  "prepare": [
+    {
+      "do": "overrides",
+      "set": {
+        "device": {
+          "app_module": ":app",
+          "application_id": "com.notes.app.debug",
+          "launch_activity": ".MainActivity"
+        }
+      }
+    },
+    {
+      "do": "accept_profile"
+    },
+    {
+      "do": "commit",
+      "message": "Workflow config"
+    },
+    {
+      "do": "branch",
+      "name": "notes-24-bug-bash"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "start",
+        "--target",
+        "{TARGET}",
+        "--id",
+        "NOTES-24",
+        "--title",
+        "Archive order and a working dark theme switch"
+      ],
+      "as": "START_JSON"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "update-spec",
+        "--target",
+        "{TARGET}",
+        "--type",
+        "bug",
+        "--risk",
+        "low",
+        "--complexity",
+        "medium",
+        "--surfaces",
+        "logic",
+        "--level",
+        "standard",
+        "--acceptance",
+        "Archive shows only archived notes, newest edit first|With nothing archived, Archive shows no rows|Tapping the dark theme switch turns it on, tapping again turns it off|Leaving Settings and coming back keeps the switch where the user left it (same process)",
+        "--proofs",
+        "unit|unit|unit|unit",
+        "--parallel-parts",
+        "2",
+        "--parallel-files",
+        "7"
+      ],
+      "as": "SPEC_JSON"
+    },
+    {
+      "do": "copy",
+      "from": "plan.md",
+      "to": ".ai/workflow/NOTES-24/plan.md"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "log",
+        "--target",
+        "{TARGET}",
+        "--stage",
+        "Planner",
+        "--status",
+        "completed",
+        "--note",
+        "4 AC, 2 parts"
+      ],
+      "as": "PLAN_LOG"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "next",
+        "--target",
+        "{TARGET}"
+      ],
+      "as": "NEXT_JSON"
+    }
+  ],
+  "prompt_file": "prompt.md",
+  "snapshot": [
+    "feature/notes/src/main/kotlin/com/notes/feature/notes/NotesListViewModel.kt",
+    "feature/settings/src/main/kotlin/com/notes/feature/settings/SettingsActivity.kt"
+  ],
+  "checks": [
+    {
+      "id": "team_ready",
+      "kind": "cli",
+      "args": [
+        "team",
+        "--target",
+        "{TARGET}"
+      ],
+      "field": "status",
+      "value": "ready",
+      "weight": 4
+    },
+    {
+      "id": "two_slices",
+      "kind": "regex",
+      "file": ".ai/workflow/NOTES-24/team-plan.json",
+      "pattern": "\\\"id\\\"\\s*:\\s*\\\"S1\\\"[\\s\\S]*\\\"id\\\"\\s*:\\s*\\\"S2\\\"",
+      "weight": 2
+    },
+    {
+      "id": "no_third_slice",
+      "kind": "not_regex",
+      "file": ".ai/workflow/NOTES-24/team-plan.json",
+      "pattern": "\\\"S3\\\"",
+      "weight": 1
+    },
+    {
+      "id": "notes_test_owned",
+      "kind": "regex",
+      "file": ".ai/workflow/NOTES-24/team-plan.json",
+      "pattern": "NotesListViewModelTest\\.kt",
+      "weight": 1
+    },
+    {
+      "id": "settings_test_owned",
+      "kind": "regex",
+      "file": ".ai/workflow/NOTES-24/team-plan.json",
+      "pattern": "SettingsViewModelTest\\.kt",
+      "weight": 1
+    },
+    {
+      "id": "store_owned",
+      "kind": "regex",
+      "file": ".ai/workflow/NOTES-24/team-plan.json",
+      "pattern": "SettingsStore\\.kt",
+      "weight": 1
+    },
+    {
+      "id": "source_untouched_0",
+      "kind": "unchanged",
+      "file": "feature/notes/src/main/kotlin/com/notes/feature/notes/NotesListViewModel.kt",
+      "weight": 1
+    },
+    {
+      "id": "source_untouched_1",
+      "kind": "unchanged",
+      "file": "feature/settings/src/main/kotlin/com/notes/feature/settings/SettingsActivity.kt",
+      "weight": 1
+    }
+  ],
+  "rubric": [
+    {
+      "id": "split_by_module",
+      "weight": 4,
+      "criterion": "S1 owns the :feature:notes files (NotesListViewModel, NotesNavGraph, NotesListViewModelTest) with AC1-AC2; S2 owns the :feature:settings files (SettingsStore, SettingsViewModel, SettingsActivity, SettingsViewModelTest) with AC3-AC4. Every planned file has one owner, nothing is invented."
+    },
+    {
+      "id": "contracts_honest",
+      "weight": 3,
+      "criterion": "`reason` says why the parts are independent (no shared file, no module dependency). `contracts` is empty or names only a real seam; it does not invent an interface between the two modules."
+    },
+    {
+      "id": "no_code",
+      "weight": 3,
+      "criterion": "Split mode writes no source and runs no build; the return is TEAM 2 with each slice's goal and file count."
+    }
+  ],
+  "judge_reads": [
+    ".ai/workflow/NOTES-24/team-plan.json",
+    ".ai/workflow/NOTES-24/plan.md"
+  ]
+}
