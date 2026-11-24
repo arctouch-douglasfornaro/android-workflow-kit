@@ -1,5 +1,7 @@
 plugins {
-    id("com.android.application") version "8.7.0" apply false
-    id("org.jetbrains.kotlin.android") version "2.0.20" apply false
-    id("org.jmailen.kotlinter") version "4.4.1" apply false
+    id("com.android.application") version "8.13.0" apply false
+    id("com.android.library") version "8.13.0" apply false
+    id("org.jetbrains.kotlin.android") version "2.2.21" apply false
+    id("org.jetbrains.kotlin.plugin.compose") version "2.2.21" apply false
+    id("org.jmailen.kotlinter") version "5.2.0" apply false
 }

@@ -1,5 +1,4 @@
 plugins {
-    id("com.android.library")
-    id("org.jetbrains.kotlin.android")
+    id("notes.android.feature")
 }
 android { namespace = "com.notes.feature.notes" }

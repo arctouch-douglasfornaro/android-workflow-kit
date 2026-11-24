@@ -13,7 +13,7 @@
   "checks": [
     {"id": "app_id_recorded", "kind": "json_equals", "file": ".ai/android-workflow.json", "path": "device.application_id", "value": "com.notes.app.debug", "weight": 4},
     {"id": "setup_ready", "kind": "cli", "args": ["setup", "--target", "{TARGET}"], "field": "status", "value": "ready", "weight": 3},
-    {"id": "commands_kept", "kind": "json_equals", "file": ".ai/android-workflow.json", "path": "commands.format_check", "value": "gradle lintKotlin", "weight": 1},
+    {"id": "commands_kept", "kind": "json_equals", "file": ".ai/android-workflow.json", "path": "commands.format_check", "value": "./gradlew lintKotlin", "weight": 1},
     {"id": "profile_scope", "kind": "sections_unchanged", "file": ".ai/project-profile.md", "except": ["Device", "App identity", "Provenance"], "weight": 2},
     {"id": "no_feature_map", "kind": "file_absent", "file": ".ai/feature-map.md", "weight": 1},
     {"id": "no_secrets", "kind": "no_secrets", "files": [".ai/project-profile.md", ".ai/android-workflow.json"], "weight": 1}

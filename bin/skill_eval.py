@@ -147,7 +147,8 @@ def prepare(case_id: str) -> dict[str, Any]:
     fixture = EVALS / "fixtures" / case["fixture"]
     name = f"{random.choice(WORDS)}-{random.choice(WORDS)}-{os.urandom(2).hex()}"
     workdir = state_home() / "ws" / name / case.get("project_dir", case["fixture"])
-    shutil.copytree(fixture, workdir)
+    # Build outputs of a local `./gradlew` run in the fixture stay behind: each case starts clean.
+    shutil.copytree(fixture, workdir, ignore=shutil.ignore_patterns("build", ".gradle", ".kotlin", "local.properties"))
     git(workdir, "init", "-q", "-b", "main")
     git(workdir, "-c", "user.name=Dev", "-c", "user.email=dev@localhost", "add", "-A")
     git(workdir, "-c", "user.name=Dev", "-c", "user.email=dev@localhost", "commit", "-q", "-m", "Initial import")

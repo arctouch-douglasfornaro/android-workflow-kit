@@ -13,30 +13,30 @@ This local profile is excluded from feature delivery. Preserve human-owned rows.
 | What | Value |
 |---|---|
 | Settings file | settings.gradle.kts |
-| Gradle wrapper | gradle/wrapper/gradle-wrapper.properties (no gradlew script checked in) |
+| Gradle wrapper | `./gradlew` (Gradle 9.5.1, AGP 8.13, Kotlin 2.2.21) |
 | Android Gradle project | yes |
-| App module(s) | :app (convention plugin `notes.android.application`) |
+| App module(s) | :app (convention plugin `notes.android.application`); feature modules use `notes.android.feature` |
 | UI toolkit | Jetpack Compose |
-| DI | none (manual construction) |
+| DI | none: `NotesRepository.shared` and default constructor arguments |
 
 ## Build commands
 | Module | Plugin / variant | Compile | Unit tests | Lint | Evidence |
 |---|---|---|---|---|---|
-| :app | android application, debug | `gradle :app:compileDebugKotlin` | `gradle :app:testDebugUnitTest` | `gradle :app:lintDebug` | `app/build.gradle.kts:2` |
-| :feature:notes | android library | `gradle :feature:notes:compileDebugKotlin` | `gradle :feature:notes:testDebugUnitTest` | `gradle :feature:notes:lintDebug` | `feature/notes/build.gradle.kts:2` |
-| :feature:settings | android library | `gradle :feature:settings:compileDebugKotlin` | `gradle :feature:settings:testDebugUnitTest` | `gradle :feature:settings:lintDebug` | `feature/settings/build.gradle.kts:2` |
+| :app | android application, debug | `./gradlew :app:compileDebugKotlin` | `./gradlew :app:testDebugUnitTest` | `./gradlew :app:lintDebug` | `app/build.gradle.kts:2` |
+| :feature:notes | android library | `./gradlew :feature:notes:compileDebugKotlin` | `./gradlew :feature:notes:testDebugUnitTest` | `./gradlew :feature:notes:lintDebug` | `feature/notes/build.gradle.kts:2` |
+| :feature:settings | android library | `./gradlew :feature:settings:compileDebugKotlin` | `./gradlew :feature:settings:testDebugUnitTest` | `./gradlew :feature:settings:lintDebug` | `feature/settings/build.gradle.kts:2` |
 
 ## Lint engine
 | What | Value |
 |---|---|
-| Engine | kotlinter (applied by the app convention plugin) |
-| Check task | `gradle lintKotlin` |
-| Format task | `gradle formatKotlin` |
+| Engine | kotlinter (applied by both convention plugins; `.editorconfig` lets @Composable names start uppercase) |
+| Check task | `./gradlew lintKotlin` |
+| Format task | `./gradlew formatKotlin` |
 
 ## Tests
 | What | Value |
 |---|---|
-| Libraries | JUnit4 |
+| Libraries | JUnit4, kotlinx-coroutines-test |
 | Screenshot engine / task | none |
 | At-risk consumers | :app depends on both feature modules |
 
@@ -47,19 +47,22 @@ This local profile is excluded from feature delivery. Preserve human-owned rows.
 | Existing AVD authorized for automatic start | |
 | Reusable flow / entry point | |
 | Event-log observation | |
-| APK build / install commands | `gradle :app:installDebug` |
+| APK build / install commands | `./gradlew :app:installDebug` |
 
 ## Code patterns
 | Area | Pattern used here | Exemplar (path:line) |
 |---|---|---|
-| Navigation | feature graphs as `NavGraphBuilder` extensions, hosted by MainActivity's NavHost | `feature/notes/src/main/kotlin/com/notes/feature/notes/NotesNavGraph.kt:7` |
-| Screens | stateless `@Composable` screens taking callbacks; `Modifier.testTag` on the root | `feature/notes/src/main/kotlin/com/notes/feature/notes/NotesListScreen.kt:12` |
-| Standalone screens | an Activity per screen opened by intent or deep link | `app/src/main/kotlin/com/notes/app/NoteDetailActivity.kt:14` |
+| Navigation | feature graphs as `NavGraphBuilder` extensions, hosted by MainActivity's NavHost | `feature/notes/src/main/kotlin/com/notes/feature/notes/NotesNavGraph.kt:11` |
+| Screens | stateless `@Composable` screens taking a state object and callbacks; `Modifier.testTag` on the root | `feature/notes/src/main/kotlin/com/notes/feature/notes/NotesListScreen.kt:14` |
+| State | a `ViewModel` exposes one `StateFlow<…State>`; pure filtering lives in a companion function unit-tested without Android | `feature/notes/src/main/kotlin/com/notes/feature/notes/NotesListViewModel.kt:18`, `feature/notes/src/test/kotlin/com/notes/feature/notes/NotesListViewModelTest.kt:7` |
+| Data | in-memory `NotesRepository` with a `StateFlow`; no backend | `feature/notes/src/main/kotlin/com/notes/feature/notes/data/NotesRepository.kt:9` |
+| Standalone screens | an Activity per screen opened by intent or deep link | `app/src/main/kotlin/com/notes/app/NoteDetailActivity.kt:17` |
 
 ## Project conventions that are blocking, not stylistic
 | Convention | Check / evidence |
 |---|---|
-| Every screen root has a test tag | `NotesListScreen.kt:18`, `SettingsActivity.kt:17` |
+| Every screen root has a test tag | `NotesListScreen.kt:21`, `SettingsActivity.kt:18` |
+| Activity roots set `testTagsAsResourceId = true` so device selectors see the tags | `NoteDetailActivity.kt:24`, `MainActivity.kt:23` |
 
 ## Test data
 No invented accounts, credentials, or server state.
