@@ -136,6 +136,10 @@ def resolve_base_branch(repo_root):
     for candidate in ("main", "master"):
         if git(["rev-parse", "--verify", f"refs/remotes/origin/{candidate}"], repo_root, check=False):
             return candidate
+    # No remote yet (a local-only repo): the local default branch, never a name that does not exist.
+    for candidate in ("main", "master", "develop"):
+        if git(["rev-parse", "--verify", f"refs/heads/{candidate}"], repo_root, check=False):
+            return candidate
     return "master"
 
 

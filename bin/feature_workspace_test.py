@@ -183,6 +183,11 @@ class TestStartPoint(RepoCase):
         self.assertEqual(0, rc)
         self.assertEqual("me/MF-8-noremote", run(self.dir, "rev-parse", "--abbrev-ref", "HEAD"))
 
+    def test_base_is_the_local_main_when_there_is_no_remote(self) -> None:
+        run(self.dir, "remote", "remove", "origin")
+        run(self.dir, "branch", "-m", "master", "main")
+        self.assertEqual("main", fw.resolve_base_branch(self.dir))
+
     def test_existing_local_branch_is_reused_not_overwritten(self) -> None:
         run(self.dir, "checkout", "-q", "-b", "me/MF-2-local", "master")
         run(self.dir, "commit", "-q", "--allow-empty", "-m", "local work")

@@ -52,6 +52,9 @@ def base_branch(target: Path, override: str | None) -> str:
     for name in ("main", "master", "develop"):
         if git(target, "rev-parse", "--verify", "-q", f"refs/remotes/origin/{name}").returncode == 0:
             return name
+    for name in ("main", "master", "develop"):  # no remote yet: the local default branch
+        if git(target, "rev-parse", "--verify", "-q", f"refs/heads/{name}").returncode == 0:
+            return name
     raise ValueError("cannot detect the base branch; pass --base")
 
 

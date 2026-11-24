@@ -1,0 +1,114 @@
+{
+  "id": "workflow-e2e",
+  "agent": "android-workflow",
+  "tier": "strong",
+  "fixture": "notes-app",
+  "about": "The android-workflow orchestrator (SKILL.md) end to end on a small logic ticket with --no-device --no-push --no-pr --no-watch: workspace, setup, start, then only what `CLI next` says (agents spawned per role) until delivery commits locally. Checks the run completed, the gate passed, the review approved, the PR body written, the change and its tests (mutation), nothing pushed",
+  "prepare": [
+    {
+      "do": "overrides",
+      "set": {
+        "device": {
+          "app_module": ":app",
+          "application_id": "com.notes.app.debug",
+          "launch_activity": ".MainActivity"
+        }
+      }
+    },
+    {
+      "do": "accept_profile"
+    },
+    {
+      "do": "copy",
+      "from": "feature-map.md",
+      "to": ".ai/feature-map.md"
+    },
+    {
+      "do": "commit",
+      "message": "Workflow config"
+    }
+  ],
+  "prompt_file": "prompt.md",
+  "checks": [
+    {
+      "id": "run_completed",
+      "kind": "json_equals",
+      "file": ".ai/workflow/NOTES-22/run-state.json",
+      "path": "status",
+      "value": "completed",
+      "weight": 3
+    },
+    {
+      "id": "gate_passed",
+      "kind": "json_equals",
+      "file": ".ai/workflow/NOTES-22/gate-report.json",
+      "path": "status",
+      "value": "passed",
+      "weight": 2
+    },
+    {
+      "id": "review_approved",
+      "kind": "json_equals",
+      "file": ".ai/workflow/NOTES-22/review.json",
+      "path": "status",
+      "value": "approved",
+      "weight": 2
+    },
+    {
+      "id": "pr_body",
+      "kind": "regex",
+      "file": ".ai/workflow/NOTES-22/pr-description.md",
+      "pattern": "[Aa]rchiv",
+      "weight": 1
+    },
+    {
+      "id": "not_pushed",
+      "kind": "json_equals",
+      "file": ".ai/workflow/NOTES-22/delivery.json",
+      "path": "pushed",
+      "value": false,
+      "weight": 2
+    },
+    {
+      "id": "stages_logged",
+      "kind": "regex",
+      "file": ".ai/workflow/NOTES-22/stage-log.md",
+      "pattern": "Implementer[\\s\\S]*Reviewer[\\s\\S]*Delivery",
+      "weight": 2
+    },
+    {
+      "id": "tests_fail_without_sort",
+      "kind": "mutation",
+      "file": "feature/notes/src/main/kotlin/com/notes/feature/notes/NotesListViewModel.kt",
+      "find": "(fun archivedNotes[^{=]*[={][^\\n]*(?:\\n[^\\n]*){0,4}?)\\s*\\.sortedByDescending\\s*\\{\\s*it\\.editedAtMillis\\s*\\}",
+      "replace": "\\1",
+      "command": "./gradlew --console=plain -q :feature:notes:testDebugUnitTest",
+      "weight": 2
+    }
+  ],
+  "rubric": [
+    {
+      "id": "followed_next",
+      "weight": 4,
+      "criterion": "The stage log and run files show the orchestrator ran workspace, setup and start, then did what each `CLI next` answer said (spawned the role's agent, ran the gate, finish, deliver) instead of improvising its own order or skipping a stage; the device was skipped only through the run's --no-device."
+    },
+    {
+      "id": "roles_respected",
+      "weight": 3,
+      "criterion": "Each artifact was written by its role (implementation-notes by the Implementer, review.json by the Reviewer, pr-description by Delivery); the orchestrator did not write code or a review itself unless the host had no subagents, and it said so."
+    },
+    {
+      "id": "outcome",
+      "weight": 3,
+      "criterion": "The local commit holds only the archive change and its tests on a ticket branch; nothing pushed, no PR; the final summary names what ran and what was skipped."
+    }
+  ],
+  "judge_reads": [
+    ".ai/workflow/NOTES-22/stage-log.md",
+    ".ai/workflow/NOTES-22/run-state.json",
+    ".ai/workflow/NOTES-22/review.json",
+    ".ai/workflow/NOTES-22/pr-description.md",
+    ".ai/workflow/NOTES-22/delivery.json",
+    "feature/notes/src/main/kotlin/com/notes/feature/notes/NotesListViewModel.kt"
+  ]
+}
