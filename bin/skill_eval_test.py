@@ -40,7 +40,9 @@ class SkillEvalTests(unittest.TestCase):
         first = skill_eval.check(prepared["id"])
         self.assertFalse(next(r for r in first["results"] if r["id"] == "app_id_recorded")["passed"])
         self.assertLess(first["score"], 10)
-        skill_eval.record(prepared["id"])
+        with self.assertRaisesRegex(ValueError, "no judge score"):
+            skill_eval.record(prepared["id"])  # a failed or skipped judge never records a checks-only score
+        skill_eval.record(prepared["id"], checks_only=True)
 
         again = skill_eval.prepare("setup-app-id")
         workdir = Path(again["workdir"])
@@ -51,7 +53,7 @@ class SkillEvalTests(unittest.TestCase):
         skill_eval.run_cli(["setup", "--target", str(workdir), "--accept"], workdir)
         second = skill_eval.check(again["id"])
         self.assertEqual(second["score"], 10, second["results"])
-        entry = skill_eval.record(again["id"])
+        entry = skill_eval.record(again["id"], checks_only=True)
         self.assertGreater(entry["delta"], 0)
         row = next(r for r in skill_eval.report()["cases"] if r["case"] == "setup-app-id")
         self.assertEqual(row["score"], 10)

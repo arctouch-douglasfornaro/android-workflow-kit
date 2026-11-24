@@ -338,7 +338,11 @@ def judge_prompt(run: dict[str, Any], case: dict[str, Any]) -> str:
     files = []
     for relative in case.get("judge_reads", []):
         path = workdir / relative
-        text = path.read_text(encoding="utf-8")[:20000] if path.is_file() else "(missing)"
+        if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4"}:
+            files.append(f"### {relative}\n\n(binary: open it yourself at {path})" if path.is_file()
+                         else f"### {relative}\n\n(missing)")
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")[:20000] if path.is_file() else "(missing)"
         files.append(f"### {relative}\n\n```\n{text}\n```")
     returned = Path(run["return_file"])
     rubric = "\n".join(f"- `{item['id']}` (weight {item.get('weight', 1)}): {item['criterion']}" for item in case["rubric"])
@@ -417,13 +421,16 @@ def history() -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def record(run_id: str, agent_model: str | None = None) -> dict[str, Any]:
+def record(run_id: str, agent_model: str | None = None, checks_only: bool = False) -> dict[str, Any]:
     run = load_run(run_id)
     if "checks" not in run:
         check(run_id)
         run = load_run(run_id)
     checks_score = run["checks"]["score"]
     judge_score = (run.get("judge") or {}).get("score")
+    if judge_score is None and not checks_only and (cases().get(run["case"]) or {}).get("rubric"):
+        # A judge that failed (timeout, a bad answer) must not record a checks-only score as the case's score.
+        raise ValueError(f"run {run_id} has no judge score: run `judge --run {run_id}` again before `record`")
     score = round((checks_score + judge_score) / 2, 2) if judge_score is not None else checks_score
     previous = next((item for item in reversed(history()) if item["case"] == run["case"]), None)
     entry = {"at": dt.datetime.now().isoformat(timespec="seconds"), "run": run_id, "case": run["case"],
@@ -480,6 +487,7 @@ def main(argv: list[str] | None = None) -> int:
             command.add_argument("--model")
         if name == "record":
             command.add_argument("--agent-model")
+            command.add_argument("--checks-only", action="store_true", help="record without a judge score")
     clean_parser = sub.add_parser("clean")
     clean_parser.add_argument("--keep", type=int, default=10)
     args = parser.parse_args(argv)
@@ -493,7 +501,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "judge":
             result = judge(args.run, args.judge, args.model)
         elif args.command == "record":
-            result = record(args.run, args.agent_model)
+            result = record(args.run, args.agent_model, args.checks_only)
         elif args.command == "report":
             result = report()
         else:

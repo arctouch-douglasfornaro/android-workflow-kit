@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "status": "ready",
+  "intent": "A Duplicate button on note detail copies the note and opens the copy's detail screen.",
+  "change_kind": "feature",
+  "device": "yes",
+  "device_reason": "a new button and a navigation after the save",
+  "acceptance": [
+    {"id": "AC1", "text": "Note detail shows a Duplicate button for an existing note", "source": "ticket", "evidence": "media"},
+    {"id": "AC2", "text": "After tapping Duplicate, the copy's detail screen opens titled '<title> (copy)'", "source": "ticket", "evidence": "media"},
+    {"id": "AC3", "text": "The screen works in dark mode", "source": "template", "evidence": "media"}
+  ],
+  "template_items": ["Tested in dark mode"],
+  "questions": [],
+  "out_of_scope": []
+}

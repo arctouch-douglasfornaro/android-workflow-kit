@@ -1,0 +1,155 @@
+{
+  "id": "media-pr-screens",
+  "agent": "aw-media",
+  "tier": "standard",
+  "fixture": "notes-app",
+  "about": "aw-media mode pr on two real notes-app screenshots: one shows the Duplicate button (AC1 shown), the other is the notes list while the PR body says it is the copy's detail screen (AC2 not shown, a finding), and the checked 'Tested in dark mode' has no dark capture (AC3 not shown)",
+  "prepare": [
+    {
+      "do": "accept_profile"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "start",
+        "--target",
+        "{TARGET}",
+        "--id",
+        "PR-44",
+        "--title",
+        "NOTES-21 Duplicate a note from the note detail screen"
+      ],
+      "as": "START_JSON"
+    },
+    {
+      "do": "copy",
+      "from": "src/NotesRepository.kt",
+      "to": "feature/notes/src/main/kotlin/com/notes/feature/notes/data/NotesRepository.kt"
+    },
+    {
+      "do": "copy",
+      "from": "src/NoteDetailViewModel.kt",
+      "to": "feature/notes/src/main/kotlin/com/notes/feature/notes/NoteDetailViewModel.kt"
+    },
+    {
+      "do": "copy",
+      "from": "src/NotesRepositoryTest.kt",
+      "to": "feature/notes/src/test/kotlin/com/notes/feature/notes/data/NotesRepositoryTest.kt"
+    },
+    {
+      "do": "copy",
+      "from": "src/NoteDetailActivity.kt",
+      "to": "app/src/main/kotlin/com/notes/app/NoteDetailActivity.kt"
+    },
+    {
+      "do": "commit",
+      "message": "NOTES-21 Duplicate a note from the note detail screen"
+    },
+    {
+      "do": "copy",
+      "from": "pr-context.json",
+      "to": ".ai/workflow/PR-44/pr-context.json",
+      "render": true
+    },
+    {
+      "do": "copy",
+      "from": "review-spec.json",
+      "to": ".ai/workflow/PR-44/review-spec.json"
+    },
+    {
+      "do": "copy",
+      "from": "media/detail.png",
+      "to": ".ai/workflow/PR-44/media/pr/media-1.png"
+    },
+    {
+      "do": "copy",
+      "from": "media/list.png",
+      "to": ".ai/workflow/PR-44/media/pr/media-2.png"
+    }
+  ],
+  "snapshot": [
+    "app/src/main/kotlin/com/notes/app/NoteDetailActivity.kt"
+  ],
+  "prompt_file": "prompt.md",
+  "checks": [
+    {
+      "id": "review_written",
+      "kind": "file_exists",
+      "file": ".ai/workflow/PR-44/media-review.json",
+      "weight": 1
+    },
+    {
+      "id": "status_issues",
+      "kind": "json_equals",
+      "file": ".ai/workflow/PR-44/media-review.json",
+      "path": "status",
+      "value": "issues",
+      "weight": 2
+    },
+    {
+      "id": "ac1_shown",
+      "kind": "regex",
+      "file": ".ai/workflow/PR-44/media-review.json",
+      "pattern": "\\\"id\\\"\\s*:\\s*\\\"AC1\\\"[^}]*\\\"shown\\\"\\s*:\\s*true|\\\"shown\\\"\\s*:\\s*true[^}]*\\\"id\\\"\\s*:\\s*\\\"AC1\\\"",
+      "weight": 2
+    },
+    {
+      "id": "ac2_not_shown",
+      "kind": "regex",
+      "file": ".ai/workflow/PR-44/media-review.json",
+      "pattern": "\\\"id\\\"\\s*:\\s*\\\"AC2\\\"[^}]*\\\"shown\\\"\\s*:\\s*false|\\\"shown\\\"\\s*:\\s*false[^}]*\\\"id\\\"\\s*:\\s*\\\"AC2\\\"",
+      "weight": 3
+    },
+    {
+      "id": "ac3_not_shown",
+      "kind": "regex",
+      "file": ".ai/workflow/PR-44/media-review.json",
+      "pattern": "\\\"id\\\"\\s*:\\s*\\\"AC3\\\"[^}]*\\\"shown\\\"\\s*:\\s*false|\\\"shown\\\"\\s*:\\s*false[^}]*\\\"id\\\"\\s*:\\s*\\\"AC3\\\"",
+      "weight": 2
+    },
+    {
+      "id": "wrong_screen_named",
+      "kind": "regex",
+      "file": ".ai/workflow/PR-44/media-review.json",
+      "pattern": "media-2[^\\\"]{0,200}(list|Search|not the|wrong)|(list|Search|not the|wrong)[^\\\"]{0,200}media-2",
+      "weight": 2
+    },
+    {
+      "id": "source_untouched",
+      "kind": "unchanged",
+      "file": "app/src/main/kotlin/com/notes/app/NoteDetailActivity.kt",
+      "weight": 1
+    },
+    {
+      "id": "missing_proof_not_blocking",
+      "kind": "not_regex",
+      "file": ".ai/workflow/PR-44/media-review.json",
+      "pattern": "\\\"severity\\\"\\s*:\\s*\\\"blocking\\\"",
+      "weight": 2
+    }
+  ],
+  "rubric": [
+    {
+      "id": "judged_from_pixels",
+      "weight": 4,
+      "criterion": "AC1 is shown by media-1 (note detail with a Duplicate button). media-2 is the notes list (Archive/Settings, Search, two rows), not the copy's detail screen the PR body claims, so AC2 is not shown and the mismatch is a finding. The checked 'Tested in dark mode' has no dark capture: AC3 not shown."
+    },
+    {
+      "id": "severity_right",
+      "weight": 3,
+      "criterion": "The wrong screenshot is a concern (missing proof), not blocking: nothing in the media shows the change broken. Clipped 'Archive'/'Settings' labels on the list, if raised, are noted as unrelated to this PR."
+    },
+    {
+      "id": "format",
+      "weight": 3,
+      "criterion": "media-review.json follows the schema (status, acceptance rows with media ids, findings MF1\u2026 with severity/problem/fix, notes), and the return is 6 lines or fewer."
+    }
+  ],
+  "judge_reads": [
+    ".ai/workflow/PR-44/media-review.json",
+    ".ai/workflow/PR-44/pr-context.json",
+    ".ai/workflow/PR-44/review-spec.json",
+    ".ai/workflow/PR-44/media/pr/media-1.png",
+    ".ai/workflow/PR-44/media/pr/media-2.png"
+  ]
+}

@@ -63,8 +63,9 @@ No device: draw the changed composables on the JVM and judge them. Inputs: `ac` 
 `RUN/media-review.json`: `schema_version: 1`, `status` (`ok` | `issues` | `no_media`),
 `acceptance` (`id`, `shown` true|false, `media` ids/frames), `findings` (`id` MF1…, `severity`
 blocking|concern|nit, `problem`, `fix`, optional `file`+`line` when it points at code in the diff),
-`notes`. A finding is `blocking` only when the media shows the change broken (crash, wrong screen,
-AC visibly not met).
+`notes`. A finding is `blocking` only when the media shows the change broken (a crash, the app
+opening the wrong screen, an AC visibly not met). A missing or mismatched attachment (a capture of
+another screen, a claimed state not shown) is missing proof: a `concern`, never `blocking`.
 
 **Finish by writing `RUN/media-review.json` (mode `render`: `RUN/render-review.json`)**: the file is your result, the return only sums it up. The host logs completion; returning without the file gets you resumed to write it.
 
