@@ -1,0 +1,317 @@
+{
+  "id": "delivery-pr-body",
+  "agent": "aw-delivery",
+  "tier": "fast",
+  "fixture": "notes-app",
+  "about": "aw-delivery after finish on a logic-only change: writes pr-description.md from the repo's PR template (headings, order, checkboxes and HTML comments kept, ticket as a key, screenshot table left to the CLI, the review concern and the plan's out-of-scope line placed) and runs deliver with --no-push --no-pr",
+  "prepare": [
+    {
+      "do": "overrides",
+      "set": {
+        "device": {
+          "app_module": ":app",
+          "application_id": "com.notes.app.debug",
+          "launch_activity": ".MainActivity"
+        }
+      }
+    },
+    {
+      "do": "accept_profile"
+    },
+    {
+      "do": "copy",
+      "from": "pull_request_template.md",
+      "to": ".github/pull_request_template.md"
+    },
+    {
+      "do": "commit",
+      "message": "Add PR template"
+    },
+    {
+      "do": "branch",
+      "name": "notes-22-archive-order"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "start",
+        "--target",
+        "{TARGET}",
+        "--id",
+        "NOTES-22",
+        "--title",
+        "Archive lists the most recently edited note first"
+      ],
+      "as": "START_JSON"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "update-spec",
+        "--target",
+        "{TARGET}",
+        "--type",
+        "feature",
+        "--risk",
+        "low",
+        "--complexity",
+        "low",
+        "--surfaces",
+        "logic",
+        "--level",
+        "standard",
+        "--acceptance",
+        "Archive shows only archived notes, ordered by last edit, newest first|With nothing archived, Archive shows no rows",
+        "--proofs",
+        "unit|unit",
+        "--parallel-parts",
+        "1",
+        "--parallel-files",
+        "0"
+      ],
+      "as": "SPEC_JSON"
+    },
+    {
+      "do": "copy",
+      "from": "plan.md",
+      "to": ".ai/workflow/NOTES-22/plan.md"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "log",
+        "--target",
+        "{TARGET}",
+        "--stage",
+        "Planner",
+        "--status",
+        "completed",
+        "--note",
+        "2 AC"
+      ],
+      "as": "PLAN_LOG"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "log",
+        "--target",
+        "{TARGET}",
+        "--stage",
+        "Implementer",
+        "--status",
+        "started",
+        "--note",
+        "archive order"
+      ],
+      "as": "IMPL_START"
+    },
+    {
+      "do": "copy",
+      "from": "src/NotesListViewModel.kt",
+      "to": "feature/notes/src/main/kotlin/com/notes/feature/notes/NotesListViewModel.kt"
+    },
+    {
+      "do": "copy",
+      "from": "src/NotesNavGraph.kt",
+      "to": "feature/notes/src/main/kotlin/com/notes/feature/notes/NotesNavGraph.kt"
+    },
+    {
+      "do": "copy",
+      "from": "src/NotesListViewModelTest.kt",
+      "to": "feature/notes/src/test/kotlin/com/notes/feature/notes/NotesListViewModelTest.kt"
+    },
+    {
+      "do": "copy",
+      "from": "implementation-notes.md",
+      "to": ".ai/workflow/NOTES-22/implementation-notes.md"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "log",
+        "--target",
+        "{TARGET}",
+        "--stage",
+        "Implementer",
+        "--status",
+        "completed",
+        "--note",
+        "archive order done"
+      ],
+      "as": "IMPL_LOG"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "next",
+        "--target",
+        "{TARGET}"
+      ],
+      "as": "TREE",
+      "field": "tree"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "gate",
+        "--target",
+        "{TARGET}"
+      ],
+      "as": "GATE_JSON"
+    },
+    {
+      "do": "copy",
+      "from": "review.json",
+      "to": ".ai/workflow/NOTES-22/review.json",
+      "render": true
+    },
+    {
+      "do": "cli",
+      "args": [
+        "log",
+        "--target",
+        "{TARGET}",
+        "--stage",
+        "Reviewer",
+        "--status",
+        "completed",
+        "--note",
+        "approved, 0 blocking"
+      ],
+      "as": "REVIEW_LOG"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "next",
+        "--target",
+        "{TARGET}"
+      ],
+      "as": "NEXT_FINISH"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "finish",
+        "--target",
+        "{TARGET}"
+      ],
+      "as": "FINISH_JSON"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "next",
+        "--target",
+        "{TARGET}"
+      ],
+      "as": "NEXT_JSON"
+    }
+  ],
+  "prompt_file": "prompt.md",
+  "checks": [
+    {
+      "id": "body_written",
+      "kind": "regex",
+      "file": ".ai/workflow/NOTES-22/pr-description.md",
+      "pattern": "NOTES-22",
+      "weight": 2
+    },
+    {
+      "id": "template_order",
+      "kind": "regex",
+      "file": ".ai/workflow/NOTES-22/pr-description.md",
+      "pattern": "^## Traceability[\\s\\S]*^## What changed[\\s\\S]*^## How to test[\\s\\S]*^## Checklist[\\s\\S]*^## Screenshots",
+      "weight": 3
+    },
+    {
+      "id": "ticket_as_key",
+      "kind": "regex",
+      "file": ".ai/workflow/NOTES-22/pr-description.md",
+      "pattern": "Addresses \\[?NOTES-22\\]?",
+      "weight": 1
+    },
+    {
+      "id": "no_invented_url",
+      "kind": "not_regex",
+      "file": ".ai/workflow/NOTES-22/pr-description.md",
+      "pattern": "https?://",
+      "weight": 2
+    },
+    {
+      "id": "boxes_left_open",
+      "kind": "not_regex",
+      "file": ".ai/workflow/NOTES-22/pr-description.md",
+      "pattern": "- \\[[xX]\\] (Unit tests|New strings|Tested on a device)",
+      "weight": 2
+    },
+    {
+      "id": "screenshot_section_cli",
+      "kind": "regex",
+      "file": ".ai/workflow/NOTES-22/pr-description.md",
+      "pattern": "^## Screenshots\\s*\\n\\s*(\\| *Before *\\| *After|_?No screenshots)",
+      "weight": 1
+    },
+    {
+      "id": "out_of_scope_line",
+      "kind": "regex",
+      "file": ".ai/workflow/NOTES-22/pr-description.md",
+      "pattern": "Follow-up / out of scope:.*(search|restor)",
+      "weight": 2
+    },
+    {
+      "id": "no_attribution",
+      "kind": "not_regex",
+      "file": ".ai/workflow/NOTES-22/pr-description.md",
+      "pattern": "Generated with|Made with|Claude|Codex|\ud83e\udd16|Co-Authored-By|Assisted-by",
+      "weight": 2
+    },
+    {
+      "id": "delivered_locally",
+      "kind": "json_equals",
+      "file": ".ai/workflow/NOTES-22/delivery.json",
+      "path": "pushed",
+      "value": false,
+      "weight": 2
+    },
+    {
+      "id": "no_secrets",
+      "kind": "no_secrets",
+      "files": [
+        ".ai/workflow/NOTES-22/pr-description.md"
+      ],
+      "weight": 1
+    }
+  ],
+  "rubric": [
+    {
+      "id": "template_kept",
+      "weight": 3,
+      "criterion": "The body keeps the template's headings, order, checkboxes (as the template has them) and HTML comments, fills only those sections, and leaves the Screenshots table for the CLI (no image URLs or invented rows)."
+    },
+    {
+      "id": "short_and_true",
+      "weight": 3,
+      "criterion": "About 2-3 lines of prose in total, every claim true of the diff and the notes (archived notes sorted newest edit first; the archive screen uses the new function; two unit tests), with a How to test a reviewer can follow."
+    },
+    {
+      "id": "concern_placed",
+      "weight": 2,
+      "criterion": "The review's concern (the archive list re-sorts on every emission; `remember` if the store grows) appears once where the template has room, and the plan's out-of-scope items appear as one `Follow-up / out of scope:` line."
+    },
+    {
+      "id": "return",
+      "weight": 2,
+      "criterion": "The return (8 lines or fewer) gives the branch, the commit sha, that nothing was pushed and no PR opened (flags), and the warnings, without attribution lines."
+    }
+  ],
+  "judge_reads": [
+    ".ai/workflow/NOTES-22/pr-description.md",
+    ".ai/workflow/NOTES-22/delivery.json",
+    ".ai/workflow/NOTES-22/review.json",
+    ".ai/workflow/NOTES-22/plan.md",
+    ".ai/workflow/NOTES-22/implementation-notes.md",
+    ".github/pull_request_template.md"
+  ]
+}

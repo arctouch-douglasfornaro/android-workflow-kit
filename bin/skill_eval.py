@@ -190,7 +190,11 @@ def prepare(case_id: str) -> dict[str, Any]:
             feature_setup.ensure(workdir, accept=True)
         elif kind == "cli":
             args = [arg.format(**values) for arg in step["args"]]
-            values[step["as"]] = json.dumps(run_cli(args, workdir), indent=2)
+            answer = run_cli(args, workdir)
+            # `field` keeps one value of the answer (e.g. the review `tree`) for a later rendered copy
+            values[step["as"]] = str(answer.get(step["field"], "")) if step.get("field") else json.dumps(answer, indent=2)
+        elif kind == "branch":  # the ticket branch delivery requires (never the base)
+            git(workdir, "checkout", "-q", "-b", step["name"])
         else:
             raise ValueError(f"unknown prepare step {kind}")
     _forget_device_wants(workdir)

@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "status": "approved",
+  "blocking": [],
+  "concerns": [
+    {"id": "C1", "file": "feature/notes/src/main/kotlin/com/notes/feature/notes/NotesNavGraph.kt", "line": 29, "problem": "The archive list re-sorts on every emission of the repository flow; fine for the in-memory store, worth a `remember` if the list grows.", "fix": "Wrap the call in `remember(notes) { ... }` when the store gets large."}
+  ],
+  "suggestions": [],
+  "verified": ["AC1 test fails without the sort (d is newer but listed after c)", "NotesNavGraph.kt:29 is the only caller of archivedNotes"],
+  "reviewed_tree": "{TREE}"
+}
