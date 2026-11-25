@@ -141,6 +141,41 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(render.route(self.root, {**spec, "proofs": []})["mode"], "device")
         self.assertEqual(render.route(self.root, spec, {"render": {"prefer": "device"}})["mode"], "device")
 
+    def test_with_no_proofs_from_the_planner_the_ac_text_picks_render_or_device(self) -> None:
+        cases = {
+            "In dark mode the hint text keeps its contrast": "render",
+            "Long titles are truncated with an ellipsis at 200% font scale": "render",
+            "Opening note 1 shows Edited on Nov 14, 2023": "device",
+            "Tapping Save shows a toast": "device",
+            "One tap logs one event": "device",
+        }
+        for text, proof in cases.items():
+            self.assertEqual(render.infer_proof(text), proof, text)
+        spec = {"route": ["T7"], "surfaces": ["ui"],
+                "acceptance_criteria": ["Tapping the card flips it", "In dark mode the card uses the dark surface color"]}
+        self.assertEqual(render.route(self.root, spec)["mode"], "device")  # no probe: the device, as before
+        self.probed()
+        decided = render.route(self.root, spec)
+        self.assertEqual((decided["mode"], decided["render_ac"], decided["device_ac"]), ("both", ["AC2"], ["AC1"]))
+        self.assertEqual(decided["inferred"], ["device", "render"])
+        self.assertEqual(render.route(self.root, {**spec, "proofs": ["device", "device"]})["mode"], "device")
+
+    def test_the_modules_a_visible_change_touches_are_probed_once(self) -> None:
+        feature = self.root / "features/notes"
+        feature.mkdir(parents=True)
+        (feature / "build.gradle.kts").write_text("", encoding="utf-8")
+        folder = self.root / "run"
+        folder.mkdir()
+        (folder / "change-set-map.json").write_text(json.dumps({"candidate_files": [
+            {"path": "features/notes/src/main/kotlin/NotesScreen.kt"},
+            {"path": "features/notes/src/test/kotlin/NotesTest.kt"},
+            {"path": "app/src/main/java/com/example/ProfileScreen.kt"}]}), encoding="utf-8")
+        spec = {"surfaces": ["ui"]}
+        self.assertEqual(render.probes_wanted(self.root, folder, spec), [":features:notes", ":app"])
+        self.probed()  # :app has a probe on record
+        self.assertEqual(render.probes_wanted(self.root, folder, spec), [":features:notes"])
+        self.assertEqual(render.probes_wanted(self.root, folder, {"surfaces": ["domain"]}), [])
+
     def test_proofs_must_match_the_ac(self) -> None:
         cli("start", "--target", self.target, "--id", "R-2", "--title", "t", "--type", "chore", "--level", "express")
         from android_workflow.cli import main

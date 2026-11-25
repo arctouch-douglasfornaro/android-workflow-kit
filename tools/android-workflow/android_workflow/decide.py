@@ -394,7 +394,10 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
                           note="finish the plan with the developer's answers")
         return _spawn("aw-planner", f"level {level}: plan before code", stage="Planner", level=level,
                       note="turn the ticket into verifiable AC and confirm the change set",
-                      also=_background(spec, no_device))
+                      also=_background(spec, no_device) + ([
+                          f"CLI render probe --target TARGET --module {module} (background: a static AC can then be "
+                          "rendered on the JVM instead of driven on the device)"
+                          for module in render.probes_wanted(target, agent_dir, spec)] if not no_device else []))
 
     implementer = stages.get("T4") or {}
     lead = stages.get("T4L") or {}
@@ -573,11 +576,14 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
                 accepted = str(state["device_partial"]).replace('"', "'")
                 return _answer("finish", "the device check is partial again; the developer accepted it in an earlier round",
                                command=f'CLI finish --target TARGET --accept-partial "{accepted}"')
+            decided = auto_partial(target, agent_dir, spec, proof, state)
+            if decided:
+                return decided
             if state.get("finished_fingerprint"):  # a PR round: the developer decides, nothing is pushed yet
                 return _answer("ask_user", "the device check is partial (PR round)", question=PARTIAL_QUESTION,
                                options=_partial_options(again=not stop), then="CLI next --target TARGET")
-            return _answer("ask_user", "the device check is partial: some AC were not verified on the device",
-                           question=PARTIAL_QUESTION, options=_partial_options(again=not stop))
+            return _answer("ask_user", "the device check is partial: some AC were not verified on the device"
+                           + _critical_note(spec), question=PARTIAL_QUESTION, options=_partial_options(again=not stop))
         if device_now and device_verdict == "blocked":
             return _draft("the device check is blocked: see device-report.md", state)
         fails = failed_rounds(device_state, {"fail"}, device_verdict if device_now else None, fingerprint)
@@ -612,8 +618,11 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
             if not record:
                 return _draft(f"no more device rounds: {stop}", state)
             if close_device(target, agent_dir, stop) == "partial":
-                return _answer("ask_user", f"no more device rounds ({stop}): the device check is partial",
-                               question=PARTIAL_QUESTION, options=_partial_options(again=False))
+                decided = auto_partial(target, agent_dir, spec, proof, state)
+                if decided:
+                    return decided
+                return _answer("ask_user", f"no more device rounds ({stop}): the device check is partial"
+                               + _critical_note(spec), question=PARTIAL_QUESTION, options=_partial_options(again=False))
             return _draft(f"the device check is blocked: {stop}; see device-report.md", state)
         serial, waiting, reason = _device_for(target, agent_dir, record)
         if waiting is not None:
@@ -806,6 +815,59 @@ def _device_before(target: Path, agent_dir: Path, spec: dict[str, Any], state: d
                   budget_seconds=BEFORE_BUDGET_SECONDS, scaffold="CLI device scaffold --target TARGET",
                   done='CLI log --target TARGET --stage Device --status flows_ready --note "<n> flow(s) saved"',
                   note="before: capture the current screen and write the flows" if capture else "before: write the flows")
+
+
+def critical(spec: dict[str, Any]) -> str | None:
+    """Why a change needs the developer to decide a partial device check, or None: high risk, or the
+    ticket is about payments or sign-in (FULL_WORDS)."""
+    if str(spec.get("risk") or "") == "high":
+        return "risk high"
+    text = " ".join([str(spec.get("title") or ""), *(str(item) for item in spec.get("acceptance_criteria") or [])])
+    words = sorted(_words(text) & FULL_WORDS)
+    return "the ticket is about " + ", ".join(words) if words else None
+
+
+def _critical_note(spec: dict[str, Any]) -> str:
+    why = critical(spec)
+    return f" ({why}: the developer decides)" if why else ""
+
+
+def auto_partial(target: Path, agent_dir: Path, spec: dict[str, Any], proof: dict[str, Any],
+                 state: dict[str, Any]) -> dict[str, Any] | None:
+    """A PARTIAL device check decided by code, with no question, unless the change is critical.
+
+    Every AC passed on the device, or is proved another way (a passing JVM render, a `unit` proof): the PR
+    opens ready for review and says what the device did not verify. Some AC are proved by nothing: the
+    PR opens as a draft naming them. A PR round only takes the first (nothing is pushed without the
+    developer otherwise). None: ask the developer."""
+    if critical(spec) or "review_files" in spec:  # reviewing someone else's PR has its own rule
+        return None
+    from android_workflow import render
+    from android_workflow.cli import device_report_anomalies
+    from android_workflow.review import device_not_verified, device_scenarios
+
+    path = agent_dir / "device-report.md"
+    report = path.read_text(encoding="utf-8") if path.is_file() else ""
+    criteria = list(spec.get("acceptance_criteria") or [])
+    ids = [str(item).upper() for item in spec.get("ac_ids") or []] or [f"AC{index}" for index in range(1, len(criteria) + 1)]
+    marks = render.proofs(spec) or list(proof.get("inferred") or [])
+    covered = {ids[index] for index, mark in enumerate(marks[:len(ids)]) if mark == "unit"}
+    if render.verdict_now(target) == "pass":
+        covered |= {str(item).upper() for item in proof.get("render_ac") or []}
+    verdicts = device_scenarios(report)
+    open_ac = [ac for ac in ids if verdicts.get(ac) != "pass" and ac not in covered]
+    if not ids or open_ac:
+        if state.get("finished_fingerprint") or not ids:
+            return None
+        why = f"device check partial: {', '.join(open_ac)} not verified on the device"
+        return _draft(why, state)
+    items = [*device_not_verified(report, limit=5), *device_report_anomalies(report)][:5]
+    accepted = ("decided by the CLI (no critical surface): every AC passed on the device"
+                + (" or by its other proof" if covered else "")
+                + ("; not verified: " + "; ".join(items) if items else "")).replace('"', "'")
+    return _answer("finish", "the device check is partial but every AC is proved: the PR opens ready for review "
+                   "and says what the device did not verify",
+                   command=f'CLI finish --target TARGET --accept-partial "{accepted}"')
 
 
 PARTIAL_QUESTION = ("The device check is partial: device-report.md lists AC it could not verify (Not verified) or "

@@ -757,6 +757,7 @@ name=$(basename "$flow" .yaml)
 if grep -q FAILME "$flow"; then echo "Assertion is false"; exit 1; fi
 if grep -q FLAKY "$flow" && [ ! -f "$flow.seen" ]; then touch "$flow.seen"; echo "flaky"; exit 1; fi
 if grep -q FAILWHILE "$flow" && [ -f "$(dirname "$0")/fail-now" ]; then echo "Element not found: Save"; exit 1; fi
+if grep -q DRIVERDIED "$flow"; then mkdir -p "$(dirname "$0")/maestro-tests/1"; echo "DeviceServerDiedException: Device server died during 'deviceInfo' on emu-1: UNAVAILABLE" > "$(dirname "$0")/maestro-tests/1/maestro.log"; echo " > Flow x"; exit 1; fi
 if grep -q DEVICEDOWN "$flow"; then echo "io.grpc.StatusRuntimeException: UNAVAILABLE: io exception"; exit 1; fi
 echo "$name" >> "$(dirname "$0")/maestro-runs.log"
 mkdir -p "$out/2026/$name/takeScreenshot"
@@ -974,6 +975,12 @@ class ReplayTests(unittest.TestCase):
         self.assertEqual(result["device_errors"], ["a.yaml", "b.yaml"])
         self.assertIn("not on the change", result["next"])
         self.assertIn("2 device error", self.stage_log())
+
+    def test_a_driver_error_only_in_maestros_own_log_is_a_device_error(self) -> None:
+        (self.flows / "a.yaml").write_text("- DRIVERDIED\n- takeScreenshot: a-shot\n", encoding="utf-8")
+        with mock.patch("android_workflow.replay.MAESTRO_LOGS", self.bin / "maestro-tests"):
+            result, _ = self.replay()
+        self.assertEqual(result["flows"][0]["cause"], "device")
 
     def test_a_fix_round_runs_the_failed_and_changed_flows_first_and_stops_at_a_real_failure(self) -> None:
         (self.flows / "a.yaml").write_text("- takeScreenshot: a-shot\n", encoding="utf-8")

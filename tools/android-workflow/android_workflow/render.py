@@ -431,6 +431,59 @@ def proofs(spec: dict[str, Any]) -> list[str]:
     return [str(item) for item in raw] if isinstance(raw, list) else []
 
 
+# What a JVM render of a composable shows: the look of one state. English and Portuguese.
+STATIC_TERMS = re.compile(
+    r"\b(dark|light|night|theme[sd]?|tema|escuro|claro|font[- ]?scale|font size|fonte|typograph\w*|tipografia|"
+    r"colou?rs?|cor(?:es)?|tint|padding|margins?|margem|spacing|espaçamento|alignment|alinhad\w*|aligned|"
+    r"rtl|right[- ]to[- ]left|tablet|sw600dp|landscape|truncat\w*|ellipsi[sz]\w*|long (?:text|title|name)s?|"
+    r"texto longo|empty state|estado vazio|placeholder|icons?|ícones?|elevation|shadow|sombra|corner|radius|"
+    r"borders?|borda|size|tamanho|layout)\b", re.I)
+# What only a running app shows: input, navigation, time, the system.
+BEHAVIOR_TERMS = re.compile(
+    r"\b(tap\w*|click\w*|press\w*|swip\w*|scroll\w*|drag\w*|toque|tocar|clica\w*|rola\w*|arrast\w*|"
+    r"navigat\w*|naveg\w*|opens?|opening|abre|abrir|back|voltar|deep ?link|keyboard|ime|teclado|typing|types|"
+    r"digita\w*|animat\w*|anima\w*|transition|permission\w*|permiss\w*|network|offline|online|retry|"
+    r"log(?:s|ged)?|event\w*|evento\w*|analytics|notification\w*|notifica\w*|plays?|audio|áudio|video|vídeo|"
+    r"rotat\w*|restart\w*|relaunch\w*|lifecycle|seconds?|segundos?|minutes?|after|depois|then|"
+    r"submit\w*|sav(?:e|es|ed|ing)|salva\w*|delet\w*|exclu\w*|sync\w*|load\w*|carreg\w*|refresh\w*|"
+    r"dismiss\w*|fecha\w*|clos(?:e|es|ed|ing)|select\w*|selecion\w*|toggl\w*|switch\w*|expand\w*|collaps\w*)\b", re.I)
+
+
+def infer_proof(criterion: str) -> str:
+    """The proof an AC needs when the Planner did not say: `render` for the look of a state (a theme,
+    a font scale, RTL, a tablet, colors, spacing, long text, an empty state) with no input, navigation,
+    time or system in it; else `device`. The device stays the default: a render never replaces it on doubt."""
+    text = str(criterion or "")
+    return "render" if STATIC_TERMS.search(text) and not BEHAVIOR_TERMS.search(text) else "device"
+
+
+PROBES_PER_RUN = 2
+
+
+def probes_wanted(target: Path, agent_dir: Path, spec: dict[str, Any]) -> list[str]:
+    """The Gradle modules a visible change likely touches (its candidate files under `src/main`) that no
+    render probe has tried yet: probed in the background while the Planner reads, so a static AC can be
+    rendered instead of driven on the device. At most `PROBES_PER_RUN`; a module probed once (passed or
+    not) is never probed again."""
+    settings = config(target)
+    if settings.get("enabled") is False or "ui" not in (spec.get("surfaces") or []) and spec.get("visual") is not True:
+        return []
+    candidates = _read(agent_dir / "change-set-map.json").get("candidate_files") or []
+    wanted: list[str] = []
+    for item in candidates:
+        path = str((item or {}).get("path") or "") if isinstance(item, dict) else str(item)
+        if "/src/main/" not in path or not path.endswith(".kt"):
+            continue
+        module = ":" + path.split("/src/main/", 1)[0].strip("/").replace("/", ":")
+        if module != ":" and module not in settings["modules"] and module not in wanted \
+                and any((target / path.split("/src/main/", 1)[0] / name).is_file()
+                        for name in ("build.gradle.kts", "build.gradle")):
+            wanted.append(module)
+        if len(wanted) >= PROBES_PER_RUN:
+            break
+    return wanted
+
+
 def route(target: Path, spec: dict[str, Any], state: dict[str, Any] | None = None) -> dict[str, Any]:
     """How the run proves its visible AC: `device` (as before), `render` (no device), or `both` (the device
     for behavior, renders for states it cannot reach, in parallel). Zero tokens, decided from the Planner's
@@ -441,10 +494,13 @@ def route(target: Path, spec: dict[str, Any], state: dict[str, Any] | None = Non
     marks = proofs(spec)
     criteria = list(spec.get("acceptance_criteria") or [])
     ids = [str(item) for item in spec.get("ac_ids") or []] or [f"AC{index}" for index in range(1, len(criteria) + 1)]
+    inferred = [] if marks else [infer_proof(item) for item in criteria]  # the Planner set none: read the AC
+    marks = marks or inferred
     render_ac = [ids[i] for i, proof in enumerate(marks[:len(ids)]) if proof == "render"]
     device_ac = [ids[i] for i, proof in enumerate(marks[:len(ids)]) if proof in {"device", "both"}]
     runtime = sorted(set(spec.get("surfaces") or []) & RUNTIME_SURFACES)
-    base = {"render_ac": render_ac, "device_ac": device_ac, "modules": sorted(usable)}
+    base = {"render_ac": render_ac, "device_ac": device_ac, "modules": sorted(usable),
+            **({"inferred": inferred} if inferred else {})}
     if "T7" not in (spec.get("route") or []):
         return {"mode": "none", "reason": "no device stage on this change", **base}
     if prefer == "device" or not usable or not render_ac:

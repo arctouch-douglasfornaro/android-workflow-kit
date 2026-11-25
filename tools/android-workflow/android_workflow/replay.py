@@ -114,7 +114,7 @@ FLOW_HEALTH_FILE = "flow-health.json"  # RUN/: how often each flow (per digest) 
 DEVICE_ERRORS_IN_A_ROW = 2  # this many flows in a row failing on device errors stop the replay
 MAESTRO_DRIVER_PACKAGES = ("dev.mobile.maestro", "dev.mobile.maestro.test")
 # The device or Maestro failed, not the app: gRPC statuses of Maestro's driver and adb's own errors.
-DEVICE_ERROR_RE = re.compile(r"\bUNAVAILABLE\b|DEADLINE_EXCEEDED|io\.grpc\.|device offline|device '[^']*' not found|"
+DEVICE_ERROR_RE = re.compile(r"\bUNAVAILABLE\b|DEADLINE_EXCEEDED|DeviceServerDied|Device server died|io\.grpc\.|device offline|device '[^']*' not found|"
                              r"no devices/emulators found|Failed to connect to|Connection refused|ECONNRESET|"
                              r"Maestro driver|driver (?:did not|failed to) start|Timed out waiting for (?:the )?driver")
 APP_CRASH_RE = re.compile(r"App crashed|FATAL EXCEPTION|keeps stopping|isn't responding")
@@ -130,6 +130,26 @@ def failure_cause(code: int, log_text: str) -> str:
     if code == 126 or DEVICE_ERROR_RE.search(log_text):
         return "device"
     return "timeout" if code == 124 else "step"
+
+
+MAESTRO_LOGS = Path.home() / ".maestro" / "tests"
+
+
+def failure_text(log: Path, folder: Path, serial: str, since: float) -> str:
+    """What explains a failed attempt: its output, plus Maestro's own `maestro.log` (under the output
+    folder, or `~/.maestro/tests/<time>/` where Maestro writes it by default, the one of this device
+    written since the attempt started). The driver's errors are only there, never in the output."""
+    parts = [_tail(log, 200)]
+    found = [path for path in folder.rglob("maestro.log") if path.stat().st_mtime >= since]
+    try:
+        found += [path for path in MAESTRO_LOGS.glob("*/maestro.log") if path.stat().st_mtime >= since]
+    except OSError:
+        pass
+    for path in found[-3:]:
+        text = _tail(path, 400)
+        if serial in text or path.is_relative_to(folder):
+            parts.append(text)
+    return "\n".join(parts)
 
 
 def selectors(flow: Path) -> set[str]:
@@ -673,15 +693,17 @@ def _replay(target: Path, serial: str, phase: str, install_base_apk: bool | None
                             **({"hints": last["hints"]} if last.get("hints") else {})})
             continue
         flow_started = time.monotonic()
+        attempt_started = time.time()
         code, log = _run_flow(flow, maestro, serial, folder, target, phase, flow_timeout)
         attempts = 1
         first_failure: dict[str, Any] | None = None
         # A real failure on the new build is rerun once, from a clean app and Maestro driver. On the base
         # build a flow that looks for the new UI fails by design, so a second attempt only doubles the wait.
         if code != 0 and phase == "after":
-            first_failure = {"exit_code": code, "cause": failure_cause(code, _tail(Path(log), 200)),
+            first_failure = {"exit_code": code, "cause": failure_cause(code, failure_text(Path(log), folder, serial, attempt_started)),
                              "log_tail": _tail(Path(log), 8)}
             _reset_device(serial, app)
+            attempt_started = time.time()
             code, log = _run_flow(flow, maestro, serial, folder, target, phase, flow_timeout)
             attempts = 2
         allowed = set(declared[flow.name]) | (set(known) if phase == "after" else set())
@@ -699,7 +721,8 @@ def _replay(target: Path, serial: str, phase: str, install_base_apk: bool | None
         status = "passed" if code == 0 and (captured or metrics or events or phase == "before" and not allowed) else \
             "partial" if phase == "before" and captured else "failed"
         hints = flow_hints(flow, _tail(Path(log), 200)) if status == "failed" else []
-        cause = (failure_cause(code, _tail(Path(log), 200)) if code else "step") if status == "failed" else None
+        cause = (failure_cause(code, failure_text(Path(log), folder, serial, attempt_started)) if code else "step") \
+            if status == "failed" else None
         # Failed, then passed with nothing changed: in this replay (the retry) or since the last one on this build.
         flaky = phase == "after" and status == "passed" and (first_failure is not None or (
             same_build and last.get("digest") == digest and last.get("status") == "failed" and not last.get("skipped")))

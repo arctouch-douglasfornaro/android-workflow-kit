@@ -90,6 +90,11 @@ When the spawn names `render_ac`, those AC are proved by JVM renders running in 
 reach them on the device and list them in Scenarios as `ACn …: covered by renders`. Spend the budget on
 the behavior only a running app shows.
 
+One configuration: drive the device in the theme, font scale and orientation it is in. Never toggle dark
+mode, font scale, RTL or orientation to capture a variant of a screen you already verified: a variant is
+the look of a state, a render's job (`render_ac`), or a Not verified line when no render runs. Change the
+setting only when an AC is about what happens when it changes at runtime (the app follows a theme switch).
+
 ## Inputs
 
 - `TARGET`, `RUN`, CLI, mode, `plan.md` (navigation recipe, device AC, `visual`).
@@ -165,7 +170,9 @@ the behavior only a running app shows.
    `RUN/media/flows/<name>.yaml` following the Flow contract. Assert the target screen was reached
    (text/testTag) before judging anything. Recipe wrong → fix the flow, not the app. In `before`, this is
    the whole job: write, run and fix each flow until it passes on the base build.
-4. `after`: for each device AC write expected vs observed. An AC with nothing to see (audio played,
+4. `after`: for each device AC write expected vs observed, from a capture you opened: a black, blank
+   or wrong-screen capture proves nothing (a broken display or driver), so that AC is not verified and
+   the report says why, never PASS on a UI dump alone. An AC with nothing to see (audio played,
    an analytics event, a log line) is still a device AC: prove it with the scaffold's `<flow>.sh`
    logcat script (`PATTERN` = the profile's event log source, already filled in, plus the event name; `MIN`/`MAX` for "exactly once"); the
    replay passes or fails it on the count (`replay.json` → `events`). Never save or attach the full

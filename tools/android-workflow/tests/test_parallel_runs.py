@@ -265,10 +265,54 @@ class DecideDeviceTests(test_decide.RunTests):
         self.assertEqual(answer["next"], "finish")
         self.assertIn("late: skipped", read_json(self.rundir / "run-state.json")["device_before"])
 
-    def test_anomalies_make_a_pass_partial_and_the_developer_decides(self) -> None:
+    def partial_report(self, scenarios: str) -> None:
+        (self.rundir / "device-report.md").write_text(
+            "## Status: PARTIAL\n\n## Device\n\nemulator " + "x" * 420 + f"\n\n## Scenarios\n\n{scenarios}\n\n"
+            "## Not verified\n\n- set_id in the logged event: only the unit tests read it\n\n## Anomalies\n\nNone.\n",
+            encoding="utf-8")
+        (self.rundir / "replay.json").write_text(json.dumps({
+            "fingerprint": source_fingerprint(self.root), "flows": [{"status": "passed"}]}), encoding="utf-8")
+        cli("log", "--target", self.target, "--stage", "Device", "--status", "completed", "--tokens", "1")
+        (self.rundir / "media/after/screen.png").write_bytes(b"png")
+
+    def test_a_partial_check_where_every_ac_passed_opens_ready_without_asking(self) -> None:
         with StateHome():
             self.visual_run()
             with self.connected():
+                self.next()
+                self.partial_report("- AC1 one tap logs one event: PASS")
+                answer = self.next()
+            done = cli("finish", "--target", self.target, "--accept-partial", answer["command"].split('"')[1])
+        self.assertEqual(answer["next"], "finish")
+        self.assertIn("decided by the CLI", answer["command"])
+        self.assertIn("set_id in the logged event", answer["command"])
+        self.assertEqual((done["status"], done.get("draft")), ("completed", None))
+
+    def test_a_partial_check_with_an_ac_nothing_proved_opens_a_draft_without_asking(self) -> None:
+        with StateHome():
+            self.visual_run()
+            with self.connected():
+                self.next()
+                self.partial_report("- AC1 one tap logs one event: BLOCKED")
+                answer = self.next()
+        self.assertEqual(answer["next"], "finish")
+        self.assertIn("--draft", answer["command"])
+        self.assertIn("AC1 not verified on the device", answer["command"])
+
+    def test_a_partial_check_on_a_critical_change_still_asks(self) -> None:
+        with StateHome():
+            self.visual_run()
+            with self.connected(), mock.patch("android_workflow.decide.critical", return_value="risk high"):
+                self.next()
+                self.partial_report("- AC1 one tap logs one event: PASS")
+                answer = self.next()
+        self.assertEqual(answer["next"], "ask_user")
+        self.assertIn("risk high", answer["why"])
+
+    def test_anomalies_make_a_pass_partial_and_the_developer_decides(self) -> None:
+        with StateHome():
+            self.visual_run()
+            with self.connected(), mock.patch("android_workflow.decide.critical", return_value="risk high"):
                 self.next()
                 (self.rundir / "device-report.md").write_text(
                     "# Status\n\nPASS\n\n# Device\n\nemulator\n\n# Anomalies\n\n- a swipe after 1/1 showed 1/10\n"
