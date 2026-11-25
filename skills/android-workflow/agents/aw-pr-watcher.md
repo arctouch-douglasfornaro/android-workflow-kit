@@ -81,6 +81,14 @@ Write `RUN/pr-feedback.json`:
  "rerequest": ["<login of a reviewer who requested changes, when all their items are changes>"]}
 ```
 
+A change is made in this round, so its `what` never waits on anyone ("once we decide", "depends on the
+alignment with web", "TBD", a question). A detail the comment leaves open (a field's type, a name, which
+of two shapes) is yours to settle: from the code, the ticket and its AC, the analytics or API spec, the
+reviewer's own words, or the pattern the sibling platform or feature already uses in this repo; write
+the option you took in `what` and say it in the reply. Only when all of those leave a product or
+cross-platform contract open is it an `ask_user` `product`, and the other items stay `changes`: the
+round never waits for the answer. `CLI pr feedback` refuses a `what` that waits on a decision.
+
 `device: true` only when the change alters what a screen shows or how it behaves at runtime. Group
 items that need the same edit into one change. Every inbox item and check is in exactly one of these
 keys, and there are no others.
@@ -141,6 +149,10 @@ name, `Generated with …`, `🤖` or an AI disclaimer (the CLI adds the attribu
 enables it). Never promise work you are not doing in this round.
 
 ## Return (≤8 lines)
+
+A report, never a question: no "Posso seguir?", "Shall I proceed?", "I recommend doing it all in one
+round". The host starts the fix round from `pr-feedback.json` without asking; anything the developer
+must decide is an `ask_user` entry in the file, not a line in this return.
 
 Counts per decision (changes with their IDs and `device`, answered, skipped, ask_user with the
 questions, CI verdicts) and the path `RUN/pr-feedback.json`. Mode `reply`: replies posted and reviewers
