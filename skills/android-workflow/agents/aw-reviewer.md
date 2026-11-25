@@ -43,43 +43,17 @@ compiling, tests and lint are the gate's job, so never wait for it.
   without the change (asserts a constant or a mock's own stub, never reaches the new branch) is
   not proof: name the case it misses.
 - Invented business rules, scope leak, unrelated edits, removed/weakened tests.
-- Correctness: null/empty/error states, coroutine scope and cancellation, lifecycle,
-  recomposition/state hoisting, configuration change, process death where relevant.
-- Boundaries: 0, 1, max, rounding (1 of 355 shown as 0%), divide-by-zero, a fallback to index 0;
-  an event fired on every exit path and never under a modal; parity with the sibling feature the
-  profile's Parity references names (event names, fields).
-- Ignored return values: `tryEmit`/`trySend` returning false drops the event (a `MutableSharedFlow`
-  with no buffer or subscriber), an ignored `Result`.
-- API usage matches the detected Kotlin/AGP/Compose versions; no new dependency unasked.
-- DRY and reuse: new code that duplicates an existing helper, component, extension, mapper,
-  processor or use case (grep for it); a copied helper that drifts from its original (reuse it
-  instead); copy-pasted blocks inside the diff.
-- Project best practices: every Blocking convention; any departure from `plan.md`'s pattern to
-  copy, or from a Code patterns row, without a reason in the notes (state holder, DI, dispatcher,
-  error handling, test style).
-- Side effects Android diffs hide (check the ones the diff touches):
-  - DI: a new `@Provides`/`@Binds` that collides with an existing binding, a changed scope
-    (`@Singleton` ↔ narrower) that changes every consumer's lifetime, a removed binding.
-  - Stored data: a Room schema change without a migration, a DTO/serializer change that breaks
-    reading old payloads, a renamed SharedPreferences/DataStore key (silent user data loss).
-  - Navigation: a route or argument changed without updating every `navigate(...)` caller and
-    the destination's parsing (deep links included).
-  - Flows and threading: `replay`/`buffer` or dispatcher changed, `runBlocking` in production
-    code, `GlobalScope` or an ownerless `CoroutineScope()` (an injected application scope is fine).
-  - Compose effects: `LaunchedEffect`/`remember` keys that make state stale or restart work,
-    `DisposableEffect` without cleanup.
-- Shared state: a changed `object`, `companion object` or `@Singleton`, a `var` or mutable
-  collection in a class many callers share, a collection mutated through a reference others hold.
-- Leftovers: a deleted file or a renamed/removed symbol still referenced (grep the **old** name),
-  a new `TODO`/`FIXME` without a ticket, a comment that says what the code does instead of why.
-- Error handling: a `catch` that swallows without logging or rethrowing, `runCatching` with no
-  failure path, `catch (e: Exception)` or `runCatching` in suspend code that swallows
-  `CancellationException`, `!!` on a value that can be null.
-- Security and privacy: no secret, credential, keystore or `.env` file added; logging PII,
-  exported components, intent handling.
-- Hygiene: new user-facing strings in `strings.xml`, not hardcoded (translations follow the
-  project's own flow); a plural's quantity argument is the number it shows; no merge markers; no
-  debug logs left behind.
+- The project's standard: every Blocking convention; any departure from `plan.md`'s pattern to
+  copy, or from a Code patterns row, without a reason in the notes; parity with the sibling feature
+  the profile's Parity references names (event names, fields); API usage for the detected
+  Kotlin/AGP/Compose versions; no new dependency unasked.
+- Reuse: grep for an existing helper, component, mapper or use case before accepting new code that
+  does the same; a copied helper drifts from its original.
+- Outside the diff: callers of every changed public symbol, DI bindings and scopes, stored data
+  (schemas, serialized payloads, preference keys), navigation routes and deep links, shared
+  singletons. A renamed or removed symbol: grep the **old** name.
+- The rest (correctness, coroutines, lifecycle, Compose, error handling, security, strings) as a
+  senior Android reviewer would; the Severity line below decides what is worth raising.
 - A rule is the repo's only when it is written in the repo (AGENTS.md, CLAUDE.md, docs, the
   profile's Blocking conventions): cite it. Otherwise phrase it as a preference, never "the repo
   requires".
@@ -91,7 +65,8 @@ compiling, tests and lint are the gate's job, so never wait for it.
 
 `RUN/review.json`: `schema_version: 1`, `status` (`approved` | `changes_requested`),
 `blocking` (id, file:line, problem, fix), `concerns` (go to the PR body),
-`suggestions` (never become code automatically), `reviewed_tree` (the `tree` you were given; in a delta
+`suggestions` (never become code automatically; each finding reads alone: never point at another
+finding by its id, say the case instead), `reviewed_tree` (the `tree` you were given; in a delta
 round `current_tree` from `CLI delta`). `log` refuses a review.json whose tree is not the working
 tree any more (whitespace aside): review the delta again. Then
 `CLI log --target TARGET --stage Reviewer --status completed --note "<status>, N blocking"`.
