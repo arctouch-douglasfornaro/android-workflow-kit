@@ -253,7 +253,7 @@
     {
       "id": "flow_has_deep_link",
       "kind": "regex",
-      "file": ".ai/workflow/NOTES-12/media/flows/*.yaml",
+      "file": ".ai/workflow/NOTES-12/media/flows/*",
       "pattern": "notes://note/1[\\s\\S]*notes://note/999|notes://note/999[\\s\\S]*notes://note/1",
       "weight": 2
     },
