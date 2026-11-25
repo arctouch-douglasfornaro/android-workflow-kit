@@ -165,7 +165,7 @@ def prepare(case_id: str) -> dict[str, Any]:
     git(workdir, "-c", "user.name=Dev", "-c", "user.email=dev@localhost", "add", "-A")
     git(workdir, "-c", "user.name=Dev", "-c", "user.email=dev@localhost", "commit", "-q", "-m", "Initial import")
     values: dict[str, str] = {"TARGET": str(workdir), "CLI": CLI_TEXT, "BASE_SHA": git_head(workdir),
-                         "FAKEBIN": str(workdir.parent / "fakebin")}
+                         "FAKEBIN": str(workdir.parent / "fakebin"), "WS": str(workdir.parent)}
     for step in case.get("prepare", []):
         kind = step["do"]
         if kind == "overrides":

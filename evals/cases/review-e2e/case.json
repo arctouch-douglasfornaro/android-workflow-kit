@@ -1,0 +1,173 @@
+{
+  "id": "review-e2e",
+  "agent": "android-review",
+  "tier": "strong",
+  "fixture": "notes-app",
+  "about": "The android-review orchestrator (SKILL.md) on PR #41 served by a stand-in gh and a local origin: start (worktree at the PR head), ticket skipped, Planner mode review, Reviewer mode pr, CI read once, draft. The PR inverts the archived filter and deletes the test that caught it, so the draft must request changes and wait for the developer's OK: nothing is posted",
+  "prepare": [
+    {
+      "do": "overrides",
+      "set": {
+        "device": {
+          "app_module": ":app",
+          "application_id": "com.notes.app.debug",
+          "launch_activity": ".MainActivity"
+        }
+      }
+    },
+    {
+      "do": "accept_profile"
+    },
+    {
+      "do": "commit",
+      "message": "Workflow config"
+    },
+    {
+      "do": "git",
+      "args": [
+        "clone",
+        "-q",
+        "--bare",
+        ".",
+        "{WS}/origin.git"
+      ]
+    },
+    {
+      "do": "git",
+      "args": [
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/notes-team/notes-android.git"
+      ]
+    },
+    {
+      "do": "git",
+      "args": [
+        "config",
+        "url.{WS}/origin.git.insteadOf",
+        "https://github.com/notes-team/notes-android.git"
+      ]
+    },
+    {
+      "do": "git",
+      "args": [
+        "fetch",
+        "-q",
+        "origin"
+      ]
+    },
+    {
+      "do": "branch",
+      "name": "notes-30-search-archived"
+    },
+    {
+      "do": "copy",
+      "from": "src/NotesListViewModel.kt",
+      "to": "feature/notes/src/main/kotlin/com/notes/feature/notes/NotesListViewModel.kt"
+    },
+    {
+      "do": "copy",
+      "from": "src/NotesListViewModelTest.kt",
+      "to": "feature/notes/src/test/kotlin/com/notes/feature/notes/NotesListViewModelTest.kt"
+    },
+    {
+      "do": "commit",
+      "message": "NOTES-30 Search also finds archived notes"
+    },
+    {
+      "do": "git",
+      "args": [
+        "push",
+        "-q",
+        "origin",
+        "HEAD:refs/pull/41/head"
+      ]
+    },
+    {
+      "do": "git",
+      "args": [
+        "checkout",
+        "-q",
+        "main"
+      ]
+    },
+    {
+      "do": "copy",
+      "from": "fakebin/gh",
+      "to": "../fakebin/gh"
+    },
+    {
+      "do": "copy",
+      "from": "pr.json",
+      "to": "../fakebin/pr.json",
+      "render": true
+    }
+  ],
+  "prompt_file": "prompt.md",
+  "checks": [
+    {
+      "id": "draft_written",
+      "kind": "file_exists",
+      "file": "../wt-review-PR-41/.ai/workflow/PR-41/review-draft.md",
+      "weight": 2
+    },
+    {
+      "id": "requests_changes",
+      "kind": "regex",
+      "file": "../wt-review-PR-41/.ai/workflow/PR-41/review-draft.md",
+      "pattern": "REQUEST_CHANGES",
+      "weight": 3
+    },
+    {
+      "id": "filter_found",
+      "kind": "regex",
+      "file": "../wt-review-PR-41/.ai/workflow/PR-41/review.json",
+      "pattern": "NotesListViewModel\\.kt[\\\"\\s,:line]*4[01]\\b",
+      "weight": 2
+    },
+    {
+      "id": "nothing_posted",
+      "kind": "not_regex",
+      "file": "../fakebin/gh-calls.jsonl",
+      "pattern": "\\\"POST\\\"|/reviews|addPullRequestReview\\b",
+      "weight": 3
+    },
+    {
+      "id": "spec_written",
+      "kind": "file_exists",
+      "file": "../wt-review-PR-41/.ai/workflow/PR-41/review-spec.json",
+      "weight": 1
+    },
+    {
+      "id": "no_internal_ids",
+      "kind": "not_regex",
+      "file": "../wt-review-PR-41/.ai/workflow/PR-41/review.json",
+      "pattern": "\\b[BCS]\\d+'s\\b|\\b(see|per|like|from|in|as in|same as) [BCS]\\d+\\b",
+      "weight": 1
+    }
+  ],
+  "rubric": [
+    {
+      "id": "followed_next",
+      "weight": 4,
+      "criterion": "The run shows the orchestrator did what `CLI review next` returned: start, ticket skipped with a reason, the Planner (mode review) then the Reviewer (mode pr) spawned, CI read once, draft built; it stopped at the developer's OK instead of posting a REQUEST_CHANGES review."
+    },
+    {
+      "id": "verdict",
+      "weight": 3,
+      "criterion": "The draft requests changes for the inverted filter at NotesListViewModel.kt:41 (archived notes shown with an empty query, hidden while searching) and the deleted test, with inline comments on the PR head."
+    },
+    {
+      "id": "no_overreach",
+      "weight": 3,
+      "criterion": "Nothing was posted (the stand-in gh log has no review POST), no code in the review worktree was edited, and the final message shows the draft as is and asks post / edit / stop."
+    }
+  ],
+  "judge_reads": [
+    "../wt-review-PR-41/.ai/workflow/PR-41/review-draft.md",
+    "../wt-review-PR-41/.ai/workflow/PR-41/review.json",
+    "../wt-review-PR-41/.ai/workflow/PR-41/review-spec.json",
+    "../fakebin/gh-calls.jsonl"
+  ]
+}

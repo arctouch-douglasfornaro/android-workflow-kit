@@ -1,0 +1,65 @@
+{
+ "id": "PR_kwFAKE41",
+ "number": 41,
+ "url": "https://github.com/notes-team/notes-android/pull/41",
+ "title": "NOTES-30 Search also finds archived notes",
+ "body": "## What\nWhen you search, archived notes that match now show up in the list too (NOTES-30).\n\n## Tests\nRemoved `hides archived notes and sorts by last edit`: it was flaky on CI. Added `search also finds archived notes`.\n\n## Checklist\n- [x] Unit tests",
+ "state": "OPEN",
+ "isDraft": false,
+ "author": {
+  "login": "pat-dev"
+ },
+ "baseRefName": "main",
+ "baseRefOid": "{BASE_SHA}",
+ "headRefName": "notes-30-search-archived",
+ "headRefOid": "{HEAD_SHA}",
+ "isCrossRepository": false,
+ "files": {
+  "totalCount": 2,
+  "nodes": [
+   {
+    "path": "feature/notes/src/main/kotlin/com/notes/feature/notes/NotesListViewModel.kt",
+    "additions": 2,
+    "deletions": 2
+   },
+   {
+    "path": "feature/notes/src/test/kotlin/com/notes/feature/notes/NotesListViewModelTest.kt",
+    "additions": 5,
+    "deletions": 5
+   }
+  ]
+ },
+ "comments": {
+  "nodes": []
+ },
+ "reviews": {
+  "nodes": []
+ },
+ "reviewThreads": {
+  "nodes": []
+ },
+ "commits": {
+  "nodes": [
+   {
+    "commit": {
+     "oid": "{HEAD_SHA}",
+     "statusCheckRollup": {
+      "state": "SUCCESS",
+      "contexts": {
+       "nodes": [
+        {
+         "__typename": "CheckRun",
+         "name": "unit-tests",
+         "status": "COMPLETED",
+         "conclusion": "SUCCESS",
+         "detailsUrl": "https://ci.example.invalid/41",
+         "isRequired": true
+        }
+       ]
+      }
+     }
+    }
+   }
+  ]
+ }
+}

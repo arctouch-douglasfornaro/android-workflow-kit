@@ -19,6 +19,10 @@
       "do": "accept_profile"
     },
     {
+      "do": "commit",
+      "message": "Workflow config"
+    },
+    {
       "do": "cli",
       "args": [
         "start",
@@ -215,6 +219,13 @@
       "id": "source_untouched_2",
       "kind": "unchanged",
       "file": "feature/notes/src/main/kotlin/com/notes/feature/notes/data/NotesRepository.kt",
+      "weight": 1
+    },
+    {
+      "id": "no_internal_ids",
+      "kind": "not_regex",
+      "file": ".ai/workflow/NOTES-21/review.json",
+      "pattern": "\\b[BCS]\\d+'s\\b|\\b(see|per|like|from|in|as in|same as) [BCS]\\d+\\b",
       "weight": 1
     }
   ],

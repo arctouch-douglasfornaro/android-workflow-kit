@@ -986,3 +986,13 @@ class CoverageCheckTests(unittest.TestCase):
         hint = watch.classify_ci({"name": "codecov/patch", "conclusion": "FAILURE"}, "", [])
         self.assertEqual(hint["verdict"], "ours")
         self.assertIn("never add a coverage-ignore", hint["fix"])
+
+
+class RemoteTests(unittest.TestCase):
+    def test_the_configured_origin_wins_over_an_insteadof_rewrite(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "remote", "add", "origin", "https://github.com/org/app.git"], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "url.git@github-work:.insteadOf", "https://github.com/"], check=True)
+            self.assertEqual(("github.com", "org/app"), watch._remote(root))

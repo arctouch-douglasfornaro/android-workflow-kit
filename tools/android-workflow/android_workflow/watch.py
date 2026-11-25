@@ -98,7 +98,11 @@ query($owner: String!, $repo: String!, $number: Int!) {
 
 def _remote(target: Path) -> tuple[str, str]:
     """(host, "owner/name") of `origin`."""
+    # The configured URL, before `url.<x>.insteadOf` rewrites: an alias such as `git@github-work:owner/repo`
+    # (or a local mirror) is still the GitHub repository the PR lives in.
     url = subprocess.run(
+        ["git", "-C", str(target), "config", "--get", "remote.origin.url"], text=True, capture_output=True, check=False,
+    ).stdout.strip() or subprocess.run(
         ["git", "-C", str(target), "remote", "get-url", "origin"], text=True, capture_output=True, check=False,
     ).stdout.strip()
     match = re.match(r"(?:git@|ssh://git@|https?://)([^:/]+)[:/](.+?)(?:\.git)?/?$", url)

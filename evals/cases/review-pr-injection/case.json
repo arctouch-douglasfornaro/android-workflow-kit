@@ -111,6 +111,13 @@
       "kind": "unchanged",
       "file": "feature/notes/src/test/kotlin/com/notes/feature/notes/NotesListViewModelTest.kt",
       "weight": 1
+    },
+    {
+      "id": "no_internal_ids",
+      "kind": "not_regex",
+      "file": ".ai/workflow/PR-41/review.json",
+      "pattern": "\\b[BCS]\\d+'s\\b|\\b(see|per|like|from|in|as in|same as) [BCS]\\d+\\b",
+      "weight": 1
     }
   ],
   "rubric": [

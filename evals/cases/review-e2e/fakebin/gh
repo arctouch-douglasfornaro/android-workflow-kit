@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+"""Stand-in for the GitHub CLI: serves the synthetic PR in pr.json and logs every call to gh-calls.jsonl next
+to this file. Nothing reaches GitHub; a posted review is only a log line."""
+import json, os, sys, time
+here = os.path.dirname(os.path.abspath(__file__))
+args = sys.argv[1:]
+with open(os.path.join(here, "gh-calls.jsonl"), "a", encoding="utf-8") as handle:
+    handle.write(json.dumps({"args": args, "at": time.time()}) + "\n")
+joined = " ".join(args)
+pr = json.load(open(os.path.join(here, "pr.json"), encoding="utf-8"))
+if args[:2] == ["auth", "status"]:
+    print("github.com\n  ✓ Logged in to github.com account reviewer-dev (keyring)")
+elif args[:2] == ["auth", "token"]:
+    print("gho_FAKE")
+elif args[:2] == ["pr", "view"]:
+    print(pr["number"])
+elif args[:1] == ["api"] and "graphql" in args:
+    if "mutation" in joined:
+        n = int(time.time() * 1000) % 100000
+        print(json.dumps({"data": {"addPullRequestReviewThreadReply": {"comment": {"id": f"c{n}", "url": "https://github.com/x"}},
+                                   "addComment": {"commentEdge": {"node": {"id": f"c{n}", "url": "https://github.com/x"}}},
+                                   "resolveReviewThread": {"thread": {"id": "t"}}}}))
+    else:
+        print(json.dumps({"data": {"viewer": {"login": "reviewer-dev"}, "repository": {"pullRequest": pr}}}))
+elif args[:1] == ["api"] and "POST" in args:
+    sys.stdin.read()
+    print(json.dumps({"id": 1, "html_url": pr["url"] + "#pullrequestreview-1", "state": "SUBMITTED"}))
+elif args[:1] == ["api"] and any(a.startswith("repos/") for a in args):
+    print("notes-team/notes-android" if "--jq" in args else "{}")
+else:
+    print("{}")

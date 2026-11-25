@@ -19,6 +19,10 @@
       "do": "accept_profile"
     },
     {
+      "do": "commit",
+      "message": "Workflow config"
+    },
+    {
       "do": "cli",
       "args": [
         "start",
