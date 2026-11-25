@@ -1,0 +1,20 @@
+{
+  "commands": {
+    "format_check": "./gradlew spotlessCheck",
+    "format_apply": "./gradlew spotlessApply",
+    "build": "./gradlew :app:assembleDevDebug",
+    "unit_tests": "./gradlew :app:testDevDebugUnitTest",
+    "android_lint": "./gradlew :app:lintDevDebug",
+    "install": "./gradlew :app:installDevDebug"
+  },
+  "module_commands": {
+    "compile": "./gradlew {module}:compileDevDebugKotlin",
+    "unit_tests": "./gradlew {module}:testDevDebugUnitTest",
+    "android_lint": "./gradlew {module}:lintDevDebug"
+  },
+  "device": {
+    "app_module": ":app",
+    "application_id": "com.tasks.app.dev",
+    "launch_activity": "com.tasks.app.TaskListActivity"
+  }
+}

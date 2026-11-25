@@ -1,0 +1,157 @@
+{
+  "id": "planner-xml-recipe",
+  "agent": "aw-planner",
+  "tier": "strong",
+  "fixture": "tasks-app",
+  "about": "aw-planner on the contrasting tasks-app (Views/XML, flavors, Koin, strings.xml) with no feature map: plans a label on an XML activity, so the change set is the layout, strings.xml and the Activity (no Compose), the recipe opens the deep link tasks://task/<id> on the dev app id with view ids as selectors, and the done/open cases come from the in-memory sample data",
+  "prepare": [
+    {
+      "do": "copy",
+      "from": "android-workflow.json",
+      "to": ".ai/android-workflow.json"
+    },
+    {
+      "do": "copy",
+      "from": "project-profile.md",
+      "to": ".ai/project-profile.md"
+    },
+    {
+      "do": "accept_profile"
+    },
+    {
+      "do": "commit",
+      "message": "Workflow config"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "start",
+        "--target",
+        "{TARGET}",
+        "--id",
+        "TASKS-5",
+        "--title",
+        "Show a Completed label on done tasks in the task detail screen"
+      ],
+      "as": "START_JSON"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "next",
+        "--target",
+        "{TARGET}",
+        "--level",
+        "standard"
+      ],
+      "as": "NEXT_JSON"
+    }
+  ],
+  "snapshot": [
+    "app/src/main/res/layout/activity_task_detail.xml"
+  ],
+  "prompt_file": "prompt.md",
+  "answers": "ok, use the default you proposed",
+  "checks": [
+    {
+      "id": "plan_written",
+      "kind": "regex",
+      "file": ".ai/workflow/TASKS-5/plan.md",
+      "pattern": "^#+ Verification",
+      "weight": 2
+    },
+    {
+      "id": "layout_named",
+      "kind": "regex",
+      "file": ".ai/workflow/TASKS-5/plan.md",
+      "pattern": "activity_task_detail\\.xml",
+      "weight": 2
+    },
+    {
+      "id": "strings_named",
+      "kind": "regex",
+      "file": ".ai/workflow/TASKS-5/plan.md",
+      "pattern": "strings\\.xml",
+      "weight": 2
+    },
+    {
+      "id": "activity_named",
+      "kind": "regex",
+      "file": ".ai/workflow/TASKS-5/plan.md",
+      "pattern": "TaskDetailActivity\\.kt",
+      "weight": 1
+    },
+    {
+      "id": "no_compose",
+      "kind": "not_regex",
+      "file": ".ai/workflow/TASKS-5/plan.md",
+      "pattern": "@Composable|Modifier\\.testTag|setContent \\{",
+      "weight": 2
+    },
+    {
+      "id": "deep_link",
+      "kind": "regex",
+      "file": ".ai/workflow/TASKS-5/plan.md",
+      "pattern": "tasks://task/",
+      "weight": 2
+    },
+    {
+      "id": "dev_app_id",
+      "kind": "regex",
+      "file": ".ai/workflow/TASKS-5/plan.md",
+      "pattern": "com\\.tasks\\.app\\.dev\\b",
+      "weight": 1
+    },
+    {
+      "id": "view_id_selector",
+      "kind": "regex",
+      "file": ".ai/workflow/TASKS-5/plan.md",
+      "pattern": "task_title|task_done",
+      "weight": 1
+    },
+    {
+      "id": "done_sample",
+      "kind": "regex",
+      "file": ".ai/workflow/TASKS-5/plan.md",
+      "pattern": "tasks://task/2",
+      "weight": 1
+    },
+    {
+      "id": "spec_ui",
+      "kind": "json_contains",
+      "file": ".ai/workflow/TASKS-5/ticket-spec.json",
+      "path": "surfaces",
+      "value": "ui",
+      "weight": 1
+    },
+    {
+      "id": "layout_untouched",
+      "kind": "unchanged",
+      "file": "app/src/main/res/layout/activity_task_detail.xml",
+      "weight": 1
+    }
+  ],
+  "rubric": [
+    {
+      "id": "fits_this_repo",
+      "weight": 4,
+      "criterion": "The change set follows this repo, not notes-app: a TextView in activity_task_detail.xml with an id, its text in res/values/strings.xml, visibility set from TaskDetailActivity via view binding; Koin and TaskRepository unchanged; tests in the JUnit4 style of TaskRepositoryTest only if there is logic to test."
+    },
+    {
+      "id": "recipe",
+      "weight": 3,
+      "criterion": "Numbered device steps a Maestro flow can script: the deep link tasks://task/2 (the done sample) and tasks://task/1 (open) on com.tasks.app.dev, the view id selectors, and named captures for both states; derived from the manifest and code since there is no feature map."
+    },
+    {
+      "id": "verifiable_ac",
+      "weight": 3,
+      "criterion": "AC cover the done case (label shown) and the open case (no label), plus toggling the checkbox if the plan claims the label follows it; nothing invented beyond the ticket (wording asked or stated as an assumption)."
+    }
+  ],
+  "judge_reads": [
+    ".ai/workflow/TASKS-5/plan.md",
+    ".ai/workflow/TASKS-5/ticket-spec.json",
+    "app/src/main/res/layout/activity_task_detail.xml",
+    "app/src/main/kotlin/com/tasks/app/TaskDetailActivity.kt"
+  ]
+}

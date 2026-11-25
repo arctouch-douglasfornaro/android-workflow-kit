@@ -13,7 +13,8 @@ description: >-
 
 `EVAL` is shorthand for `python3 ~/.ai/bin/skill_eval.py`; write the full command in Bash.
 Cases live in `~/.ai/evals/cases/<id>/` (case.json, prompt, extra files), the synthetic app in
-`~/.ai/evals/fixtures/`. Scores go to `~/.cache/android-workflow/evals/history.jsonl` with the kit
+`~/.ai/evals/fixtures/` (`notes-app`: Compose, multi-module, kotlinter; `tasks-app`: Views/XML, flavors, Koin, Spotless, so a
+habit learned on one app shows up on the other). Scores go to `~/.cache/android-workflow/evals/history.jsonl` with the kit
 commit, so a change is judged against the run before it.
 
 ## Run

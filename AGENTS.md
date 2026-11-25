@@ -14,9 +14,13 @@ agents behave, and the unit tests do not see it. Before you commit such a change
    drop is expected. A smaller drop is noise until one rerun confirms it.
 3. Put the scores and their deltas in your final message to the developer.
 
-No case covers the agent you changed (today `aw-setup`, `aw-planner` (normal and `triage` mode, i.e. android-bug-triage), `aw-reviewer` (workflow and `pr` mode), `aw-implementer`, `aw-tech-lead` (mode `split`), `aw-media` (mode `pr`), `aw-device` (mode `after`, on an emulator the CLI leases; it also exercises `device-driving`), `aw-delivery` and `aw-pr-watcher` (mode `triage`) have cases, `workflow-e2e` runs the android-workflow `SKILL.md` end to end and `review-e2e` the android-review one): say so in
-that message, and add a case when the change is about behavior a case could check
-(`skills/eval-playbook/SKILL.md` → Add a case).
+No case covers the agent you changed: say so in that message, and add a case when the change is about
+behavior a case could check. Today every `aw-*` agent has a case (`aw-setup` and `aw-planner` also on the
+contrasting `tasks-app`; `aw-planner` in `triage` mode for android-bug-triage; `aw-reviewer` in workflow and
+`pr` mode; `aw-media` in `pr` mode; `aw-device` in `after` mode on a leased emulator, which also exercises
+`device-driving`; `aw-pr-watcher` in `triage` mode), and `workflow-e2e` / `review-e2e` run the android-workflow
+and android-review `SKILL.md` end to end. Not covered yet: `aw-media` mode `render`, `aw-tech-lead` mode
+`integrate`, `aw-pr-watcher` modes `reply`/`review`, `aw-device` modes `before`/`repro` (`skills/eval-playbook/SKILL.md` → Add a case).
 
 Edits to the Python CLI (`tools/android-workflow/`, `bin/*.py`) need their unit tests instead
 (README → Tests), not the evals.

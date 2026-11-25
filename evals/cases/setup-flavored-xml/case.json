@@ -1,0 +1,130 @@
+{
+  "id": "setup-flavored-xml",
+  "agent": "aw-setup",
+  "tier": "standard",
+  "fixture": "tasks-app",
+  "about": "aw-setup on a second, contrasting app (single module, Views/XML with view binding, product flavors dev/prod, Koin, Spotless) with steps profile_sections, variants and app_id: must record the flavored tasks (DevDebug), the dev debug applicationId with the flavor suffix, Koin and XML layouts in the profile, and not carry over notes-app habits (Compose, Hilt, kotlinter, :feature modules)",
+  "prepare": [
+    {
+      "do": "accept_profile"
+    },
+    {
+      "do": "cli",
+      "args": [
+        "setup",
+        "--target",
+        "{TARGET}"
+      ],
+      "as": "SETUP_JSON"
+    }
+  ],
+  "prompt_file": "prompt.md",
+  "checks": [
+    {
+      "id": "setup_ready",
+      "kind": "cli",
+      "args": [
+        "setup",
+        "--target",
+        "{TARGET}"
+      ],
+      "field": "status",
+      "value": "ready",
+      "weight": 3
+    },
+    {
+      "id": "app_id_with_flavor",
+      "kind": "json_equals",
+      "file": ".ai/android-workflow.json",
+      "path": "device.application_id",
+      "value": "com.tasks.app.dev",
+      "weight": 3
+    },
+    {
+      "id": "flavored_compile",
+      "kind": "regex",
+      "file": ".ai/android-workflow.json",
+      "pattern": "compileDevDebugKotlin",
+      "weight": 2
+    },
+    {
+      "id": "flavored_tests",
+      "kind": "regex",
+      "file": ".ai/android-workflow.json",
+      "pattern": "testDevDebugUnitTest",
+      "weight": 2
+    },
+    {
+      "id": "flavored_install",
+      "kind": "regex",
+      "file": ".ai/android-workflow.json",
+      "pattern": "installDevDebug",
+      "weight": 1
+    },
+    {
+      "id": "spotless_kept",
+      "kind": "regex",
+      "file": ".ai/android-workflow.json",
+      "pattern": "spotlessCheck",
+      "weight": 1
+    },
+    {
+      "id": "profile_koin",
+      "kind": "regex",
+      "file": ".ai/project-profile.md",
+      "pattern": "Koin",
+      "weight": 1
+    },
+    {
+      "id": "profile_views",
+      "kind": "regex",
+      "file": ".ai/project-profile.md",
+      "pattern": "XML|View ?[Bb]inding|RecyclerView",
+      "weight": 1
+    },
+    {
+      "id": "no_notes_habits",
+      "kind": "not_regex",
+      "file": ".ai/project-profile.md",
+      "pattern": "Hilt|kotlinter|:feature:|UI toolkit\\s*\\|\\s*Jetpack Compose",
+      "weight": 2
+    },
+    {
+      "id": "no_feature_map",
+      "kind": "file_absent",
+      "file": ".ai/feature-map.md",
+      "weight": 1
+    },
+    {
+      "id": "no_secrets",
+      "kind": "no_secrets",
+      "files": [
+        ".ai/project-profile.md",
+        ".ai/android-workflow.json"
+      ],
+      "weight": 1
+    }
+  ],
+  "rubric": [
+    {
+      "id": "variants_right",
+      "weight": 3,
+      "criterion": "The recorded compile/test/lint/install tasks use the dev flavor's debug variant (DevDebug) for the single :app module, and the reason for picking dev over prod is stated or evident (the dev flavor is the one with the .dev applicationId suffix for testing)."
+    },
+    {
+      "id": "profile_from_code",
+      "weight": 4,
+      "criterion": "Profile rows come from this repo's code with path:line exemplars: Activities with XML layouts and view binding, a RecyclerView adapter, Koin `module { single { \u2026 } }` and `by inject()`, Spotless with ktlint, JUnit4 tests; nothing copied from a Compose/Hilt template."
+    },
+    {
+      "id": "scope",
+      "weight": 3,
+      "criterion": "Only the requested steps were done (no feature map written, no source edited), and the return names what was recorded."
+    }
+  ],
+  "judge_reads": [
+    ".ai/project-profile.md",
+    ".ai/android-workflow.json",
+    "app/build.gradle.kts"
+  ]
+}

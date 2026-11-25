@@ -392,12 +392,12 @@ def judge(run_id: str, engine: str = "codex", model: str | None = None) -> dict[
         write_json(schema, JUDGE_SCHEMA)
         command = ["codex", "exec", "-s", "read-only", "-C", run["workdir"], "--skip-git-repo-check", "--ephemeral",
                    "--output-schema", str(schema), "-o", str(out)] + (["-m", model] if model else []) + [prompt]
-        done = subprocess.run(command, text=True, capture_output=True, check=False, timeout=1800)
+        done = subprocess.run(command, text=True, capture_output=True, check=False, timeout=900)
         text = out.read_text(encoding="utf-8") if out.is_file() else done.stdout
     elif engine == "claude":
         command = ["claude", "-p", "--output-format", "text", "--permission-mode", "plan",
                    "--allowedTools", "Read,Grep,Glob"] + (["--model", model] if model else []) + [prompt]
-        done = subprocess.run(command, text=True, capture_output=True, check=False, cwd=run["workdir"], timeout=1800)
+        done = subprocess.run(command, text=True, capture_output=True, check=False, cwd=run["workdir"], timeout=900)
         text = done.stdout
     else:
         raise ValueError("judge must be codex or claude")
