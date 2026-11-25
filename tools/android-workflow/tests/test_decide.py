@@ -569,6 +569,38 @@ class RunTests(unittest.TestCase):
             self.device_report("FAIL")
             self.assertIn("--draft", self.next()["command"])
 
+    def test_a_fail_on_device_errors_alone_replays_again_instead_of_a_fix_round(self) -> None:
+        self.visual_run()
+        with mock.patch("android_workflow.emulator.status", return_value={"status": "connected", "serial": "emu-1"}):
+            self.next()
+
+            def device_errors() -> None:
+                self.device_report("FAIL")
+                (self.rundir / "replay.json").write_text(json.dumps({
+                    "status": "failed", "phase": "after", "fingerprint": source_fingerprint(self.root),
+                    "flows": [{"flow": "a.yaml", "status": "failed", "cause": "device"},
+                              {"flow": "b.yaml", "status": "not_run"}]}), encoding="utf-8")
+
+            device_errors()
+            again = self.next()
+            self.assertEqual((again["agent"], again["mode"]), ("aw-device", "after"))
+            self.assertIn("device errors", again["note"])
+            cli("log", "--target", self.target, "--stage", "Device", "--status", "started")
+            self.assertEqual(self.next()["next"], "wait")
+            device_errors()
+            self.assertIn("--draft", self.next()["command"])
+
+    def test_a_fail_with_a_real_flow_failure_still_gets_its_fix_round(self) -> None:
+        self.visual_run()
+        with mock.patch("android_workflow.emulator.status", return_value={"status": "connected", "serial": "emu-1"}):
+            self.next()
+            self.device_report("FAIL")
+            (self.rundir / "replay.json").write_text(json.dumps({
+                "status": "partial", "phase": "after", "fingerprint": source_fingerprint(self.root),
+                "flows": [{"flow": "a.yaml", "status": "failed", "cause": "device"},
+                          {"flow": "b.yaml", "status": "failed", "cause": "step"}]}), encoding="utf-8")
+            self.assertEqual(self.next()["ids"], ["D1"])
+
     def spend_device(self, minutes: float) -> None:
         metrics = read_json(self.rundir / "stage-metrics.json")
         metrics["stages"].setdefault("T7", {})["wall_time_seconds"] = minutes * 60
@@ -724,6 +756,9 @@ done
 name=$(basename "$flow" .yaml)
 if grep -q FAILME "$flow"; then echo "Assertion is false"; exit 1; fi
 if grep -q FLAKY "$flow" && [ ! -f "$flow.seen" ]; then touch "$flow.seen"; echo "flaky"; exit 1; fi
+if grep -q FAILWHILE "$flow" && [ -f "$(dirname "$0")/fail-now" ]; then echo "Element not found: Save"; exit 1; fi
+if grep -q DEVICEDOWN "$flow"; then echo "io.grpc.StatusRuntimeException: UNAVAILABLE: io exception"; exit 1; fi
+echo "$name" >> "$(dirname "$0")/maestro-runs.log"
 mkdir -p "$out/2026/$name/takeScreenshot"
 declared=$(grep -E '^ *- *(takeScreenshot|startRecording):' "$flow" | sed 's/^[^:]*: *//')
 if [ -n "$declared" ]; then
@@ -879,6 +914,101 @@ class ReplayTests(unittest.TestCase):
         (self.flows / "a.yaml").write_text("- FLAKY\n- takeScreenshot: a-shot\n", encoding="utf-8")
         result, _ = self.replay()
         self.assertEqual((result["status"], result["flows"][0]["attempts"]), ("replayed", 2))
+
+    def runs(self) -> list[str]:
+        log = self.bin / "maestro-runs.log"
+        names = log.read_text(encoding="utf-8").split() if log.is_file() else []
+        log.unlink(missing_ok=True)
+        return names
+
+    def change_source(self, text: str) -> None:
+        (self.root / SCREEN).write_text(f"package com.example\nclass ProfileScreen {{ {text} }}\n", encoding="utf-8")
+
+    def stage_log(self) -> str:
+        return (run_dir(self.root) / "stage-log.md").read_text(encoding="utf-8")
+
+    def test_a_flow_that_fails_then_passes_on_the_retry_is_flaky_not_failed(self) -> None:
+        (self.flows / "a.yaml").write_text("- FLAKY\n- takeScreenshot: a-shot\n", encoding="utf-8")
+        result, _ = self.replay()
+        flow = result["flows"][0]
+        self.assertEqual((result["status"], flow["status"], flow["flaky"]), ("replayed", "passed", True))
+        self.assertEqual(flow["first_failure"]["cause"], "step")
+        self.assertEqual(result["flaky"], ["a.yaml"])
+        self.assertIn("1 flaky", self.stage_log())
+        health = read_json(run_dir(self.root) / "flow-health.json")["flows"]["a.yaml"]
+        self.assertEqual(health["flaky"], 1)
+
+    def test_a_flow_that_failed_and_passes_next_replay_on_the_same_build_is_flaky(self) -> None:
+        (self.flows / "a.yaml").write_text("- FAILWHILE\n- takeScreenshot: a-shot\n", encoding="utf-8")
+        (self.bin / "fail-now").touch()
+        first, _ = self.replay()
+        self.assertEqual((first["flows"][0]["status"], first["flows"][0]["cause"]), ("failed", "step"))
+        (self.bin / "fail-now").unlink()  # nothing changed in the code or the flow
+        second, _ = self.replay()
+        self.assertEqual((second["flows"][0]["status"], second["flows"][0].get("flaky")), ("passed", True))
+
+    def test_a_flow_flaky_in_two_replays_is_no_longer_run_until_it_is_edited(self) -> None:
+        (self.flows / "a.yaml").write_text("- FLAKY\n- takeScreenshot: a-shot\n", encoding="utf-8")
+        self.replay()
+        (self.flows / "a.yaml.seen").unlink()
+        self.change_source("val x = 1\n")  # a new source: the flow runs again, and is flaky again
+        self.replay()
+        (self.flows / "a.yaml.seen").unlink()
+        self.change_source("val x = 2\n")
+        self.runs()
+        third, _ = self.replay()
+        flow = third["flows"][0]
+        self.assertEqual((flow["status"], flow["flaky_count"], third["status"]), ("unstable", 2, "failed"))
+        self.assertIn("verify its AC by hand", flow["reason"])
+        self.assertEqual(self.runs(), [])
+        (self.flows / "a.yaml").write_text("- launchApp\n- takeScreenshot: a-shot\n", encoding="utf-8")
+        fourth, _ = self.replay()
+        self.assertEqual(fourth["flows"][0]["status"], "passed")
+
+    def test_device_errors_are_told_apart_and_two_in_a_row_stop_the_replay(self) -> None:
+        for name in ("a", "b", "c"):
+            (self.flows / f"{name}.yaml").write_text(f"- DEVICEDOWN\n- takeScreenshot: {name}-shot\n", encoding="utf-8")
+        result, _ = self.replay()
+        self.assertEqual([item["status"] for item in result["flows"]], ["failed", "failed", "not_run"])
+        self.assertEqual(result["flows"][0]["cause"], "device")
+        self.assertEqual(result["device_errors"], ["a.yaml", "b.yaml"])
+        self.assertIn("not on the change", result["next"])
+        self.assertIn("2 device error", self.stage_log())
+
+    def test_a_fix_round_runs_the_failed_and_changed_flows_first_and_stops_at_a_real_failure(self) -> None:
+        (self.flows / "a.yaml").write_text("- takeScreenshot: a-shot\n", encoding="utf-8")
+        (self.flows / "b.yaml").write_text("- FAILWHILE\n- takeScreenshot: b-shot\n", encoding="utf-8")
+        (self.flows / "c.yaml").write_text('- tapOn: "EditedOnLabel"\n- takeScreenshot: c-shot\n', encoding="utf-8")
+        (self.flows / "d.yaml").write_text("- takeScreenshot: d-shot\n", encoding="utf-8")
+        (self.bin / "fail-now").touch()
+        first, _ = self.replay()
+        self.assertEqual([item["status"] for item in first["flows"]], ["passed", "failed", "passed", "passed"])
+        self.assertNotIn("subset", first)  # the first replay of the run runs them all
+        self.runs()
+        self.change_source('val label = "EditedOnLabel"\n')  # the fix round: b still fails
+        second, _ = self.replay()
+        self.assertEqual(second["subset"]["first"], ["b.yaml", "c.yaml"])
+        self.assertEqual(self.runs(), [])  # b failed (twice) before any other flow ran
+        self.assertEqual([item["status"] for item in second["flows"]], ["not_run", "failed", "not_run", "not_run"])
+        self.assertIn("stopped the replay", second["next"])
+        self.assertIn("subset: 2 first", self.stage_log())
+        (self.bin / "fail-now").unlink()
+        self.change_source('val label = "EditedOnLabel" // fixed\n')
+        third, _ = self.replay()
+        self.assertEqual(third["status"], "replayed")  # the round that passes runs every flow, for the PR
+        self.assertEqual(self.runs(), ["b", "c", "a", "d"])  # failed or touched first, then the rest
+        full, _ = self.replay("--all")
+        self.assertNotIn("subset", full)
+
+    def test_an_edit_to_a_helper_reruns_only_the_flows_that_use_it(self) -> None:
+        (self.flows / "_nav.yaml").write_text("- launchApp\n", encoding="utf-8")
+        (self.flows / "_other.yaml").write_text("- launchApp\n", encoding="utf-8")
+        (self.flows / "a.yaml").write_text("- runFlow: _nav.yaml\n- takeScreenshot: a-shot\n", encoding="utf-8")
+        (self.flows / "b.yaml").write_text("- runFlow:\n    file: _other.yaml\n- takeScreenshot: b-shot\n", encoding="utf-8")
+        self.replay()
+        (self.flows / "_other.yaml").write_text("- launchApp\n- back\n", encoding="utf-8")
+        second, _ = self.replay()
+        self.assertEqual([item.get("reused", False) for item in second["flows"]], [True, False])
 
     def test_the_before_phase_runs_on_the_installed_build_and_files_under_before(self) -> None:
         (self.flows / "happy.yaml").write_text("- takeScreenshot: x-happy\n", encoding="utf-8")

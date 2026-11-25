@@ -4468,6 +4468,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                                     "its last result on this source")
     device_parser.add_argument("--fresh", action="store_true",
                                help="replay: run every flow, even one that already passed on this very build")
+    device_parser.add_argument("--all", action="store_true", dest="full",
+                               help="replay: run every flow even after one fails (a fix round's replay otherwise runs "
+                                    "the failed and changed flows first and stops at the first real failure)")
     next_parser = subparsers.add_parser("next", help="the one thing to do now, decided from the run's files")
     next_parser.add_argument("--target", required=True, type=Path)
     next_parser.add_argument("--no-device", action="store_true")
@@ -4823,7 +4826,8 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
             return result, 0 if result["status"] == "installed" else 1
         only = [name.strip() for item in args.flow for name in item.split(",") if name.strip()]
         result = replay(target, serial=args.serial, phase=args.phase,
-                        install_base_apk=True if args.install_base else None, only=only or None, fresh=args.fresh)
+                        install_base_apk=True if args.install_base else None, only=only or None, fresh=args.fresh,
+                        full=args.full)
         return result, 0 if result["status"] in {"replayed", "partial"} else 1
     if args.command == "next":
         from android_workflow.decide import next_action

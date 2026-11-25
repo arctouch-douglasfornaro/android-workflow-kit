@@ -581,7 +581,16 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
         if device_now and device_verdict == "blocked":
             return _draft("the device check is blocked: see device-report.md", state)
         fails = failed_rounds(device_state, {"fail"}, device_verdict if device_now else None, fingerprint)
-        if device_now and device_verdict == "fail":
+        if device_now and state.get("device_rerun") == fingerprint and device_state.get("status") == "started":
+            return _answer("wait", "the Device agent is replaying again after device errors", agent="aw-device")
+        rerun = replay_not_the_change(agent_dir, fingerprint) if device_now and device_verdict == "fail" else None
+        if rerun and state.get("device_rerun") == fingerprint:
+            return _draft(f"the device failed twice on this source on device errors, not on the change ({rerun})", state)
+        if rerun and not stop:
+            # Maestro's driver or adb failed every flow: a fix round would change code that nothing showed broken.
+            if record:
+                _mark_state(target, "device_rerun", fingerprint)
+        elif device_now and device_verdict == "fail":
             if fails >= DEVICE_MAX_FAILS:
                 return _draft(f"the device check failed {fails} times", state)
             if stop:
@@ -590,7 +599,7 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
                 return _draft("a fix round ended without changing the code", state)
             return _fix_round(agent_dir, team, ["D1"], review, "the device check failed", fingerprint,
                               sources=["device-report.md"])
-        if device_state.get("status") == "started":
+        if device_state.get("status") == "started" and not rerun:
             return _answer("wait", "the Device agent is working", agent="aw-device")
         if no_device:
             if proof["mode"] == "both":
@@ -616,7 +625,8 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
                            replay=_replay_hint(agent_dir),
                            scaffold=None if flows_saved(agent_dir) else "CLI device scaffold --target TARGET",
                            budget_seconds=EXPRESS_AFTER_SECONDS if level == "express" else AFTER_BUDGET_SECONDS,
-                           note="after, express: one capture of the changed screen per AC, no clips"
+                           note=f"after, again: {rerun}; replay once more and judge only what it shows"
+                           if rerun else "after, express: one capture of the changed screen per AC, no clips"
                            if level == "express" else "after: verify the AC on the device")
             if proof["mode"] == "both" and render.verdict_now(target) is None:
                 # The states the device cannot reach are rendered meanwhile: no wall time added.
@@ -1074,12 +1084,31 @@ def _skip_before(target: Path, reason: str, record: bool = True) -> None:
 
 
 def _mark_before(target: Path, value: str) -> None:
+    _mark_state(target, "device_before", value)
+
+
+def _mark_state(target: Path, key: str, value: str) -> None:
     from android_workflow.cli import load_state, run_lock, save_state
 
     with run_lock(target):
         state = load_state(target)
-        state["device_before"] = value
+        state[key] = value
         save_state(target, state)
+
+
+def replay_not_the_change(agent_dir: Path, fingerprint: str | None) -> str | None:
+    """Why a Device FAIL of this source stands on the device rather than the change, or None: the last
+    `after` replay of this source ran no flow to a pass and every flow it failed, failed on a device
+    error (Maestro's driver, adb), with no step or crash failure. Then one more device round, not a fix."""
+    replayed = _read(agent_dir / "replay.json")
+    if replayed.get("phase") != "after" or not fingerprint or replayed.get("fingerprint") != fingerprint:
+        return None
+    flows = [item for item in replayed.get("flows") or [] if isinstance(item, dict)]
+    failed = [item for item in flows if item.get("status") == "failed"]
+    if not failed or any(item.get("cause") != "device" for item in failed) \
+            or any(item.get("status") == "passed" and not item.get("reused") for item in flows):
+        return None
+    return f"{len(failed)} flow(s) failed on device errors (Maestro or adb) and none passed in the last replay"
 
 
 def flows_saved(agent_dir: Path) -> bool:

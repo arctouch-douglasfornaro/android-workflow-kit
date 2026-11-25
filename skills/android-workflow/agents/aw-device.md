@@ -133,13 +133,22 @@ the behavior only a running app shows.
    replay of this very source with a flow passed (`log` refuses it otherwise).
    `after` with saved flows (the orchestrator passes `replay`): run `CLI device replay --target TARGET
    --serial <serial>` first, before anything else. It installs the current build and re-runs every flow in
-   `RUN/media/flows/` by code (a failing flow is rerun once; on the base build it is not), files the captures under `media/after/`
+   `RUN/media/flows/` by code (a failing flow is rerun once from a clean app; on the base build it is not), files the captures under `media/after/`
    with the names the flows declare and writes `media/compare.md` and `RUN/replay.json` (time per flow,
    `install_seconds`, `over_budget`). `replayed` → skip steps 3, 5 and 6 (navigation, capture
    and compare are done) and judge the AC in step 4 from those files (open only the `after` captures
    you need); drive by hand only an AC no flow reaches or one that needs logcat. `partial` → drive only
    the failed flows, and fix those flows for the next round. `failed`, `install_failed`, `no_maestro` →
-   the normal path below (then save the flows you drove, so the next round replays). A replay is
+   the normal path below (then save the flows you drove, so the next round replays). Each failed flow
+   has a `cause`: `step` or `timeout` (the screen was not as the flow expects: the change or the flow
+   is wrong), `app_crash`, or `device` (Maestro's driver or adb, never the change). A `flaky` flow failed
+   and then passed with nothing changed: its captures are evidence, note it under Anomalies, never a FAIL.
+   An `unstable` flow (flaky twice) is no longer run: verify its AC by hand or list it under Not
+   verified. Flows that failed only on `device` are never a FAIL: replay once more, then report what
+   stays unverified. In a fix round the replay runs the flows that failed or that the change touched
+   first and stops at the first real failure: the others are `not_run`, so judge that failure (FAIL
+   when the change is at fault; a flow you fix, replay with `--flow`) and never drive the `not_run`
+   ones by hand; the round that passes runs them all (`--all` runs them all whatever fails). A replay is
    evidence, never a verdict by itself. Hand-driving is capped: at most 12 device steps for what no flow
    reaches, never with coordinates or fixed sleeps; past the budget, finish the check in hand and list
    every AC still open under Not verified with the reason. Only when Maestro truly cannot run here
@@ -180,7 +189,8 @@ the behavior only a running app shows.
 6. `after` only: `CLI evidence compare --target TARGET`. Its `unpaired` names have no capture in the
    other phase: when they show the same screen, ingest the `after` file again under the `before`
    name (`--name <before name>`) and delete the old `after` file, so the PR table pairs them.
-7. Real failure: rerun once. Second failure = FAIL (first failure only = flaky, note it).
+7. Hand-driven failure: rerun once. Second failure = FAIL (first failure only = flaky, note it under
+   Anomalies). Replayed flows are already rerun by the CLI: read their `status` and `cause` instead.
 8. Teach the next run what you had to find out. A surface you reached whose route the feature map
    lacks or has wrong: write its row (same columns as the map's `## Surfaces`, the route that worked,
    the selectors that proved arrival, `Source` as `path:line`) to `RUN/feature-map-rows.md` and run

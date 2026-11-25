@@ -74,17 +74,112 @@ def _digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+HELPER_REF_RE = re.compile(r"(?<![\w.-])(_[\w.-]+\.ya?ml)\b")
+
+
+def _own_files(flow: Path) -> list[Path]:
+    return [flow, *(flow.with_suffix(ext) for ext in (".yaml", ".yml"))] if flow.suffix == ".sh" else [flow]
+
+
+def helpers(flow: Path) -> list[Path]:
+    """The `_helpers` a flow pulls in (`runFlow: _nav.yaml`, or named in its `.sh`), and the ones those
+    pull in. An edit to a helper reruns only the flows that use it."""
+    found: dict[str, Path] = {}
+    todo = [path for path in _own_files(flow) if path.is_file()]
+    while todo:
+        try:
+            text = todo.pop().read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for name in HELPER_REF_RE.findall(text):
+            helper = flow.parent / name
+            if name not in found and helper.is_file():
+                found[name] = helper
+                todo.append(helper)
+    return sorted(found.values())
+
+
 def flow_digest(flow: Path) -> str:
-    """What a flow runs: its own files and every `_helper` beside it (a fix often lands in a helper)."""
+    """What a flow runs: its own files and the `_helpers` it uses (a fix often lands in a helper)."""
     sha = hashlib.sha256()
-    parts = [flow, *(flow.with_suffix(ext) for ext in (".yaml", ".yml"))] if flow.suffix == ".sh" else [flow]
-    for path in [*parts, *sorted(flow.parent.glob("_*"))]:
+    for path in [*_own_files(flow), *helpers(flow)]:
         if path.is_file():
             sha.update(path.name.encode() + b"\0" + path.read_bytes())
     return sha.hexdigest()[:16]
 
 
 STALE_FAILS = 2  # an unchanged flow that failed this many replays on an unchanged source is not run again
+UNSTABLE_FLAKES = 2  # an unchanged flow flaky in this many replays is no longer run: its AC is checked by hand
+FLOW_HEALTH_FILE = "flow-health.json"  # RUN/: how often each flow (per digest) was flaky, across sources
+DEVICE_ERRORS_IN_A_ROW = 2  # this many flows in a row failing on device errors stop the replay
+MAESTRO_DRIVER_PACKAGES = ("dev.mobile.maestro", "dev.mobile.maestro.test")
+# The device or Maestro failed, not the app: gRPC statuses of Maestro's driver and adb's own errors.
+DEVICE_ERROR_RE = re.compile(r"\bUNAVAILABLE\b|DEADLINE_EXCEEDED|io\.grpc\.|device offline|device '[^']*' not found|"
+                             r"no devices/emulators found|Failed to connect to|Connection refused|ECONNRESET|"
+                             r"Maestro driver|driver (?:did not|failed to) start|Timed out waiting for (?:the )?driver")
+APP_CRASH_RE = re.compile(r"App crashed|FATAL EXCEPTION|keeps stopping|isn't responding")
+SELECTOR_RE = re.compile(r"^\s*-?\s*(?:id|text|tapOn|assertVisible|assertNotVisible|doubleTapOn|longPressOn|"
+                         r"scrollUntilVisible|copyTextFrom)\s*:\s*['\"]?([^'\"\n#{}]+?)['\"]?\s*(?:#.*)?$", re.M)
+
+
+def failure_cause(code: int, log_text: str) -> str:
+    """Why a flow failed: `app_crash` (the app died), `device` (Maestro's driver or adb, not the app),
+    `timeout` (the flow ran past its limit) or `step` (a step found the screen not as the flow expects)."""
+    if APP_CRASH_RE.search(log_text):
+        return "app_crash"
+    if code == 126 or DEVICE_ERROR_RE.search(log_text):
+        return "device"
+    return "timeout" if code == 124 else "step"
+
+
+def selectors(flow: Path) -> set[str]:
+    """The ids and texts a flow's own files look for (not its shared helpers): what ties it to the code."""
+    found: set[str] = set()
+    for path in _own_files(flow):
+        try:
+            text = path.read_text(encoding="utf-8") if path.is_file() and path.suffix != ".sh" else ""
+        except OSError:
+            continue
+        for raw in SELECTOR_RE.findall(text):
+            value = raw.strip().rsplit("/", 1)[-1]  # `com.app:id/save` -> `save`
+            for piece in re.split(r"[.*+?^$()\[\]|\\]+", value):
+                if len(piece.strip()) >= 3:
+                    found.add(piece.strip())
+    return found
+
+
+def changed_text(target: Path, since_tree: str | None, now_tree: str | None) -> str | None:
+    """The lines added or removed between two snapshots of the tree (`git diff -U0`), or None."""
+    if not since_tree or not now_tree or since_tree == now_tree:
+        return "" if since_tree and since_tree == now_tree else None
+    try:
+        diff = subprocess.run(["git", "-C", str(target), "diff", "-U0", "--no-color", since_tree, now_tree],
+                              text=True, capture_output=True, check=False, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if diff.returncode != 0:
+        return None
+    return "\n".join(line for line in diff.stdout.splitlines()
+                     if line.startswith(("+", "-")) and not line.startswith(("+++", "---")) or line.startswith("diff --git"))
+
+
+def affected(saved: list[Path], diff: str | None) -> list[str]:
+    """The flows whose ids or texts the change touched (they show the changed screen): run first."""
+    if not diff:
+        return []
+    return [flow.name for flow in saved if any(selector in diff for selector in selectors(flow))]
+
+
+def _reset_device(serial: str, app: str | None) -> None:
+    """Before a retry: stop the app and Maestro's driver, so the second attempt starts clean (a stuck
+    driver fails every step the same way)."""
+    adb = _adb()
+    for package in ([app] if app else []) + list(MAESTRO_DRIVER_PACKAGES):
+        try:
+            subprocess.run([adb, "-s", serial, "shell", "am", "force-stop", package], capture_output=True,
+                           stdin=subprocess.DEVNULL, timeout=15, check=False)
+        except (OSError, subprocess.SubprocessError):
+            pass
 OPEN_LINK_RE = re.compile(r"^\s*-\s*openLink\b", re.M)
 LAUNCH_APP_RE = re.compile(r"^\s*-\s*launchApp\b", re.M)
 
@@ -92,7 +187,7 @@ LAUNCH_APP_RE = re.compile(r"^\s*-\s*launchApp\b", re.M)
 def flow_hints(flow: Path, log_text: str) -> list[str]:
     """Known causes of a failed flow that the flow text or its log already show."""
     hints = []
-    for path in [flow.with_suffix(".yaml"), flow.with_suffix(".yml"), *sorted(flow.parent.glob("_*.y*ml"))]:
+    for path in [flow.with_suffix(".yaml"), flow.with_suffix(".yml"), *helpers(flow)]:
         try:
             text = path.read_text(encoding="utf-8") if path.is_file() else ""
         except OSError:
@@ -383,7 +478,8 @@ def _run_flow(flow: Path, maestro: str, serial: str, folder: Path, target: Path,
 
 
 def replay(target: Path, serial: str | None = None, phase: str = "after", install_base_apk: bool | None = None,
-           lease_timeout: float = 1200.0, only: list[str] | None = None, fresh: bool = False) -> dict[str, Any]:
+           lease_timeout: float = 1200.0, only: list[str] | None = None, fresh: bool = False,
+           full: bool = False) -> dict[str, Any]:
     """Run every saved flow and file what it captured under `media/<phase>/`, holding the device's
     lease the whole time (another run's Device stage waits, and so does this replay for theirs).
 
@@ -394,7 +490,13 @@ def replay(target: Path, serial: str | None = None, phase: str = "after", instal
 
     A flow that passed on this very build (same source, same APK, same flow files) and whose captures are
     still filed is not run again (`reused`); `fresh` runs every flow. `only` runs just those flows (names
-    with or without the extension) and keeps every other flow's last result."""
+    with or without the extension) and keeps every other flow's last result.
+
+    On a new source after an `after` replay (a fix round), the flows that failed last time and the ones
+    whose ids or texts the change touched run first, and the first real failure stops the replay: the
+    rest are `not_run` until it passes, and the round that passes runs them all for the PR. `full` runs
+    every flow whatever fails. A flow that fails and then passes with nothing changed is `flaky`, never a
+    failure; flaky in `UNSTABLE_FLAKES` replays, it is `unstable` and no longer run."""
     spent = device_budget_stop(target)
     if spent:
         return spent
@@ -427,7 +529,7 @@ def replay(target: Path, serial: str | None = None, phase: str = "after", instal
         if not held:
             return {"status": "device_busy", "serial": serial,
                     "reason": f"another run kept {serial} for over {int(lease_timeout)}s"}
-        return _replay(target, serial, phase, install_base_apk, built, only=only, fresh=fresh)
+        return _replay(target, serial, phase, install_base_apk, built, only=only, fresh=fresh, full=full)
 
 
 def _kept_results(saved: list[Path], earlier: dict[str, Any], phase: str, filed: Path, only: list[str] | None,
@@ -457,8 +559,9 @@ def _kept_results(saved: list[Path], earlier: dict[str, Any], phase: str, filed:
 
 
 def _replay(target: Path, serial: str, phase: str, install_base_apk: bool | None,
-            built: dict[str, Any] | None = None, only: list[str] | None = None, fresh: bool = False) -> dict[str, Any]:
-    from android_workflow.cli import append_stage_log, read_json, source_fingerprint
+            built: dict[str, Any] | None = None, only: list[str] | None = None, fresh: bool = False,
+            full: bool = False) -> dict[str, Any]:
+    from android_workflow.cli import append_stage_log, read_json, snapshot_tree, source_fingerprint
     from android_workflow.evidence import compare, ingest
 
     agent_dir = run_dir(target)
@@ -511,9 +614,23 @@ def _replay(target: Path, serial: str, phase: str, install_base_apk: bool | None
     declared = {flow.name: declared_names(flow) for flow in saved}
     build_id = str(base) if base is not None else str((built or {}).get("sha256") or "")
     previous_id = str(previous.get("base_apk") or "") if phase == "before" else str(previous.get("sha256") or "")
-    kept = _kept_results(saved, earlier, phase, media_dir(target) / phase, only=only, fresh=fresh,
-                         # after: `earlier` already means the same source; before: the same base APK
-                         same_build=build_id == previous_id and (phase == "after" or bool(build_id)))
+    # after: `earlier` already means the same source; before: the same base APK
+    same_build = build_id == previous_id and (phase == "after" or bool(build_id))
+    kept = _kept_results(saved, earlier, phase, media_dir(target) / phase, only=only, fresh=fresh, same_build=same_build)
+    tree = snapshot_tree(target) if phase == "after" else None
+    # A fix round (a new source after an `after` replay): what failed and what the change touched first.
+    subset = phase == "after" and not only and not full and previous.get("phase") == "after" \
+        and bool(previous.get("fingerprint")) and previous.get("fingerprint") != fingerprint
+    first: list[str] = []
+    if subset:
+        failed_last = {item.get("flow") for item in previous.get("flows") or []
+                       if isinstance(item, dict) and item.get("status") in {"failed", "unstable"}}
+        touched = affected(saved, changed_text(target, previous.get("tree"), tree))
+        first = [flow.name for flow in saved if flow.name in failed_last or flow.name in touched]
+    order = sorted(saved, key=lambda flow: (flow.name not in first, flow.name))
+    health_path = agent_dir / FLOW_HEALTH_FILE
+    health = (read_json(health_path) if health_path.is_file() else {}).get("flows") or {}
+    app = str(device_config.get("application_id") or "") or None
     for folder in out.iterdir():  # a flow that runs again starts from an empty folder
         if folder.is_dir() and folder.name not in {Path(name).stem for name in kept}:
             shutil.rmtree(folder, ignore_errors=True)
@@ -524,14 +641,29 @@ def _replay(target: Path, serial: str, phase: str, install_base_apk: bool | None
     keep_names = {name for item in kept.values() for name in item.get("captured") or []}
     _drop_phase(target, phase, [name for name in owned if name not in keep_names])  # what runs again is captured again
     results = []
-    for flow in saved:
+    stopped: str | None = None
+    device_errors = 0
+    for flow in order:
         if flow.name in kept:
             results.append({**kept[flow.name], "reused": True, "seconds": 0.0})
             continue
+        digest = flow_digest(flow)
+        if stopped:
+            results.append({"flow": flow.name, "status": "not_run", "digest": digest, "captured": [], "attempts": 0,
+                            "seconds": 0.0, "reason": stopped})
+            continue
         folder = out / flow.stem
         folder.mkdir(parents=True, exist_ok=True)
-        digest = flow_digest(flow)
         last = earlier.get(flow.name) or {}
+        flakes = int((health.get(flow.name) or {}).get("flaky") or 0) \
+            if (health.get(flow.name) or {}).get("digest") == digest else 0
+        if phase == "after" and flakes >= UNSTABLE_FLAKES:
+            # It failed and then passed with nothing changed, again: its result says nothing about the change.
+            results.append({"flow": flow.name, "status": "unstable", "skipped": True, "digest": digest,
+                            "flaky_count": flakes, "captured": [], "attempts": 0, "seconds": 0.0,
+                            "reason": f"flaky in {flakes} replays: not scripted any more; verify its AC by hand "
+                                      "(or list it under Not verified) or repair the flow, an edit runs it again"})
+            continue
         streak = int(last.get("failed_streak") or 0) if last.get("digest") == digest else 0
         if streak >= STALE_FAILS:
             # Same flow, same source: a third run fails the same way. Only an edit to the flow (or the code) reruns it.
@@ -543,9 +675,13 @@ def _replay(target: Path, serial: str, phase: str, install_base_apk: bool | None
         flow_started = time.monotonic()
         code, log = _run_flow(flow, maestro, serial, folder, target, phase, flow_timeout)
         attempts = 1
-        # A real failure on the new build is rerun once (the first alone was flaky). On the base build a flow
-        # that looks for the new UI fails by design, so a second attempt only doubles the wait.
+        first_failure: dict[str, Any] | None = None
+        # A real failure on the new build is rerun once, from a clean app and Maestro driver. On the base
+        # build a flow that looks for the new UI fails by design, so a second attempt only doubles the wait.
         if code != 0 and phase == "after":
+            first_failure = {"exit_code": code, "cause": failure_cause(code, _tail(Path(log), 200)),
+                             "log_tail": _tail(Path(log), 8)}
+            _reset_device(serial, app)
             code, log = _run_flow(flow, maestro, serial, folder, target, phase, flow_timeout)
             attempts = 2
         allowed = set(declared[flow.name]) | (set(known) if phase == "after" else set())
@@ -563,14 +699,34 @@ def _replay(target: Path, serial: str, phase: str, install_base_apk: bool | None
         status = "passed" if code == 0 and (captured or metrics or events or phase == "before" and not allowed) else \
             "partial" if phase == "before" and captured else "failed"
         hints = flow_hints(flow, _tail(Path(log), 200)) if status == "failed" else []
+        cause = (failure_cause(code, _tail(Path(log), 200)) if code else "step") if status == "failed" else None
+        # Failed, then passed with nothing changed: in this replay (the retry) or since the last one on this build.
+        flaky = phase == "after" and status == "passed" and (first_failure is not None or (
+            same_build and last.get("digest") == digest and last.get("status") == "failed" and not last.get("skipped")))
+        if flaky:
+            health[flow.name] = {"digest": digest, "flaky": flakes + 1}
         results.append({"flow": flow.name, "status": status, "exit_code": code, "captured": captured,
                         "digest": digest, **({"failed_streak": streak + 1} if status == "failed" else {}),
+                        **({"cause": cause} if cause else {}),
+                        **({"flaky": True, "flaky_count": flakes + 1} if flaky else {}),
+                        **({"first_failure": first_failure} if flaky and first_failure else {}),
                         **({"hints": hints} if hints else {}),
                         "attempts": attempts, "seconds": round(time.monotonic() - flow_started, 1),
                         **({"frames": metrics} if metrics else {}),
                         **({"events": events} if events else {}),
                         **({"log_tail": _tail(Path(log))} if code else {}),
                         **({"reason": "the flow captured nothing it declares"} if code == 0 and not captured and status == "failed" else {})})
+        if phase == "after" and status == "failed":
+            device_errors = device_errors + 1 if cause == "device" else 0
+            if device_errors >= DEVICE_ERRORS_IN_A_ROW:
+                stopped = f"{device_errors} flows in a row failed on device errors (Maestro or adb, not the app)"
+            elif subset and cause != "device":
+                stopped = f"{flow.name} failed ({cause}): the other flows run once it passes"
+        elif status == "passed":
+            device_errors = 0
+    results.sort(key=lambda item: str(item.get("flow")))
+    if phase == "after":
+        health_path.write_text(json.dumps({"flows": health}, indent=2) + "\n", encoding="utf-8")
     expected_after = owned if phase == "after" else sorted({name for names in declared.values() for name in names})
     target_dir = after if phase == "after" else before
     identical = sorted(
@@ -582,12 +738,22 @@ def _replay(target: Path, serial: str, phase: str, install_base_apk: bool | None
     if phase == "before":  # before evidence is whatever the base build could show
         passed = sum(item["status"] in {"passed", "partial"} for item in results)
     status = "replayed" if passed == len(results) else "partial" if passed else "failed"
+    named = {kind: [str(item["flow"]) for item in results if test(item)] for kind, test in {
+        "flaky": lambda item: item.get("flaky") and not item.get("reused"),
+        "failed": lambda item: item.get("status") == "failed" and item.get("cause") != "device",
+        "device_errors": lambda item: item.get("status") == "failed" and item.get("cause") == "device",
+        "not_run": lambda item: item.get("status") == "not_run",
+        "unstable": lambda item: item.get("status") == "unstable",
+    }.items()}
     total = round(time.monotonic() - started, 1)
     build_seconds = 0.0 if (built or {}).get("cached") else float((built or {}).get("build_seconds") or 0)
     flows_seconds = round(total - install_seconds, 1)
     result = {
         "status": status, "phase": phase, "serial": serial, "fingerprint": fingerprint,
-        "flows": results, "identical_to_before": identical, "missing_from_after" if phase == "after" else "missing": missing,
+        "flows": results, **{key: value for key, value in named.items() if value},
+        **({"subset": {"first": first, "stopped": stopped}} if subset else {}),
+        **({"tree": tree} if tree else {}),
+        "identical_to_before": identical, "missing_from_after" if phase == "after" else "missing": missing,
         "build_seconds": build_seconds, "install_seconds": install_seconds, "flows_seconds": flows_seconds,
         "duration_seconds": total, "budget_seconds": budget,
         **({"base_apk": str(base)} if base is not None else {}),
@@ -602,15 +768,27 @@ def _replay(target: Path, serial: str, phase: str, install_base_apk: bool | None
             "failed": "no flow ran: drive the app by hand and fix the flows",
         }[status],
     }
+    if named["device_errors"] and not named["failed"] and not any(item.get("cause") == "app_crash" for item in results):
+        result["next"] = ("the flows failed on device errors (Maestro or adb), not on the change: replay again once "
+                          "(the CLI resets the app and the driver); never a FAIL on them, list them under Not verified")
+    elif named["not_run"]:
+        result["next"] = ("a flow failed and stopped the replay: judge the failure (FAIL when the change is at fault, "
+                          "or fix the flow and replay it with --flow); the not_run flows run once it passes. Never "
+                          "drive them by hand this round")
     compare(target)
     if phase == "after" and status == "replayed":
         from android_workflow.flows import remember
 
         result["library"] = remember(target)  # the next ticket on this screen copies these flows
     result_file.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    labels = {"failed": "failed", "device_errors": "device error", "flaky": "flaky", "unstable": "unstable",
+              "not_run": "not run after a failure"}
+    counts = [f"{len(named[key])} {label}" for key, label in labels.items() if named[key]]
+    if subset:
+        counts.insert(0, f"subset: {len(first)} first" if first else "subset")
     note = f"{passed}/{len(results)} flow(s) {'replayed on the new build' if phase == 'after' else 'run on the base build'}" \
-           f" in {flows_seconds}s" + (f" (build {build_seconds}s before the device, install {install_seconds}s)"
-                                      if phase == "after" else "")
+           f" in {flows_seconds}s" + (f" ({'; '.join(counts)})" if counts else "") \
+           + (f" (build {build_seconds}s before the device, install {install_seconds}s)" if phase == "after" else "")
     append_stage_log(agent_dir, "T7", "replayed" if phase == "after" else "flows_ready", "cli", note)
     return result
 
