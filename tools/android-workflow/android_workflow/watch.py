@@ -1223,6 +1223,17 @@ ASK_REASONS = {
 AUTO_REPLY_RULE = re.compile(
     r"auto[- ]?(?:reply|replies|replying|respond)|(?:reply|replies|respond|answer)\w*\s+automatically"
     r"|never\s+(?:auto[- ]?)?reply\s+to\s+(?:a\s+)?human", re.I)
+# A `change` whose `what` still waits on someone ("types depend on the web-alignment decision", "once we
+# decide", "TBD", a question): the watcher returned a question in disguise and the round stalled on it.
+OPEN_DECISION = re.compile(
+    r"\?|\bTBD\b|to be decided|\bdepend(?:s|ing)? on (?:the |a |our |your )?[\w\s-]{0,40}decision"
+    r"|\b(?:once|after|when|until) (?:we|you|the team|product|they) (?:decide|agree|align|confirm)"
+    r"|\bpending (?:a |the )?[\w\s-]{0,30}(?:decision|answer|alignment|confirmation)", re.I)
+# What the host does after an `ok` triage: every change goes into the fix round at once, with no
+# confirmation, whatever the watcher's own return text says.
+AFTER_TRIAGE = ("start the fix round now with every `changes` entry (`CLI next`), then deliver and resume the "
+                "watcher in mode reply: no confirmation, and never relay a question from the watcher's return "
+                "text; only the `ask_user` entries go to the developer, one per prompt, while the round runs")
 
 
 def check_feedback(target: Path) -> tuple[dict[str, Any], int]:
@@ -1246,8 +1257,14 @@ def check_feedback(target: Path) -> tuple[dict[str, Any], int]:
         decided.setdefault(str(item_id), []).append(where)
 
     for change in feedback.get("changes") or []:
-        if not str(change.get("what") or "").strip():
+        what = str(change.get("what") or "").strip()
+        if not what:
             errors.append(f"change {change.get('id')} has no `what`")
+        elif OPEN_DECISION.search(what):
+            errors.append(f"change {change.get('id')} waits on a decision (`{what[:120]}`): a change is made now. "
+                          "Settle it from the code, the ticket, the AC or the reviewer's comment and write the "
+                          "option you took; only when they all leave it open, make it an `ask_user` `product` "
+                          "with your recommendation and keep the rest as changes")
         for item_id in change.get("items") or []:
             note(item_id, f"change {change.get('id')}")
     for key in ("answered", "skipped"):
@@ -1298,6 +1315,12 @@ def check_feedback(target: Path) -> tuple[dict[str, Any], int]:
     }
     if errors:
         result["errors"] = errors
+        result["then"] = "resume aw-pr-watcher with these errors; never pass them to the developer"
+    elif result["changes"]:
+        result["then"] = AFTER_TRIAGE
+    elif asks:
+        result["then"] = ("ask each `ask_user` entry, one per prompt, with its recommendation as the default, "
+                          "and keep `CLI pr wait` running meanwhile")
     return result, 1 if errors else 0
 
 

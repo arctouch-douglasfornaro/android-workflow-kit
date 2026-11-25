@@ -435,6 +435,29 @@ class FeedbackCheckTests(unittest.TestCase):
         self.assertIn("['C3']: a repo rule against auto-replying is not a reason to ask", errors)
         self.assertNotIn("['C2']: a repo rule", errors)
 
+    def test_a_change_that_waits_on_a_decision_is_refused(self) -> None:
+        for what in ("Pin the 4 new fields (types depend on the web-alignment decision)",
+                     "Share one steps function once we decide the order", "Ints or strings?", "Rename it, TBD"):
+            with self.subTest(what=what), AndroidProject() as root:
+                finished_run(root)
+                self.setup(root, {"changes": [{"id": "PR-1", "items": ["C1", "C2", "C3", "ci:abc:lint"], "what": what}]},
+                           ci={"ci:abc:lint": "ours"})
+                result, code = watch.check_feedback(root)
+            self.assertEqual(code, 1, what)
+            self.assertIn("PR-1 waits on a decision", "\n".join(result["errors"]))
+            self.assertIn("never pass them to the developer", result["then"])
+
+    def test_an_ok_triage_with_changes_tells_the_host_to_start_the_fix_round_without_asking(self) -> None:
+        with AndroidProject() as root:
+            finished_run(root)
+            self.setup(root, {"changes": [{"id": "PR-1", "items": ["C1", "C2", "C3", "ci:abc:lint"],
+                                           "what": "pin the 4 fields as ints, as web logs them"}]},
+                       ci={"ci:abc:lint": "ours"})
+            result, code = watch.check_feedback(root)
+        self.assertEqual(code, 0, result)
+        self.assertIn("no confirmation", result["then"])
+        self.assertIn("never relay a question", result["then"])
+
 
 class NextStepTests(unittest.TestCase):
     def test_status_and_wait_end_with_the_command_that_keeps_the_loop_going(self) -> None:
