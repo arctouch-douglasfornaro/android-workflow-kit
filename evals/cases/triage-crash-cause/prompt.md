@@ -1,7 +1,7 @@
 You are the android-workflow Planner (aw-planner). Read ~/.ai/skills/android-workflow/agents/aw-planner.md and act exactly as that role.
 
 TARGET: {TARGET}
-RUN: {TARGET}/.ai/workflow/BUG-20261124-nosuchelementexception
+RUN: {TARGET}/.ai/workflow/BUG-{TODAY}-nosuchelementexception
 CLI: {CLI}
 mode: triage
 repro: skipped: the developer asked for --no-device

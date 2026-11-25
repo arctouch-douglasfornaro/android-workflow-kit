@@ -84,8 +84,17 @@ def stage_plan(target: Path) -> tuple[list[str], list[str]]:
     return sorted(dict.fromkeys(include)), sorted(dict.fromkeys(left_out))
 
 
-def pull_request_disclosures(gate: dict[str, Any], state: dict[str, Any], body: str) -> list[str]:
-    """Lines the PR must carry that its author may not have written: draft issues, waived lint, skipped device."""
+def out_of_scope(plan: str) -> list[str]:
+    """The bullets of plan.md's `Out of scope` section, minus the stub's own line."""
+    match = re.search(r"^#+\s*Out of scope\s*$(.*?)(?=^#|\Z)", plan, re.M | re.S | re.I)
+    items = [line.strip()[2:].strip().rstrip(".") for line in (match.group(1) if match else "").splitlines()
+             if line.strip().startswith(("- ", "* "))]
+    return [item for item in items if item and "outside `change-set-map.json`" not in item]
+
+
+def pull_request_disclosures(gate: dict[str, Any], state: dict[str, Any], body: str, plan: str = "") -> list[str]:
+    """Lines the PR must carry that its author may not have written: draft issues, waived lint, skipped
+    device, what was assumed, and the plan's out-of-scope follow-ups."""
     lower = body.lower()
     lines = []
     draft = state.get("draft") or {}
@@ -99,8 +108,15 @@ def pull_request_disclosures(gate: dict[str, Any], state: dict[str, Any], body: 
         lines.append(
             f"**Lint:** {findings} finding(s) in {files} file(s) this PR does not touch predate it and were left as is."
         )
+    assumed = state.get("assumed") or []
+    if assumed and "assumed" not in lower:
+        lines.append("**Assumed (the workflow took the default instead of asking):**")
+        lines.extend(f"- {item.get('question')} → {item.get('answer')}" for item in assumed)
     if state.get("device_partial") and "not verified" not in lower:
         lines.append(f"**Device:** partly verified; not verified on a device: {state['device_partial']}")
+    follow_ups = out_of_scope(plan)
+    if follow_ups and "out of scope" not in lower:
+        lines.append("Follow-up / out of scope: " + "; ".join(follow_ups) + ".")
     rendered = state.get("render") or {}
     if rendered.get("verdict") in {"pass", "partial"} and "render" not in lower:
         if rendered.get("mode") == "render":
@@ -510,7 +526,9 @@ def deliver(
             visual(spec), source_changes(target))
         if checklist:
             result["checklist"] = checklist
-    disclosures = pull_request_disclosures(gate, state, text)
+    plan_path = agent_dir / "plan.md"
+    disclosures = pull_request_disclosures(gate, state, text,
+                                           plan_path.read_text(encoding="utf-8") if plan_path.is_file() else "")
     if disclosures:
         text = text.rstrip() + "\n\n" + "\n".join(disclosures) + "\n"
     credit = attribution(target)

@@ -23,13 +23,14 @@ the whole project again.
 |---|---|
 | `profile` | Everything under Work below (missing, never accepted, or `--force`) |
 | `profile_delta` | Only what its `why` names. `build_changed`: read `changed_build_files` and fix the rows they affect (a new module's tasks, a plugin, a flavor); `profile_edited`: `diff` `accepted_snapshot` against the profile and confirm each changed row from a file (keep a correct human edit, fix a wrong one); `cited_file_missing`: point each row at the file's new place (`cited_files_missing`) |
-| `profile_sections` | Fill only the empty `sections` (Work steps 1, 6, 7 as they apply) |
+| `profile_sections` | Fill only the empty `sections` (Work steps 1, 6, 7 as they apply). Lint engine is Work step 1 whole: its formatter check and apply tasks also go to `.ai/android-workflow.json` (`format_check`, `format_apply`), not only to the profile row |
 | `variants` | Work step 3 only |
 | `formatter` | The formatter half of Work step 1 only |
 | `app_id` | Work step 4, the applicationId and launch entry only |
 | `feature_map` | Feature map, below. Nothing else, and no `--accept` |
 
-Profile steps end with `CLI setup --target TARGET --accept` (it refuses while one is unresolved).
+Every step but `feature_map` (`app_id` and `variants` included) ends with `CLI setup --target TARGET --accept`
+(it refuses while one is unresolved: fix what its `reasons` name, within your steps, then accept again).
 
 ## Feature map (step `feature_map`)
 
@@ -81,7 +82,10 @@ activities and the files that build a navigation graph. Run it with `--init` whe
 3. **Variants.** With product flavors, find the variant CI/devs use (CI config, README,
    `gradle.properties`) and record exact tasks: `compile<Variant>Kotlin`,
    `test<Variant>UnitTest`, `lint<Variant>`, `install<Variant>`. At most one
-   `./gradlew -q help --task <name>` per task you cannot prove from files. No builds.
+   `./gradlew -q help --task <name>` per task you cannot prove from files. No builds. Nothing names
+   one: take the development flavor (`dev`, `staging`, an `applicationIdSuffix` like `.dev`), else the
+   first declared, record its tasks and app id, and say in the profile row why. A variant is never a
+   question for the developer: they change the row if they work on another.
 4. **Device.** Debug applicationId (with suffix), launcher activity, app module, deep-link
    scheme, existing Maestro flows / test tags, login or feature-flag prerequisites, and what a
    run needs to reach behavior with nothing to see: the test account the developer approved (by

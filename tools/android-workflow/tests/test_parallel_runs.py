@@ -8,6 +8,8 @@ os.environ["ANDROID_WORKFLOW_NO_WATCH"] = "1"
 os.environ.setdefault("ANDROID_WORKFLOW_OFFICE_HOME", __import__("tempfile").mkdtemp(prefix="aw-office-"))
 os.environ["ANDROID_WORKFLOW_NO_DEVICE_CHECK"] = "1"
 os.environ.setdefault("ANDROID_WORKFLOW_STATE_HOME", __import__("tempfile").mkdtemp(prefix="aw-state-"))
+# The developer\'s own autonomy config never reaches a test.
+os.environ["ANDROID_WORKFLOW_CONFIG"] = "/nonexistent/android-workflow-config.json"
 
 import json
 import tempfile
@@ -308,6 +310,32 @@ class DecideDeviceTests(test_decide.RunTests):
                 answer = self.next()
         self.assertEqual(answer["next"], "ask_user")
         self.assertIn("risk high", answer["why"])
+
+    def test_careful_asks_even_when_every_ac_passed(self) -> None:
+        with StateHome():
+            self.visual_run()
+            (self.root / ".ai" / "android-workflow.json").write_text(
+                json.dumps({**json.loads((self.root / ".ai" / "android-workflow.json").read_text(encoding="utf-8")),
+                            "autonomy": {"level": "careful"}}), encoding="utf-8")
+            with self.connected():
+                self.next()
+                self.partial_report("- AC1 one tap logs one event: PASS")
+                answer = self.next()
+        self.assertEqual(answer["next"], "ask_user")
+
+    def test_autonomous_opens_a_critical_partial_as_a_draft_instead_of_asking(self) -> None:
+        with StateHome():
+            self.visual_run()
+            (self.root / ".ai" / "android-workflow.json").write_text(
+                json.dumps({**json.loads((self.root / ".ai" / "android-workflow.json").read_text(encoding="utf-8")),
+                            "autonomy": {"level": "autonomous"}}), encoding="utf-8")
+            with self.connected(), mock.patch("android_workflow.decide.critical", return_value="risk high"):
+                self.next()
+                self.partial_report("- AC1 one tap logs one event: PASS")
+                answer = self.next()
+        self.assertEqual(answer["next"], "finish")
+        self.assertIn("--draft", answer["command"])
+        self.assertIn("critical change (risk high)", answer["command"])
 
     def test_anomalies_make_a_pass_partial_and_the_developer_decides(self) -> None:
         with StateHome():

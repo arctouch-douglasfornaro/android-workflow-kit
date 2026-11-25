@@ -93,5 +93,35 @@ class SkillEvalTests(unittest.TestCase):
         self.assertEqual(result["missing"], ["reply"])
 
 
+    def test_a_codex_agent_is_judged_by_claude_and_compared_with_its_own_host(self):
+        prepared = skill_eval.prepare("setup-app-id")
+        calls = []
+
+        def fake(command, **_):
+            calls.append(command)
+            if command[0] == "codex":
+                Path(command[command.index("-o") + 1]).write_text("STATUS: DONE")
+                return skill_eval.subprocess.CompletedProcess(command, 0, "", "")
+            verdict = {"scores": [{"id": "evidence", "score": 8, "reason": "x"}], "summary": "ok"}
+            return skill_eval.subprocess.CompletedProcess(command, 0, json.dumps(verdict), "")
+
+        with patch.object(skill_eval.subprocess, "run", side_effect=fake):
+            ran = skill_eval.run_agent(prepared["id"])
+            with self.assertRaises(ValueError):
+                skill_eval.judge(prepared["id"], "codex")
+            judged = skill_eval.judge(prepared["id"])
+        self.assertEqual((ran["host"], ran["model"]), ("codex", skill_eval.CODEX_TIERS[prepared["tier"] or "standard"][0]))
+        self.assertIn("agents/aw-setup.md", calls[0][-1])
+        self.assertTrue(calls[0][-1].endswith(prepared["prompt"]))
+        self.assertEqual((calls[-1][0], judged["score"]), ("claude", 8))
+        claude_run = skill_eval.prepare("setup-app-id")
+        skill_eval.record(claude_run["id"], checks_only=True)
+        entry = skill_eval.record(prepared["id"])
+        self.assertEqual((entry["host"], entry["previous"]), ("codex", None))  # Claude's run is another host
+        rows = [row for row in skill_eval.report()["cases"] if row["case"] == "setup-app-id"]
+        self.assertEqual(sorted(row["host"] for row in rows), ["claude", "codex"])
+        self.assertEqual([row["host"] for row in skill_eval.report("codex")["cases"] if row["case"] == "setup-app-id"], ["codex"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Collection
 
+from android_workflow.autonomy import LEVELS as AUTONOMY_LEVELS
 from android_workflow.paths import (
     KIT_ROOT,
     SKILL_DIR,
@@ -4051,7 +4052,7 @@ def mark_moved_copies(target: Path, ticket_id: str) -> list[str]:
 
 
 def run(target: Path, ticket: dict[str, Any], take_over: bool = False,
-        review_files: list[str] | None = None, no_device: bool = False) -> dict[str, Any]:
+        review_files: list[str] | None = None, no_device: bool = False, autonomy: str | None = None) -> dict[str, Any]:
     started = time.monotonic()
     ensure_gitignore(target)
     bootstrap(target)
@@ -4069,7 +4070,7 @@ def run(target: Path, ticket: dict[str, Any], take_over: bool = False,
     set_current(target, ticket_id)
     mark_moved_copies(target, ticket_id)
     if review_files is None and resumable(agent_dir):
-        resumed = resume_run(target, agent_dir, ticket, no_device=no_device)
+        resumed = resume_run(target, agent_dir, ticket, no_device=no_device, autonomy=autonomy)
         return {**resumed, "restored_from_archive": True} if restored else resumed
     spec = keep_planner_decisions(agent_dir, spec, ticket)
     if review_files is not None:
@@ -4111,6 +4112,9 @@ def run(target: Path, ticket: dict[str, Any], take_over: bool = False,
         # The developer's `--no-device`, on record for this ticket: only it lets `finish --no-device` skip
         # the device without the developer's own words (`--developer-said`).
         state["no_device"] = "start --no-device" if no_device else previous_state["no_device"]
+    if autonomy or previous_state.get("autonomy"):
+        # `start --autonomy LEVEL`: the developer's level for this ticket wins over the config files.
+        state["autonomy"] = autonomy or previous_state["autonomy"]
     attach_pending_setup(target, agent_dir, state, metrics)
     write_json(agent_dir / "stage-metrics.json", metrics)
     question = pending_question(spec, state["answers"])
@@ -4149,7 +4153,8 @@ def _ac_key(text: str) -> str:
     return re.sub(r"\W+", " ", str(text).lower()).strip()
 
 
-def resume_run(target: Path, agent_dir: Path, ticket: dict[str, Any], no_device: bool = False) -> dict[str, Any]:
+def resume_run(target: Path, agent_dir: Path, ticket: dict[str, Any], no_device: bool = False,
+               autonomy: str | None = None) -> dict[str, Any]:
     """`start` on a run that is still going (a host re-running it after a toolkit change or a lost
     session): nothing it has is dropped. The acceptance criteria are kept and a new one is only appended,
     the stages, verdicts and metrics stay, and only what the new start states explicitly (type, risk,
@@ -4199,6 +4204,9 @@ def resume_run(target: Path, agent_dir: Path, ticket: dict[str, Any], no_device:
         if no_device and not state.get("no_device"):
             state["no_device"] = "start --no-device"
             notes.append("--no-device")
+        if autonomy and state.get("autonomy") != autonomy:
+            state["autonomy"] = autonomy
+            notes.append("--autonomy " + autonomy)
         save_state(target, state)
         refresh_toolkit_fingerprint(agent_dir, "T1")
         append_stage_log(agent_dir, "T1", "resumed", "cli",
@@ -4306,6 +4314,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     start_parser.add_argument("--reproduction")
     start_parser.add_argument("--overrides", type=Path)
     start_parser.add_argument("--level", choices=LEVELS, help="overrides the level the CLI picks")
+    start_parser.add_argument("--autonomy", choices=AUTONOMY_LEVELS,
+                              help="how much this run decides alone (careful|balanced|autonomous); wins over autonomy.level")
     start_parser.add_argument("--no-device", action="store_true", dest="no_device",
                               help="the developer passed --no-device: recorded, so `finish --no-device` may skip the device")
     start_parser.add_argument("--take-over", action="store_true", dest="take_over",
@@ -4471,6 +4481,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     device_parser.add_argument("--all", action="store_true", dest="full",
                                help="replay: run every flow even after one fails (a fix round's replay otherwise runs "
                                     "the failed and changed flows first and stops at the first real failure)")
+    autonomy_parser = subparsers.add_parser("autonomy", help="the autonomy policy in effect and where each value comes from")
+    autonomy_parser.add_argument("--target", required=True, type=Path)
+    approve_parser = subparsers.add_parser("approve", help="the developer's OK for a step `autonomy` asks about")
+    approve_parser.add_argument("--target", required=True, type=Path)
+    approve_parser.add_argument("step", choices=("deliver",))
     next_parser = subparsers.add_parser("next", help="the one thing to do now, decided from the run's files")
     next_parser.add_argument("--target", required=True, type=Path)
     next_parser.add_argument("--no-device", action="store_true")
@@ -4628,7 +4643,8 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
             raise ValueError("start requires --ticket or --id and --title")
         if args.overrides:
             configure(target, args.overrides)
-        result = run(target, ticket_from_flags(args), take_over=args.take_over, no_device=args.no_device)
+        result = run(target, ticket_from_flags(args), take_over=args.take_over, no_device=args.no_device,
+                     autonomy=args.autonomy)
         if args.id:
             from android_workflow.review import TICKET_HOW, jira_keys, ticket_source, tickets_config
 
@@ -4829,6 +4845,18 @@ def _dispatch(args: argparse.Namespace) -> tuple[Any, int]:
                         install_base_apk=True if args.install_base else None, only=only or None, fresh=args.fresh,
                         full=args.full)
         return result, 0 if result["status"] in {"replayed", "partial"} else 1
+    if args.command == "autonomy":
+        from android_workflow.autonomy import effective, user_config_path
+
+        return {**effective(target), "files": {"user": str(user_config_path()),
+                                               "project": str(target / OVERRIDES_FILE)}}, 0
+    if args.command == "approve":
+        with run_lock(target):
+            state = load_state(target)
+            state.setdefault("approved", {})[args.step] = int(time.time())
+            save_state(target, state)
+        append_stage_log(run_dir(target), "T8", "approved", "developer", f"the developer approved {args.step}")
+        return {"status": "approved", "step": args.step}, 0
     if args.command == "next":
         from android_workflow.decide import next_action
 

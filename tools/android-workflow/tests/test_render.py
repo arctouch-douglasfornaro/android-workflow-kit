@@ -8,6 +8,8 @@ os.environ["ANDROID_WORKFLOW_NO_WATCH"] = "1"
 os.environ.setdefault("ANDROID_WORKFLOW_OFFICE_HOME", __import__("tempfile").mkdtemp(prefix="aw-office-"))
 os.environ["ANDROID_WORKFLOW_NO_DEVICE_CHECK"] = "1"
 os.environ.setdefault("ANDROID_WORKFLOW_STATE_HOME", __import__("tempfile").mkdtemp(prefix="aw-state-"))
+# The developer\'s own autonomy config never reaches a test.
+os.environ["ANDROID_WORKFLOW_CONFIG"] = "/nonexistent/android-workflow-config.json"
 
 import json
 import subprocess

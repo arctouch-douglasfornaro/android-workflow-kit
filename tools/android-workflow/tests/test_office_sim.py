@@ -12,6 +12,8 @@ os.environ.setdefault("ANDROID_WORKFLOW_OFFICE_HOME", __import__("tempfile").mkd
 os.environ["ANDROID_WORKFLOW_NO_DEVICE_CHECK"] = "1"
 # Machine-wide state (build slots, device leases, base checkouts): a throwaway folder, never the developer's.
 os.environ.setdefault("ANDROID_WORKFLOW_STATE_HOME", __import__("tempfile").mkdtemp(prefix="aw-state-"))
+# The developer\'s own autonomy config never reaches a test.
+os.environ["ANDROID_WORKFLOW_CONFIG"] = "/nonexistent/android-workflow-config.json"
 
 import json
 import shutil

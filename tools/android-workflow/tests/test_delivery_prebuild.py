@@ -10,6 +10,8 @@ os.environ.setdefault("ANDROID_WORKFLOW_OFFICE_HOME", __import__("tempfile").mkd
 os.environ["ANDROID_WORKFLOW_NO_DEVICE_CHECK"] = "1"
 # Machine-wide state (build slots, device leases, base checkouts): a throwaway folder, never the developer's.
 os.environ.setdefault("ANDROID_WORKFLOW_STATE_HOME", __import__("tempfile").mkdtemp(prefix="aw-state-"))
+# The developer\'s own autonomy config never reaches a test.
+os.environ["ANDROID_WORKFLOW_CONFIG"] = "/nonexistent/android-workflow-config.json"
 # Delivery opens media/ in Finder after a real PR; tests never do.
 os.environ["ANDROID_WORKFLOW_NO_OPEN"] = "1"
 
@@ -179,6 +181,14 @@ class DeliverTests(unittest.TestCase):
             git(root, "remote", "set-url", "origin", str(root.parent / f"{root.name}-remote.git"))
             result = deliver(root)
         self.assertEqual(result["pr"]["status"], "manual")
+
+    def test_the_plans_out_of_scope_becomes_one_follow_up_line(self) -> None:
+        plan = "# Steps\n\n- a\n\n## Out of scope\n- Search on the Archive screen.\n- Restoring a note (NOTES-23).\n\n# Verification\n"
+        lines = pull_request_disclosures({}, {}, BODY, plan)
+        self.assertEqual(lines, ["Follow-up / out of scope: Search on the Archive screen; Restoring a note (NOTES-23)."])
+        self.assertEqual(pull_request_disclosures({}, {}, BODY + "Follow-up / out of scope: search", plan), [])
+        stub = "# Out of scope\n\n- Files and modules outside `change-set-map.json`.\n"
+        self.assertEqual(pull_request_disclosures({}, {}, BODY, stub), [])
 
     def test_disclosures_cover_waived_lint_and_skipped_device(self) -> None:
         gate = {"waivers": [{"count": 4, "file_count": 2}, {"count": 3, "file_count": 1}]}

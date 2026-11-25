@@ -233,8 +233,15 @@ def load_watch(agent_dir: Path) -> dict[str, Any]:
 
 
 def watch_config(target: Path) -> dict[str, Any]:
+    """`watch` of `.ai/android-workflow.json` over DEFAULT_WATCH; `auto_merge` not set there follows
+    `autonomy.merge` (careful: the developer merges)."""
+    from android_workflow import autonomy
+
     overrides = _read(target / ".ai" / "android-workflow.json").get("watch") or {}
-    return {**DEFAULT_WATCH, **{key: value for key, value in overrides.items() if key in DEFAULT_WATCH}}
+    config = {**DEFAULT_WATCH, **{key: value for key, value in overrides.items() if key in DEFAULT_WATCH}}
+    if "auto_merge" not in overrides:
+        config["auto_merge"] = autonomy.get(target, "merge") == "auto"
+    return config
 
 
 def pr_number(target: Path, agent_dir: Path, watch: dict[str, Any], env: dict[str, str], given: int | None) -> int:

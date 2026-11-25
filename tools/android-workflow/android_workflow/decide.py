@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from android_workflow import autonomy
 from android_workflow.paths import run_dir
 
 LEVELS = ("express", "standard", "full")
@@ -57,6 +58,7 @@ DEVICE_BUDGET_GRACE_SECONDS = 300  # a round already running past the budget fin
 REVIEW_DEVICE_MAX_ROUNDS = 2  # a review: the device round and one more, never a third
 DECISIONS_FILE = "decisions.jsonl"
 BOOTING = "booting"  # how a `wait_device` for a device starting for this run begins its `why`
+REDECIDE = "redecide"  # internal: the state changed under `next`; decide again on it
 DEVICE_WAIT_MAX_SECONDS = 900  # `device.wait_max_seconds`: past this, `wait_device` becomes `ask_user`
 
 
@@ -342,6 +344,8 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
     no_device = no_device or bool(state.get("no_device"))  # `start --no-device`: the developer's flag, recorded
     if state.get("status") == "paused" and state.get("pending_question"):
         question = state["pending_question"]
+        if record and _take_default(target, question):
+            return _decide(target, agent_dir, no_device, no_watch, record)
         return _answer("ask_user", "a business question is open", question=question,
                        then=f'CLI resume --target TARGET --question-id {question.get("id")} --answer "…"')
     if state.get("status") == "escalated" and state.get("current_stage") == "T3":
@@ -357,6 +361,12 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
         delivery = _read(agent_dir / "delivery.json")
         if not delivery and (stages.get("T8") or {}).get("status") == "started":
             return _answer("wait", "Delivery is writing the PR description and opening the PR", agent="aw-delivery")
+        if not delivery and autonomy.get(target, "open_pr") == "ask" and not (state.get("approved") or {}).get("deliver"):
+            return _answer("ask_user", "the run passed; autonomy open_pr=ask waits for the developer's OK",
+                           question="The run is done (see the stage log and the office). Open the PR"
+                                    + (" as a draft" if (state.get("draft") or {}).get("issues") else "") + "?",
+                           options={"open": "CLI approve --target TARGET deliver, then CLI next --target TARGET",
+                                    "hold": "stop here; the developer opens it later with the same two commands"})
         if not delivery:
             return _spawn("aw-delivery", "finish passed; the PR body and the PR are next", stage="Delivery",
                           note="writing the PR description")
@@ -497,6 +507,8 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
     findings: list[str] = []
     gate_failed = gate.get("status") == "failed"
     review_failed = review_verdict == "changes_requested"
+    if gate_failed and (gate.get("disk_full") or gate.get("infra")) and autonomy.get(target, "infra") == "draft":
+        return _draft("the quality gate could not run: " + str(gate.get("disk_full") or gate.get("infra")), state)
     if gate_failed and gate.get("disk_full"):
         # Not the change, and no fix round or Gradle retry helps: the developer frees space.
         return _answer("ask_user", "the gate could not run: " + str(gate["disk_full"]),
@@ -583,7 +595,7 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
                 return _answer("ask_user", "the device check is partial (PR round)", question=PARTIAL_QUESTION,
                                options=_partial_options(again=not stop), then="CLI next --target TARGET")
             return _answer("ask_user", "the device check is partial: some AC were not verified on the device"
-                           + _critical_note(spec), question=PARTIAL_QUESTION, options=_partial_options(again=not stop))
+                           + _critical_note(spec, target), question=PARTIAL_QUESTION, options=_partial_options(again=not stop))
         if device_now and device_verdict == "blocked":
             return _draft("the device check is blocked: see device-report.md", state)
         fails = failed_rounds(device_state, {"fail"}, device_verdict if device_now else None, fingerprint)
@@ -622,12 +634,15 @@ def _decide(target: Path, agent_dir: Path, no_device: bool, no_watch: bool = Fal
                 if decided:
                     return decided
                 return _answer("ask_user", f"no more device rounds ({stop}): the device check is partial"
-                               + _critical_note(spec), question=PARTIAL_QUESTION, options=_partial_options(again=False))
+                               + _critical_note(spec, target), question=PARTIAL_QUESTION, options=_partial_options(again=False))
             return _draft(f"the device check is blocked: {stop}; see device-report.md", state)
         serial, waiting, reason = _device_for(target, agent_dir, record)
         if waiting is not None:
             renders = render.route(target, spec, {**state, "render": {**(state.get("render") or {}), "prefer": "render"}})
-            return _bounded_wait(target, agent_dir, waiting, renders["mode"] == "render")
+            bounded = _bounded_wait(target, agent_dir, waiting, renders["mode"] == "render", record)
+            if bounded.get("next") == REDECIDE:
+                return _decide(target, agent_dir, no_device, no_watch, record)
+            return bounded
         if serial:
             spawn = _spawn("aw-device", "the change passed the gate and the review: verify it on the device",
                            stage="Device", mode="after", serial=serial,
@@ -817,18 +832,18 @@ def _device_before(target: Path, agent_dir: Path, spec: dict[str, Any], state: d
                   note="before: capture the current screen and write the flows" if capture else "before: write the flows")
 
 
-def critical(spec: dict[str, Any]) -> str | None:
+def critical(spec: dict[str, Any], extra: Any = ()) -> str | None:
     """Why a change needs the developer to decide a partial device check, or None: high risk, or the
-    ticket is about payments or sign-in (FULL_WORDS)."""
+    ticket is about payments or sign-in (FULL_WORDS), or a word of `autonomy.critical_words` (`extra`)."""
     if str(spec.get("risk") or "") == "high":
         return "risk high"
     text = " ".join([str(spec.get("title") or ""), *(str(item) for item in spec.get("acceptance_criteria") or [])])
-    words = sorted(_words(text) & FULL_WORDS)
+    words = sorted(_words(text) & (FULL_WORDS | {str(word).lower() for word in extra or ()}))
     return "the ticket is about " + ", ".join(words) if words else None
 
 
-def _critical_note(spec: dict[str, Any]) -> str:
-    why = critical(spec)
+def _critical_note(spec: dict[str, Any], target: Path | None = None) -> str:
+    why = critical(spec, autonomy.get(target, "critical_words") if target else ())
     return f" ({why}: the developer decides)" if why else ""
 
 
@@ -840,7 +855,15 @@ def auto_partial(target: Path, agent_dir: Path, spec: dict[str, Any], proof: dic
     opens ready for review and says what the device did not verify. Some AC are proved by nothing: the
     PR opens as a draft naming them. A PR round only takes the first (nothing is pushed without the
     developer otherwise). None: ask the developer."""
-    if critical(spec) or "review_files" in spec:  # reviewing someone else's PR has its own rule
+    if "review_files" in spec:  # reviewing someone else's PR has its own rule
+        return None
+    policy = autonomy.effective(target)
+    if policy["partial_device"] == "ask":
+        return None
+    why_critical = critical(spec, policy["critical_words"])
+    if why_critical:
+        if policy["critical"] == "draft" and not state.get("finished_fingerprint"):
+            return _draft(f"device check partial on a critical change ({why_critical}): the developer reviews it", state)
         return None
     from android_workflow import render
     from android_workflow.cli import device_report_anomalies
@@ -990,6 +1013,10 @@ def _device_for(target: Path, agent_dir: Path, record: bool) -> tuple[str | None
         except Exception as error:  # noqa: BLE001
             current = {"status": "unavailable", "reason": f"adb is not available ({error})"}
         if current.get("status") in {"failed", "unavailable", "no_device"}:
+            if autonomy.get(target, "infra") == "draft":
+                from android_workflow.cli import load_state
+
+                return None, _draft("no device boots for this run: " + str(failed.get("reason")), load_state(target)), ""
             return None, _answer("ask_user", "no device boots for this run: " + str(failed.get("reason")),
                                  question=f"{failed.get('reason')}; then {current.get('reason') or current.get('status')}. "
                                  "Fix the emulator (or connect a phone) and continue, or ship without the device check?",
@@ -1075,12 +1102,27 @@ def _waited_too_long(target: Path, agent_dir: Path) -> bool:
     return since is not None and time.time() - since > device_wait_max_seconds(target)
 
 
-def _bounded_wait(target: Path, agent_dir: Path, waiting: dict[str, Any], renders: bool) -> dict[str, Any]:
-    """`wait_device`, until it has lasted `device.wait_max_seconds`: then the developer decides. The
+def _bounded_wait(target: Path, agent_dir: Path, waiting: dict[str, Any], renders: bool,
+                  record: bool = True) -> dict[str, Any]:
+    """`wait_device`, until it has lasted `device.wait_max_seconds`: then the developer decides, or, with
+    `autonomy.device_wait = auto`, the CLI moves the visible AC to JVM renders (else a draft PR). The
     orchestrator never skips the device on its own (`finish --no-device` needs their words)."""
     if not _waited_too_long(target, agent_dir):
         return waiting
     minutes = round(device_wait_max_seconds(target) / 60)
+    if autonomy.get(target, "device_wait") == "auto":
+        from android_workflow.cli import append_stage_log, load_state
+
+        if renders and not record:
+            return _answer("wait_device", f"no device in {minutes} min: next moves the visible AC to JVM renders")
+        if renders:
+            from android_workflow import render
+
+            render.prefer(target, "render")
+            append_stage_log(run_dir(target), "T7", "render", "cli",
+                             f"no device in {minutes} min: the visible AC go to JVM renders (autonomy device_wait=auto)")
+            return {"next": REDECIDE}
+        return _draft(f"no device became ready in {minutes} min: {waiting['why']}", load_state(target))
     options = {"wait": "CLI emulator --target TARGET --wait, then CLI next --target TARGET (another "
                        f"{minutes} min before asking again)"}
     if renders:
@@ -1147,6 +1189,28 @@ def _skip_before(target: Path, reason: str, record: bool = True) -> None:
 
 def _mark_before(target: Path, value: str) -> None:
     _mark_state(target, "device_before", value)
+
+
+def _take_default(target: Path, question: dict[str, Any]) -> bool:
+    """`autonomy.questions = default`: answer the open question with the default it names, record it as an
+    assumption the PR states, and say so. A question with no default still goes to the developer."""
+    if autonomy.get(target, "questions") != "default":
+        return False
+    text = str(question.get("question") or "")
+    value = autonomy.take_default(text)
+    if not value:
+        return False
+    from android_workflow.cli import append_stage_log, load_state, resume, run_lock, save_state
+
+    resume(target, str(question.get("id")), value)
+    with run_lock(target):
+        state = load_state(target)
+        assumed = state.setdefault("assumed", [])
+        assumed.append({"id": question.get("id"), "question": text, "answer": value})
+        save_state(target, state)
+    append_stage_log(run_dir(target), "T3", "assumed", "cli",
+                     f"{question.get('id')}: took the default '{value}' (autonomy questions=default)")
+    return True
 
 
 def _mark_state(target: Path, key: str, value: str) -> None:

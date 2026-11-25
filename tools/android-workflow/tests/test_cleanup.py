@@ -6,6 +6,8 @@ import json
 import os
 
 os.environ.setdefault("ANDROID_WORKFLOW_STATE_HOME", __import__("tempfile").mkdtemp(prefix="aw-state-"))
+# The developer\'s own autonomy config never reaches a test.
+os.environ["ANDROID_WORKFLOW_CONFIG"] = "/nonexistent/android-workflow-config.json"
 
 import subprocess
 import tempfile

@@ -42,6 +42,19 @@ commit, so a change is judged against the run before it.
    (file and section of the agent's `.md`).
 7. `EVAL clean` keeps the last 10 workspaces.
 
+## On Codex
+
+The same cases run with Codex as the agent, so a kit change is measured on both hosts. After
+`prepare`, `EVAL agent --run ID` (background Bash, up to 3 h) runs the case's agent with `codex exec`
+on the case's tier (strong `gpt-6.1-sol` high, standard `gpt-6.1-terra` medium, fast `gpt-6-luna` low),
+pointed at the role file as Codex's `spawn_agent` would, and saves its last message to `return_file`;
+its log is `runs/<run>/agent.log`. Then `check`, `judge` (it picks Claude for a Codex agent and refuses
+Codex) and `record` as above. Each host keeps its own history: `report` shows a row per case and host,
+the delta against that host's last run, and `report --host codex` only Codex. Run inside Codex itself,
+step 3 spawns `aw-<role>` with `spawn_agent` instead, and the judge is `--judge claude`. A case that
+fails only on Codex is fixed in the agent's `.md` (a Claude Code tool name, a return format), never
+in the case.
+
 ## Improve (hill climbing)
 
 When the developer asks to improve until a target ("até 10", "until every case is 9+"), or runs this

@@ -60,49 +60,49 @@
     {
       "id": "cause_written",
       "kind": "regex",
-      "file": ".ai/workflow/BUG-20261124-nosuchelementexception/cause.md",
+      "file": ".ai/workflow/BUG-{TODAY}-nosuchelementexception/cause.md",
       "pattern": "^#+ *Cause",
       "weight": 2
     },
     {
       "id": "cause_located",
       "kind": "regex",
-      "file": ".ai/workflow/BUG-20261124-nosuchelementexception/cause.md",
+      "file": ".ai/workflow/BUG-{TODAY}-nosuchelementexception/cause.md",
       "pattern": "NotesRepository\\.kt:1[67]\\b",
       "weight": 3
     },
     {
       "id": "first_vs_firstOrNull",
       "kind": "regex",
-      "file": ".ai/workflow/BUG-20261124-nosuchelementexception/cause.md",
+      "file": ".ai/workflow/BUG-{TODAY}-nosuchelementexception/cause.md",
       "pattern": "firstOrNull",
       "weight": 2
     },
     {
       "id": "hypotheses_ranked",
       "kind": "regex",
-      "file": ".ai/workflow/BUG-20261124-nosuchelementexception/cause.md",
+      "file": ".ai/workflow/BUG-{TODAY}-nosuchelementexception/cause.md",
       "pattern": "^#+ *Hypothes[\\s\\S]*^\\s*(1[.)]|-)[\\s\\S]*^\\s*(2[.)]|-)",
       "weight": 1
     },
     {
       "id": "plan_written",
       "kind": "regex",
-      "file": ".ai/workflow/BUG-20261124-nosuchelementexception/plan.md",
+      "file": ".ai/workflow/BUG-{TODAY}-nosuchelementexception/plan.md",
       "pattern": "^#+ Verification",
       "weight": 2
     },
     {
       "id": "failing_test_ac",
       "kind": "regex",
-      "file": ".ai/workflow/BUG-20261124-nosuchelementexception/plan.md",
+      "file": ".ai/workflow/BUG-{TODAY}-nosuchelementexception/plan.md",
       "pattern": "NotesRepositoryTest|find\\(\\\"?\\w+\\\"?\\).{0,40}null|unknown id",
       "weight": 2
     },
     {
       "id": "spec_reproduction",
       "kind": "regex",
-      "file": ".ai/workflow/BUG-20261124-nosuchelementexception/ticket-spec.json",
+      "file": ".ai/workflow/BUG-{TODAY}-nosuchelementexception/ticket-spec.json",
       "pattern": "\\\"reproduction\\\"\\s*:\\s*\\\"[^\\\"]{10,}",
       "weight": 1
     },
@@ -122,8 +122,8 @@
       "id": "no_secrets",
       "kind": "no_secrets",
       "files": [
-        ".ai/workflow/BUG-20261124-nosuchelementexception/cause.md",
-        ".ai/workflow/BUG-20261124-nosuchelementexception/plan.md"
+        ".ai/workflow/BUG-{TODAY}-nosuchelementexception/cause.md",
+        ".ai/workflow/BUG-{TODAY}-nosuchelementexception/plan.md"
       ],
       "weight": 1
     }
@@ -151,10 +151,10 @@
     }
   ],
   "judge_reads": [
-    ".ai/workflow/BUG-20261124-nosuchelementexception/cause.md",
-    ".ai/workflow/BUG-20261124-nosuchelementexception/plan.md",
-    ".ai/workflow/BUG-20261124-nosuchelementexception/ticket-spec.json",
-    ".ai/workflow/BUG-20261124-nosuchelementexception/bug-report.json",
+    ".ai/workflow/BUG-{TODAY}-nosuchelementexception/cause.md",
+    ".ai/workflow/BUG-{TODAY}-nosuchelementexception/plan.md",
+    ".ai/workflow/BUG-{TODAY}-nosuchelementexception/ticket-spec.json",
+    ".ai/workflow/BUG-{TODAY}-nosuchelementexception/bug-report.json",
     "feature/notes/src/main/kotlin/com/notes/feature/notes/data/NotesRepository.kt",
     "app/src/main/kotlin/com/notes/app/NoteDetailActivity.kt"
   ]

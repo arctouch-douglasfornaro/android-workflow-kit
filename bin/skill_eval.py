@@ -5,9 +5,10 @@ wrote, has a judge of another model score it against a rubric, and keeps the sco
   skill_eval.py list
   skill_eval.py prepare --case ID          workspace + the exact prompt to spawn the agent with
   skill_eval.py check   --run RUN          deterministic checks on what the agent wrote
-  skill_eval.py judge   --run RUN [--judge codex|claude] [--model M]
+  skill_eval.py agent   --run RUN --host codex [--model M] [--effort E]   run the case's agent on Codex
+  skill_eval.py judge   --run RUN [--judge codex|claude] [--model M]   (default: the model the agent did not run on)
   skill_eval.py record  --run RUN [--agent-model M]   score, appended to the history, delta vs the last one
-  skill_eval.py report                     latest score per case and its delta
+  skill_eval.py report  [--host H]         latest score per case and host, and its delta on that host
   skill_eval.py clean   [--keep N]         remove old workspaces (default keeps the last 10)
 
 The workspace path and the app in it never say they are an eval: an agent that knows it is being
@@ -165,7 +166,9 @@ def prepare(case_id: str) -> dict[str, Any]:
     git(workdir, "-c", "user.name=Dev", "-c", "user.email=dev@localhost", "add", "-A")
     git(workdir, "-c", "user.name=Dev", "-c", "user.email=dev@localhost", "commit", "-q", "-m", "Initial import")
     values: dict[str, str] = {"TARGET": str(workdir), "CLI": CLI_TEXT, "BASE_SHA": git_head(workdir),
-                         "FAKEBIN": str(workdir.parent / "fakebin"), "WS": str(workdir.parent)}
+                         "FAKEBIN": str(workdir.parent / "fakebin"), "WS": str(workdir.parent),
+                         # The day the run starts: the CLI names a triage folder BUG-<YYYYMMDD>-<slug>.
+                         "TODAY": dt.datetime.now().strftime("%Y%m%d")}
     for step in case.get("prepare", []):
         kind = step["do"]
         if kind == "overrides":
@@ -318,11 +321,17 @@ def run_check(check: dict[str, Any], run: dict[str, Any]) -> tuple[bool, str]:
     raise ValueError(f"unknown check {kind}")
 
 
+def dated(value: Any, run: dict[str, Any]) -> Any:
+    """`{TODAY}` in a case's paths: the day the run was prepared (its id starts with it), as in the prompt."""
+    return json.loads(json.dumps(value).replace("{TODAY}", str(run["id"])[:8]))
+
+
 def check(run_id: str) -> dict[str, Any]:
     run = load_run(run_id)
     case = cases()[run["case"]]
     results = []
     for item in case.get("checks", []):
+        item = dated(item, run)
         try:
             passed, detail = run_check(item, run)
         except Exception as exc:  # noqa: BLE001 - a broken check fails, it does not stop the others
@@ -339,7 +348,7 @@ def check(run_id: str) -> dict[str, Any]:
 def judge_prompt(run: dict[str, Any], case: dict[str, Any]) -> str:
     workdir = Path(run["workdir"])
     files = []
-    for relative in case.get("judge_reads", []):
+    for relative in dated(case.get("judge_reads", []), run):
         path = workdir / relative
         if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4"}:
             files.append(f"### {relative}\n\n(binary: open it yourself at {path})" if path.is_file()
@@ -380,8 +389,88 @@ Answer with JSON only: {{"scores": [{{"id": "...", "score": 0, "reason": "..."}}
 """
 
 
-def judge(run_id: str, engine: str = "codex", model: str | None = None) -> dict[str, Any]:
+# The agent's tier on Codex: the same models the `~/.codex/agents/aw-*.toml` set.
+CODEX_TIERS = {"strong": ("gpt-6.1-sol", "high"), "standard": ("gpt-6.1-terra", "medium"), "fast": ("gpt-6-luna", "low")}
+AGENT_TIMEOUT_SECONDS = 3 * 3600
+
+
+def host_of(run_or_entry: dict[str, Any]) -> str:
+    return str(run_or_entry.get("host") or "claude")  # every run before hosts were recorded ran on Claude Code
+
+
+def role_pointer(agent: str, prompt: str = "") -> str:
+    """What Codex's `spawn_agent` would load: an `aw-*` role file, or a skill the host runs end to end.
+    Nothing when the case's prompt already names it."""
+    if f"{agent}.md" in prompt or f"skills/{agent}/" in prompt:
+        return ""
+    if agent.startswith("aw-"):
+        return (f"Read `{KIT}/skills/android-workflow/agents/{agent}.md` and act exactly as that role: it is the "
+                "source of truth for this agent.\n\n")
+    return f"Use the `{agent}` skill (`{KIT}/skills/{agent}/SKILL.md`).\n\n"
+
+
+def run_agent(run_id: str, host: str = "codex", model: str | None = None, effort: str | None = None) -> dict[str, Any]:
+    """Run the case's agent on another host than this session, with the prompt `prepare` returned, and
+    save its last message to `return_file`. Codex runs with no sandbox (the agents run Gradle, adb and the
+    CLI, which writes outside the workspace), as a Claude Code subagent does."""
+    if host != "codex":
+        raise ValueError("agent runs the case on codex; Claude Code spawns its own subagent (eval-playbook step 3)")
     run = load_run(run_id)
+    tier_model, tier_effort = CODEX_TIERS.get(str(run.get("tier") or "standard"), CODEX_TIERS["standard"])
+    model, effort = model or tier_model, effort or tier_effort
+    flags = ["--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "-m", model,
+             "-c", f"model_reasoning_effort={effort}", "-o", run["return_file"]]
+    started = dt.datetime.now()
+    folder = runs_dir() / run_id
+    log = folder / "agent.log"
+
+    def codex(command: list[str]) -> subprocess.CompletedProcess[str]:
+        done = subprocess.run(command, text=True, capture_output=True, check=False, cwd=run["workdir"],
+                              timeout=AGENT_TIMEOUT_SECONDS, stdin=subprocess.DEVNULL)
+        with log.open("a", encoding="utf-8") as stream:
+            stream.write((done.stdout or "") + "\n--- stderr ---\n" + (done.stderr or "") + "\n")
+        return done
+
+    log.write_text("", encoding="utf-8")
+    done = codex(["codex", "exec", "-C", run["workdir"], *flags, role_pointer(run["agent"], run["prompt"]) + run["prompt"]])
+    answers = (cases().get(run["case"]) or {}).get("answers")
+    returned = Path(run["return_file"])
+    reply = returned.read_text(encoding="utf-8") if returned.is_file() else ""
+    session = re.search(r"session id: ([0-9a-f-]{36})", done.stderr or "")
+    if answers and "NEEDS_INPUT" in reply[:200] and session:
+        # eval-playbook step 3: a question gets the case's answer once, as a developer would give it.
+        answered = answer_questions(Path(run["workdir"]), str(answers))
+        run["answered"] = answered
+        done = codex(["codex", "exec", "resume", *flags, session.group(1),
+                      f"The developer answered ({answers}); the answers are recorded. Continue."])
+    run.update({"host": host, "agent_model": model, "agent_effort": effort,
+                "agent_seconds": round((dt.datetime.now() - started).total_seconds())})
+    save_run(run)
+    returned = Path(run["return_file"])
+    if done.returncode != 0 or not returned.is_file() or not returned.read_text(encoding="utf-8").strip():
+        raise ValueError(f"codex exited {done.returncode} with no final message: {(done.stderr or done.stdout)[-500:]}")
+    return {"id": run_id, "host": host, "model": model, "effort": effort, "seconds": run["agent_seconds"],
+            "return_file": run["return_file"]}
+
+
+def answer_questions(workdir: Path, answer: str) -> list[str]:
+    """`CLI resume` for every open business question of the run in `workdir`."""
+    answered = []
+    for spec_path in sorted(workdir.glob(".ai/workflow/*/ticket-spec.json")):
+        for question in read_json(spec_path).get("business_questions") or []:
+            if question.get("answer") is None:
+                subprocess.run([*CLI, "resume", "--target", str(workdir), "--question-id", str(question["id"]),
+                                "--answer", answer], text=True, capture_output=True, check=False, timeout=120)
+                answered.append(str(question["id"]))
+    return answered
+
+
+def judge(run_id: str, engine: str | None = None, model: str | None = None) -> dict[str, Any]:
+    run = load_run(run_id)
+    # The judge is never the agent's own model: a Codex agent gets Claude, a Claude agent gets Codex.
+    engine = engine or ("claude" if host_of(run) == "codex" else "codex")
+    if engine == host_of(run):
+        raise ValueError(f"the agent ran on {engine}: judge it with the other model")
     case = cases()[run["case"]]
     folder = runs_dir() / run_id
     prompt = judge_prompt(run, case)
@@ -396,7 +485,7 @@ def judge(run_id: str, engine: str = "codex", model: str | None = None) -> dict[
         text = out.read_text(encoding="utf-8") if out.is_file() else done.stdout
     elif engine == "claude":
         command = ["claude", "-p", "--output-format", "text", "--permission-mode", "plan",
-                   "--allowedTools", "Read,Grep,Glob"] + (["--model", model] if model else []) + [prompt]
+                   "--allowedTools", "Read,Grep,Glob"] + (["--model", model] if model else []) + ["--", prompt]
         done = subprocess.run(command, text=True, capture_output=True, check=False, cwd=run["workdir"], timeout=900)
         text = done.stdout
     else:
@@ -435,9 +524,11 @@ def record(run_id: str, agent_model: str | None = None, checks_only: bool = Fals
         # A judge that failed (timeout, a bad answer) must not record a checks-only score as the case's score.
         raise ValueError(f"run {run_id} has no judge score: run `judge --run {run_id}` again before `record`")
     score = round((checks_score + judge_score) / 2, 2) if judge_score is not None else checks_score
-    previous = next((item for item in reversed(history()) if item["case"] == run["case"]), None)
+    host = host_of(run)
+    previous = next((item for item in reversed(history()) if item["case"] == run["case"] and host_of(item) == host), None)
     entry = {"at": dt.datetime.now().isoformat(timespec="seconds"), "run": run_id, "case": run["case"],
-             "agent": run["agent"], "agent_model": agent_model, "kit": run["kit"], "checks": checks_score,
+             "agent": run["agent"], "host": host, "agent_model": agent_model or run.get("agent_model"),
+             "kit": run["kit"], "checks": checks_score,
              "judge": judge_score, "judge_engine": (run.get("judge") or {}).get("engine"), "score": score,
              "failed_checks": [item["id"] for item in run["checks"]["results"] if not item["passed"]],
              "low_rubric": [item["id"] for item in (run.get("judge") or {}).get("scores", []) if item["score"] < 7]}
@@ -449,21 +540,28 @@ def record(run_id: str, agent_model: str | None = None, checks_only: bool = Fals
     return entry
 
 
-def report() -> dict[str, Any]:
-    latest: dict[str, dict[str, Any]] = {}
-    before: dict[str, dict[str, Any]] = {}
+def report(host: str | None = None) -> dict[str, Any]:
+    """The latest score of each case on each host, with its delta against that host's run before. A
+    case with no run on any host is listed once, empty; `host` keeps one host."""
+    latest: dict[tuple[str, str], dict[str, Any]] = {}
+    before: dict[tuple[str, str], dict[str, Any]] = {}
     for item in history():
-        if item["case"] in latest:
-            before[item["case"]] = latest[item["case"]]
-        latest[item["case"]] = item
+        key = (item["case"], host_of(item))
+        if key in latest:
+            before[key] = latest[key]
+        latest[key] = item
+    hosts = sorted({key[1] for key in latest}) if host is None else [host]
     rows = []
     for case_id in cases():
-        item = latest.get(case_id)
-        prior = before.get(case_id)
-        rows.append({"case": case_id, "score": item and item["score"], "checks": item and item["checks"],
-                     "judge": item and item["judge"], "kit": item and item["kit"],
-                     "delta": round(item["score"] - prior["score"], 2) if item and prior else None,
-                     "failed_checks": item and item["failed_checks"], "low_rubric": item and item["low_rubric"]})
+        seen = [name for name in hosts if (case_id, name) in latest]
+        for name in seen or ([hosts[0]] if hosts and host else [None]):
+            item = latest.get((case_id, name)) if name else None
+            prior = before.get((case_id, name)) if name else None
+            rows.append({"case": case_id, "host": name, "score": item and item["score"], "checks": item and item["checks"],
+                         "judge": item and item["judge"], "judge_engine": item and item.get("judge_engine"),
+                         "kit": item and item["kit"],
+                         "delta": round(item["score"] - prior["score"], 2) if item and prior else None,
+                         "failed_checks": item and item["failed_checks"], "low_rubric": item and item["low_rubric"]})
     return {"cases": rows}
 
 
@@ -479,14 +577,20 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("list")
-    sub.add_parser("report")
+    report_parser = sub.add_parser("report")
+    report_parser.add_argument("--host", choices=("claude", "codex"))
+    agent_parser = sub.add_parser("agent", help="run the case's agent on Codex (Claude Code spawns its own)")
+    agent_parser.add_argument("--run", required=True)
+    agent_parser.add_argument("--host", default="codex", choices=("codex",))
+    agent_parser.add_argument("--model", help="default: the case's tier on Codex (strong gpt-6.1-sol, standard gpt-6.1-terra, fast gpt-6-luna)")
+    agent_parser.add_argument("--effort", choices=("low", "medium", "high", "xhigh"))
     prepare_parser = sub.add_parser("prepare")
     prepare_parser.add_argument("--case", required=True)
     for name in ("check", "judge", "record"):
         command = sub.add_parser(name)
         command.add_argument("--run", required=True)
         if name == "judge":
-            command.add_argument("--judge", default="codex", choices=("codex", "claude"))
+            command.add_argument("--judge", choices=("codex", "claude"), help="default: the model the agent did not run on")
             command.add_argument("--model")
         if name == "record":
             command.add_argument("--agent-model")
@@ -506,7 +610,9 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "record":
             result = record(args.run, args.agent_model, args.checks_only)
         elif args.command == "report":
-            result = report()
+            result = report(args.host)
+        elif args.command == "agent":
+            result = run_agent(args.run, args.host, args.model, args.effort)
         else:
             result = clean(args.keep)
     except (ValueError, OSError, subprocess.SubprocessError) as exc:

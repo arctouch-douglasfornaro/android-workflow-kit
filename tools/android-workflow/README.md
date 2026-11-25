@@ -14,7 +14,9 @@ How the workflow runs (stages, agents, levels, stops) is described in one place 
 | `setup --target APP [--source-repo MAIN] [--accept] [--force]` | Project profile and quality-gate facts, once per build configuration. Every run checks; `missing_steps` names only what is missing (`profile`, `profile_delta` with the build files that changed or the rows edited since acceptance, `profile_sections`, `variants`, `formatter`, `app_id`, `feature_map`) and `spawn` the Setup agents for them (the feature map never blocks). A learned `## Device recipes` line is not an edit |
 | `rules patterns\|check\|test\|list --target APP [--min N] [--base SHA] [--rule F.yml]` | The developer's local review rules (ast-grep, `MAIN/.ai/review-rules/` and `~/.ai/review-rules/`, never committed). `patterns` groups the findings of every archived `review.json` by the code term or file shared across runs; `check` runs the rules on the lines the change adds (`severity: error` → `block`, a gate failure `G-rules`; else `warn`) and writes `RUN/rule-findings.json`; `test` counts a rule's matches on the whole app. No `ast-grep` → `skipped` |
 | `feature-map --target APP [--source-repo MAIN] [--init] [--learn ROWS.md]` | The app's feature map, `.ai/feature-map.md` in the main checkout: `status` (`missing`, `stale` while a release-manifest activity or navigation-graph file is neither mapped nor under Not mapped, else `ok`), `uncovered`, `orphans`. `--learn` merges a file's Surfaces / Not mapped rows by name under a lock and refuses logins and secrets |
-| `start --target APP --id ID --title "…"` | New ticket folder, `ticket-spec.json`, `change-set-map.json` |
+| `start --target APP --id ID --title "…" [--autonomy careful\|balanced\|autonomous]` | New ticket folder, `ticket-spec.json`, `change-set-map.json`; `--autonomy` sets this run's level over the config files |
+| `autonomy --target APP` | The autonomy policy in effect, each value with where it came from (`sources`: level preset, `user`, `project`, `run`) and any key it `ignored` |
+| `approve --target APP deliver` | The developer's OK to open the PR when `autonomy.open_pr` is `ask` |
 | `resume --target APP --question-id Q --answer "…"` | Answers a business question that paused the run |
 | `update-spec --target APP --surfaces ui --acceptance "a\|b"` | Planner corrections; the route is recomputed |
 | `prebuild --target APP [--wait [--timeout S]\|--status] [--force]` | Builds the base commit's app in the background for the `before` capture, in the repository's own base checkout (`$ANDROID_WORKFLOW_STATE_HOME`, default `~/.cache/android-workflow/base/<repo>/checkout`), never in TARGET; its APKs are cached by commit (`…/apks/<sha>/`), one build per repository at a time, inside a build slot. `execution.base_build_timeout_seconds` (default 3600: the first build of the base checkout is cold) |
@@ -61,6 +63,31 @@ How the workflow runs (stages, agents, levels, stops) is described in one place 
 - **Toolkit integrity.** If the toolkit changes after `start`, the gate is `blocked`.
 
 Defaults live in `DEFAULT_CONFIG` (`android_workflow/cli.py`); per-project overrides in `TARGET/.ai/android-workflow.json`.
+
+### Autonomy
+
+How much `next` decides alone lives in `autonomy`: a `level` preset and, next to it, any key that wins
+over the preset. The developer's own `~/.config/android-workflow/config.json` (`$ANDROID_WORKFLOW_CONFIG`)
+sets their default for every app, a project's `.ai/android-workflow.json` wins over it, and
+`start --autonomy` wins for one run. `CLI autonomy --target APP` prints the result.
+
+```json
+{"autonomy": {"level": "autonomous", "open_pr": "ask", "critical_words": ["streak", "premium"]}}
+```
+
+| Key | careful | balanced (default) | autonomous | What it decides |
+|---|---|---|---|---|
+| `questions` | ask | ask | default | A Planner question that names its default (`(default: Star)`): ask, or take it; the PR lists what was assumed. A question with no default always asks |
+| `partial_device` | ask | auto | auto | A PARTIAL device check: ask, or decide by code (every AC proved: PR ready with what the device did not verify; an AC nothing proved: draft) |
+| `critical` | ask | ask | draft | The same on a critical change (risk high, payments, sign-in, `critical_words`): ask, or a draft PR naming what is open |
+| `infra` | ask | ask | draft | The gate cannot run (Gradle failed twice, disk full) or no device boots: ask, or a draft PR saying so |
+| `device_wait` | ask | ask | auto | No device after `device.wait_max_seconds`: ask, or move the visible AC to JVM renders when a probe allows, else a draft PR |
+| `open_pr` | ask | auto | auto | Open the PR when the run passes, or wait for `CLI approve --target APP deliver` |
+| `merge` | ask | auto | auto | The PR Watcher merges an approved, green PR, or tells the developer; `watch.auto_merge`, when set, wins |
+
+No level changes these: credentials never leave the machine, nothing is force-pushed, hooks are never
+skipped, a PR round pushes nothing the developer did not see, a phone's USB-debugging prompt and a
+question with no default still go to the developer, and an android-review keeps its own posting rules.
 
 Optional overrides read by the newer commands (all may be left out):
 

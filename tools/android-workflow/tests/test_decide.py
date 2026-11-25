@@ -9,6 +9,8 @@ os.environ.setdefault("ANDROID_WORKFLOW_OFFICE_HOME", __import__("tempfile").mkd
 os.environ["ANDROID_WORKFLOW_NO_DEVICE_CHECK"] = "1"
 # Machine-wide state (build slots, device leases, base checkouts): a throwaway folder, never the developer's.
 os.environ.setdefault("ANDROID_WORKFLOW_STATE_HOME", __import__("tempfile").mkdtemp(prefix="aw-state-"))
+# The developer\'s own autonomy config never reaches a test.
+os.environ["ANDROID_WORKFLOW_CONFIG"] = "/nonexistent/android-workflow-config.json"
 
 import contextlib
 import io
@@ -554,6 +556,64 @@ class RunTests(unittest.TestCase):
             self.assertEqual(set(asked["options"]), {"wait", "skip"})
             self.assertIn("--developer-said", asked["options"]["skip"])
             self.assertEqual(self.next()["next"], "wait_device")  # the developer said wait: a new stretch
+
+    def autonomy(self, **policy: object) -> None:
+        path = self.root / ".ai" / "android-workflow.json"
+        data = read_json(path) if path.is_file() else {}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({**data, "autonomy": policy}), encoding="utf-8")
+
+    def test_autonomous_waits_no_longer_than_the_limit_then_opens_a_draft_without_renders(self) -> None:
+        self.visual_run()
+        self.autonomy(level="autonomous")
+        booting = {"status": "booting", "serial": "emulator-5558", "avd": "a", "started_by_workflow": True}
+        with mock.patch("android_workflow.emulator.claim", return_value=booting):
+            self.assertEqual(self.next()["next"], "wait_device")
+            lines = (self.rundir / "decisions.jsonl").read_text(encoding="utf-8").splitlines()
+            old = [dict(json.loads(line), at=json.loads(line)["at"] - 20 * 60) for line in lines]
+            (self.rundir / "decisions.jsonl").write_text("".join(json.dumps(item) + "\n" for item in old), encoding="utf-8")
+            answer = self.next()
+        self.assertEqual(answer["next"], "finish")
+        self.assertIn("--draft", answer["command"])
+        self.assertIn("no device became ready", answer["command"])
+
+    def test_questions_default_takes_the_named_default_and_asks_the_rest(self) -> None:
+        self.start("--risk", "medium", title="Make the profile title bigger")
+        self.autonomy(questions="default")
+        self.assertEqual(self.next()["agent"], "aw-planner")
+        cli("update-spec", "--target", self.target, "--acceptance", "a", "--surfaces", "domain",
+            "--question", "Which label? (default: Star)|Which set?")
+        cli("log", "--target", self.target, "--stage", "Planner", "--status", "completed", "--note", "questions", "--tokens", "1")
+        answer = self.next()
+        self.assertEqual((answer["next"], answer["question"]["question"]), ("ask_user", "Which set?"))
+        state = read_json(self.rundir / "run-state.json")
+        self.assertEqual([item["answer"] for item in state["assumed"]], ["Star"])
+        cli("resume", "--target", self.target, "--question-id", answer["question"]["id"], "--answer", "415")
+        answer = self.next()
+        self.assertEqual((answer["agent"], [item["answer"] for item in answer["answers"]]), ("aw-planner", ["Star", "415"]))
+
+    def test_open_pr_ask_waits_for_the_developers_approval(self) -> None:
+        self.visual_run()
+        self.autonomy(open_pr="ask")
+        with mock.patch("android_workflow.emulator.status", return_value={"status": "connected", "serial": "emu-1"}):
+            self.next()
+            self.device_report("PASS")
+            (self.rundir / "media/after").mkdir(parents=True, exist_ok=True)
+            (self.rundir / "media/after/screen.png").write_bytes(b"png")
+            self.next()
+        cli("finish", "--target", self.target)
+        asked = self.next()
+        self.assertEqual((asked["next"], set(asked["options"])), ("ask_user", {"open", "hold"}))
+        self.assertEqual(self.next()["next"], "ask_user")
+        cli("approve", "--target", self.target, "deliver")
+        self.assertEqual(self.next()["agent"], "aw-delivery")
+
+    def test_start_autonomy_wins_over_the_project_file(self) -> None:
+        self.start("--autonomy", "careful")
+        self.autonomy(level="autonomous", merge="auto")
+        policy = cli("autonomy", "--target", self.target)
+        self.assertEqual((policy["level"], policy["sources"]["level"]), ("careful", "run"))
+        self.assertEqual((policy["merge"], policy["sources"]["merge"]), ("ask", "run"))
 
     def test_a_connected_device_runs_the_device_agent_and_two_fails_open_a_draft(self) -> None:
         self.visual_run()
