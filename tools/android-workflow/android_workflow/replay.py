@@ -15,7 +15,15 @@ flows of the same replay can skip (a feature flag already set, `adb root` alread
 The `.yaml` flows a replay runs take their first attempt in ONE `maestro test` call (Maestro's 10-15 s
 startup paid once), each filed as if it ran alone; a `.sh` runs alone, after that call, and so does a
 retry or a fix round (which stops at its first failure). A batched flow must start from its own
-`launchApp`, never from where the previous flow left the app.
+`launchApp`, never from where the previous flow left the app. Maestro gets `-e AW_PHASE=<phase>`.
+
+A proof with nothing to see (an analytics event, audio, a log line) is a comment in the flow's own yaml,
+so the flow still batches: `# aw-events: <regex on "<tag>: <message>">`, and optionally
+`# aw-events-tag: <logcat tag>`, `# aw-events-count: N | N.. | N..M` (default `1..`, checked on the
+`after` build only) and `# aw-events-fields: a b` (keep only those JSON fields of each line). The CLI
+reads logcat while the flows run, keeps only the matching lines (never the full log: user ids, tokens),
+gives each flow the lines of its own time window in the call (JUnit's per-flow start) and writes them
+to `<flow>-events.txt`; a count off fails the flow with cause `events`.
 """
 
 from __future__ import annotations
@@ -413,6 +421,147 @@ def _event_count(folder: Path, flow: str) -> dict[str, Any] | None:
     return {"matches": len(lines), "file": str(path)}
 
 
+EVENTS_RE = re.compile(r"^\s*#\s*aw-events(?:-(tag|count|fields))?\s*:[ \t]*(.*?)\s*$", re.M)
+LOGCAT_LINE = re.compile(r"^\s*(\d+\.\d+)\s+\d+\s+\d+\s+[VDIWEFA]\s+(.*?)\s*: (.*)$")
+EVENT_WINDOW_SLACK = 1.0  # JUnit starts are whole seconds; a flow's own events come after its launchApp
+EVENT_DRAIN_SECONDS = 1.0  # logcat lines still in flight when Maestro exits
+
+
+def event_check(flow: Path) -> dict[str, Any] | None:
+    """The logcat proof a Maestro flow declares in its own yaml (`# aw-events: ...`), or None."""
+    if flow.suffix == ".sh":
+        return None
+    try:
+        text = flow.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    found = {key or "pattern": value for key, value in EVENTS_RE.findall(text)}
+    pattern = found.get("pattern", "")
+    if not pattern:
+        return None
+    check: dict[str, Any] = {"pattern": pattern, "tag": found.get("tag") or None,
+                             "fields": (found.get("fields") or "").split()}
+    if "TODO" in pattern:
+        return {**check, "error": f"fill `# aw-events:` in {flow.name}: the pattern still has a TODO"}
+    try:
+        check["regex"] = re.compile(pattern)
+    except re.error as error:
+        return {**check, "error": f"`# aw-events:` in {flow.name} is not a valid regex: {error}"}
+    count = re.fullmatch(r"(\d+)\s*(\.\.)?\s*(\d*)", found.get("count") or "1..")
+    if not count:
+        return {**check, "error": f"`# aw-events-count:` in {flow.name} must be N, N.. or N..M"}
+    low = int(count.group(1))
+    check["min"], check["max"] = low, int(count.group(3)) if count.group(3) else None if count.group(2) else low
+    return check
+
+
+def _matches(check: dict[str, Any], tag: str, message: str) -> bool:
+    return "regex" in check and (not check["tag"] or check["tag"] == tag) and bool(check["regex"].search(f"{tag}: {message}"))
+
+
+class LogcatTap:
+    """Logcat read while flows run, keeping only the lines some flow's `aw-events` matches, in memory,
+    with the host time each was logged at (the device clock's offset measured once)."""
+
+    def __init__(self, serial: str, checks: list[dict[str, Any]]):
+        self.serial, self.checks = serial, [check for check in checks if "regex" in check]
+        self.lines: list[tuple[float, str, str]] = []
+        self.offset = 0.0
+        self.error: str | None = None
+        self.process: subprocess.Popen[str] | None = None
+        self.thread: Any = None
+        self.started = time.time()
+
+    def start(self) -> "LogcatTap":
+        import threading
+
+        adb = _adb()
+        self.started = time.time()
+        try:
+            before = time.time()
+            now = subprocess.run([adb, "-s", self.serial, "shell", "date +%s.%N"], text=True, capture_output=True,
+                                 stdin=subprocess.DEVNULL, timeout=15, check=False).stdout.strip()
+            after = time.time()
+            device_now = float(now) if re.fullmatch(r"\d+(\.\d+)?", now) else None
+            if device_now is not None and "." in now:
+                self.offset = device_now - (before + after) / 2
+            since = ["-T", f"{(device_now or before) - 2:.3f}"] if device_now is not None else []
+            tags = {check["tag"] for check in self.checks}
+            spec = ["*:S", *(f"{tag}:V" for tag in sorted(tags))] if tags and None not in tags else []
+            self.process = subprocess.Popen([adb, "-s", self.serial, "logcat", "-v", "epoch", *since, *spec],
+                                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                            stdin=subprocess.DEVNULL, text=True, errors="replace",
+                                            start_new_session=True)
+        except (OSError, subprocess.SubprocessError, ValueError) as error:
+            self.error = f"could not read logcat: {error}"
+            return self
+        self.thread = threading.Thread(target=self._read, daemon=True)
+        self.thread.start()
+        return self
+
+    def _read(self) -> None:
+        assert self.process is not None and self.process.stdout is not None
+        for line in self.process.stdout:
+            parsed = LOGCAT_LINE.match(line)
+            if parsed and any(_matches(check, parsed.group(2), parsed.group(3)) for check in self.checks):
+                self.lines.append((float(parsed.group(1)) - self.offset, parsed.group(2), parsed.group(3)))
+
+    def stop(self) -> None:
+        if self.process is None:
+            return
+        time.sleep(EVENT_DRAIN_SECONDS)
+        try:
+            os.killpg(self.process.pid, 15)
+        except (OSError, ProcessLookupError):
+            self.process.terminate()
+        try:
+            self.process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+        if self.thread is not None:
+            self.thread.join(timeout=5)
+        if self.process.stdout is not None:
+            self.process.stdout.close()
+
+
+def _render_event(check: dict[str, Any], tag: str, message: str) -> str:
+    if not check["fields"]:
+        return f"{tag}: {message}"
+    found = []
+    for field in check["fields"]:
+        value = re.search(rf'"{re.escape(field)}"\s*:\s*("[^"]*"|\[[^\]]*\]|[\w.+-]+)', message)
+        if value:
+            found.append(f"{field}={value.group(1)}")
+    return " ".join(found)
+
+
+def _finish_events(check: dict[str, Any] | None, tap: "LogcatTap | None", window: tuple[float, float] | None,
+                   folder: Path, flow: Path, phase: str, code: int, log: str) -> tuple[int, dict[str, Any] | None, bool]:
+    """A flow's `aw-events`: its lines in `<flow>-events.txt` and the count against what it expects.
+    Returns (exit code, events for replay.json, whether the count failed the flow)."""
+    if check is None:
+        return code, None, False
+    problem = check.get("error") or (tap.error if tap is not None else "no logcat was read")
+    lines: list[str] = []
+    if not problem and tap is not None:
+        lines = [_render_event(check, tag, message) for at, tag, message in tap.lines
+                 if (window is None or window[0] <= at < window[1]) and _matches(check, tag, message)]
+    path = folder / f"{flow.stem}-events.txt"
+    folder.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
+    expected = f"{check['min']}..{'' if check['max'] is None else check['max']}" if "min" in check else ""
+    events: dict[str, Any] = {"matches": len(lines), "file": str(path), "pattern": check["pattern"],
+                              **({"tag": check["tag"]} if check["tag"] else {}), **({"expected": expected} if expected else {})}
+    off = phase == "after" and "min" in check and (len(lines) < check["min"] or (check["max"] is not None and len(lines) > check["max"]))
+    if problem:
+        events["error"] = problem
+    note = problem or f"events matching {check['pattern']!r}: {len(lines)} (expected {expected or 'any'})"
+    with open(log, "a", encoding="utf-8") as handle:
+        handle.write(note + "\n")
+    failed = code == 0 and bool(problem or off)
+    return (5 if problem else 3) if failed else code, events, failed
+
+
 def install_current(target: Path, serial: str) -> dict[str, Any]:
     """`CLI device install`: the current build on `serial`. The APK is built first with no device held
     (`build_current`), then installed with `adb install` inside the device's lease, with its sha256 so
@@ -486,7 +635,8 @@ def _run_flow(flow: Path, maestro: str, serial: str, folder: Path, target: Path,
         command = [str(flow)] if os.access(flow, os.X_OK) else ["sh", str(flow)]
     else:
         env = None
-        command = [maestro, "--device", serial, "test", "--test-output-dir", str(folder), str(flow)]
+        command = [maestro, "--device", serial, "test", "-e", f"AW_PHASE={phase}", "--test-output-dir", str(folder),
+                   str(flow)]
     try:
         with log.open("w", encoding="utf-8") as handle:
             run = subprocess.run(command, cwd=target, env=env, stdout=handle, stderr=subprocess.STDOUT,
@@ -502,11 +652,43 @@ def _run_flow(flow: Path, maestro: str, serial: str, folder: Path, target: Path,
     return code, str(log)
 
 
+def _run_alone(flow: Path, maestro: str, serial: str, folder: Path, target: Path, phase: str,
+               timeout: int) -> tuple[int, str, dict[str, Any] | None, bool]:
+    """One attempt of one flow; a yaml with `aw-events` has logcat read for the whole attempt.
+    Returns (exit code, log, events, whether the event count failed it)."""
+    check = event_check(flow)
+    tap = LogcatTap(serial, [check]).start() if check is not None and "regex" in check else None
+    try:
+        code, log = _run_flow(flow, maestro, serial, folder, target, phase, timeout)
+    finally:
+        if tap is not None:
+            tap.stop()
+    # Logcat is read from a little before the start: only what this attempt logged counts.
+    window = (tap.started, float("inf")) if tap is not None else None
+    return _with_events(check, tap, window, folder, flow, phase, code, log)
+
+
+def _with_events(check: dict[str, Any] | None, tap: "LogcatTap | None", window: tuple[float, float] | None,
+                 folder: Path, flow: Path, phase: str, code: int, log: str) -> tuple[int, str, dict[str, Any] | None, bool]:
+    code, events, failed = _finish_events(check, tap, window, folder, flow, phase, code, log)
+    return code, log, events, failed
+
+
 BATCH_DIR = "_batch"
 
 
-def _run_batch(batch: list[Path], maestro: str, serial: str, out: Path, target: Path,
-               timeout: int) -> dict[str, tuple[int, str, float]]:
+def _case_start(case: Any) -> float | None:
+    """A JUnit testcase's start (Maestro writes local time, whole seconds), as epoch seconds."""
+    from datetime import datetime
+
+    try:
+        return datetime.fromisoformat(str(case.get("timestamp"))).timestamp() if case.get("timestamp") else None
+    except ValueError:
+        return None
+
+
+def _run_batch(batch: list[Path], maestro: str, serial: str, out: Path, target: Path, timeout: int,
+               phase: str = "after") -> dict[str, tuple[int, str, float, dict[str, Any] | None, bool]]:
     """The first attempt of several Maestro flows in ONE `maestro test` call: Maestro's startup (10-15 s)
     is paid once instead of once per flow. Each flow's output moves to `out/<flow>/` as if it ran alone,
     with a `maestro.out` of its own; JUnit gives each flow's result. Returns {flow name: (exit code, log,
@@ -516,14 +698,20 @@ def _run_batch(batch: list[Path], maestro: str, serial: str, out: Path, target: 
     shutil.rmtree(work, ignore_errors=True)
     work.mkdir(parents=True)
     report, console = work / "report.xml", work / "maestro.out"
-    command = [maestro, "--device", serial, "test", "--test-output-dir", str(work / "out"), "--format", "junit",
-               "--output", str(report), *(str(flow) for flow in batch)]
+    command = [maestro, "--device", serial, "test", "-e", f"AW_PHASE={phase}", "--test-output-dir", str(work / "out"),
+               "--format", "junit", "--output", str(report), *(str(flow) for flow in batch)]
+    checks = {flow.name: event_check(flow) for flow in batch}
+    wanted = [check for check in checks.values() if check is not None and "regex" in check]
+    tap = LogcatTap(serial, wanted).start() if wanted else None
     try:
         with console.open("w", encoding="utf-8") as handle:
             subprocess.run(command, cwd=target, stdout=handle, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                            timeout=timeout * len(batch), check=False)
     except (subprocess.TimeoutExpired, OSError):
         pass
+    finally:
+        if tap is not None:
+            tap.stop()
     import xml.etree.ElementTree as ElementTree
 
     try:
@@ -534,8 +722,9 @@ def _run_batch(batch: list[Path], maestro: str, serial: str, out: Path, target: 
     by_name = {flow.name: flow for flow in batch}
     by_stem = {flow.stem: flow for flow in batch}
     names = [case.get("name") or "" for case in cases]
-    decided: dict[str, tuple[int, str, float]] = {}
-    for case in cases:
+    starts = [_case_start(case) for case in cases]
+    decided: dict[str, tuple[int, str, float, dict[str, Any] | None, bool]] = {}  # code, log, seconds, events, count off
+    for index, case in enumerate(cases):
         name = case.get("name") or ""
         flow = by_name.get(Path(case.get("file") or "").name) or by_stem.get(name)
         if flow is None or flow.name in decided or names.count(name) > 1:
@@ -561,7 +750,19 @@ def _run_batch(batch: list[Path], maestro: str, serial: str, out: Path, target: 
             seconds = float(case.get("time") or 0)
         except ValueError:
             seconds = 0.0
-        decided[flow.name] = (0 if passed else 1, str(log), seconds)
+        code = 0 if passed else 1
+        check = checks.get(flow.name)
+        window = None
+        if check is not None and "regex" in check:
+            # The flow's own lines: from its start to the next flow's (a second of slack: JUnit's starts
+            # are whole seconds and a flow logs nothing before its launchApp). No start: it runs alone.
+            if starts[index] is None:
+                shutil.rmtree(folder, ignore_errors=True)
+                continue
+            following = next((start for start in starts[index + 1:] if start is not None), None)
+            window = (starts[index], following + EVENT_WINDOW_SLACK if following is not None else float("inf"))
+        code, logged, events, events_failed = _with_events(check, tap, window, folder, flow, phase, code, str(log))
+        decided[flow.name] = (code, logged, seconds, events, events_failed)
     shutil.rmtree(work, ignore_errors=True)
     return decided
 
@@ -740,7 +941,7 @@ def _replay(target: Path, serial: str, phase: str, install_base_apk: bool | None
 
     # The Maestro flows that run get their first attempt in one `maestro test` call (startup paid once).
     # A fix round keeps one call per flow: it stops at the first real failure, before the rest run.
-    batch: dict[str, tuple[int, str, float]] = {}
+    batch: dict[str, tuple[int, str, float, dict[str, Any] | None, bool]] = {}
     batch_info: dict[str, Any] = {}
     batch_since = time.time()
     if not subset:
@@ -749,7 +950,7 @@ def _replay(target: Path, serial: str, phase: str, install_base_apk: bool | None
                 and streak_of(flow, flow_digest(flow)) < STALE_FAILS]
         if len(todo) > 1:
             batch_started = time.monotonic()
-            batch = _run_batch(todo, maestro, serial, out, target, flow_timeout)
+            batch = _run_batch(todo, maestro, serial, out, target, flow_timeout, phase)
             batch_info = {"flows": [flow.name for flow in todo], "seconds": round(time.monotonic() - batch_started, 1),
                           "alone": [flow.name for flow in todo if flow.name not in batch]}
     results = []
@@ -784,23 +985,24 @@ def _replay(target: Path, serial: str, phase: str, install_base_apk: bool | None
                             **({"hints": last["hints"]} if last.get("hints") else {})})
             continue
         if flow.name in batch:
-            code, log, first_seconds = batch[flow.name]
+            code, log, first_seconds, events, events_off = batch[flow.name]
             flow_started = time.monotonic() - first_seconds
             attempt_started = batch_since
         else:
             flow_started = time.monotonic()
             attempt_started = time.time()
-            code, log = _run_flow(flow, maestro, serial, folder, target, phase, flow_timeout)
+            code, log, events, events_off = _run_alone(flow, maestro, serial, folder, target, phase, flow_timeout)
         attempts = 1
         first_failure: dict[str, Any] | None = None
         # A real failure on the new build is rerun once, from a clean app and Maestro driver. On the base
         # build a flow that looks for the new UI fails by design, so a second attempt only doubles the wait.
         if code != 0 and phase == "after":
-            first_failure = {"exit_code": code, "cause": failure_cause(code, failure_text(Path(log), folder, serial, attempt_started)),
+            first_failure = {"exit_code": code, "cause": "events" if events_off else
+                             failure_cause(code, failure_text(Path(log), folder, serial, attempt_started)),
                              "log_tail": _tail(Path(log), 8)}
             _reset_device(serial, app)
             attempt_started = time.time()
-            code, log = _run_flow(flow, maestro, serial, folder, target, phase, flow_timeout)
+            code, log, events, events_off = _run_alone(flow, maestro, serial, folder, target, phase, flow_timeout)
             attempts = 2
         allowed = set(declared[flow.name]) | (set(known) if phase == "after" else set())
         captured = []
@@ -813,12 +1015,12 @@ def _replay(target: Path, serial: str, phase: str, install_base_apk: bool | None
                 item = ingest(target, phase, media.stem, media)
                 captured.append(item["name"])
         metrics = _frame_stats(folder, flow.stem, target, phase)
-        events = _event_count(folder, flow.stem)
+        events = events or _event_count(folder, flow.stem)
         status = "passed" if code == 0 and (captured or metrics or events or phase == "before" and not allowed) else \
             "partial" if phase == "before" and captured else "failed"
         hints = flow_hints(flow, _tail(Path(log), 200)) if status == "failed" else []
-        cause = (failure_cause(code, failure_text(Path(log), folder, serial, attempt_started)) if code else "step") \
-            if status == "failed" else None
+        cause = ("events" if events_off else failure_cause(code, failure_text(Path(log), folder, serial, attempt_started))
+                 if code else "step") if status == "failed" else None
         # Failed, then passed with nothing changed: in this replay (the retry) or since the last one on this build.
         flaky = phase == "after" and status == "passed" and (first_failure is not None or (
             same_build and last.get("digest") == digest and last.get("status") == "failed" and not last.get("skipped")))

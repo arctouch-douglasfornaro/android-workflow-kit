@@ -23,7 +23,9 @@ from android_workflow import decide, locks
 from android_workflow.cli import read_json, source_fingerprint
 from android_workflow.paths import cache_dir
 from android_workflow.delivery import normalize_checklist
+from android_workflow.replay import event_check
 from android_workflow.evidence import archive_stale_after, load_manifest, record_item
+from android_workflow.replay import event_check
 from android_workflow.flows import evidence_names, recipe, scaffold
 from android_workflow.paths import STATE_HOME_ENV, run_dir
 import test_decide
@@ -570,12 +572,19 @@ class ScaffoldTests(test_decide.RunTests):
         self.start("--level", "express")
         spec = read_json(self.rundir / "ticket-spec.json")
         (self.rundir / "ticket-spec.json").write_text(json.dumps({**spec, "surfaces": ["audio"]}), encoding="utf-8")
-        result = scaffold(self.root, {"device": {"event_log_source": "EventLogInterceptorManager"}})
-        script = (self.rundir / "media/flows" / f"{result['evidence_names'][0]}.sh").read_text(encoding="utf-8")
-        self.assertIn("PATTERN='EventLogInterceptorManager.*TODO_event_name'", script)
-        self.assertIn("*TODO*) echo", script)  # an unfilled pattern fails instead of matching every event
-        self.assertIn('logcat -d | grep -E "$PATTERN"', script)
-        self.assertNotIn("logcat -d >", script)  # never the full log
+        result = scaffold(self.root, {"device": {"event_log_source": "EventLogInterceptorManager",
+                                                 "pins_extra": "featureFlagPins"}})
+        name = result["evidence_names"][0]
+        flows = self.rundir / "media/flows"
+        flow = (flows / f"{name}.yaml").read_text(encoding="utf-8")
+        self.assertFalse((flows / f"{name}.sh").exists())  # a yaml, so it runs in the single maestro call
+        self.assertIn("# aw-events: EventLogInterceptorManager.*TODO_event_name", flow)
+        self.assertIn("# aw-events-count: 1..", flow)
+        check = event_check(flows / f"{name}.yaml")
+        self.assertIn("fill `# aw-events:`", check["error"])  # an unfilled pattern fails instead of matching all
+        nav = (flows / "_nav.yaml").read_text(encoding="utf-8")
+        self.assertIn("- launchApp:\n    stopApp: true", nav)
+        self.assertIn("#   featureFlagPins: ", nav)
 
     def test_an_ac_about_audio_keeps_the_device_stage(self) -> None:
         self.start("--level", "express")

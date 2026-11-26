@@ -842,17 +842,51 @@ def run(flow):
     if declared: (shots / "not-declared.png").write_text("junk")
     else: (shots / (name + ".png")).write_text("after-" + name)
     return None
+import time
+from datetime import datetime
 cases, failed = [], False
-for flow in flows:
+base = int(time.time()) - 1000
+for index, flow in enumerate(flows):
+    # One flow: it runs now. Several: each gets a 20 s slot in the past, with its JUnit start, and logs
+    # its `# EMIT <tag> <message>` lines 3 s into its slot (the fake adb's logcat streams them).
+    start = time.time() if len(flows) == 1 else base + 20 * index
+    with (here / "logcat.txt").open("a") as logcat:
+        for tag, message in re.findall(r"^# EMIT (\S+) (.*)$", flow.read_text(), re.M):
+            logcat.write(f"  {start + (0 if len(flows) == 1 else 3):.3f}  1234  1250 I {tag}: {message}\n")
+    stamp = datetime.fromtimestamp(int(start)).isoformat()
     error = run(flow)
     failed |= error is not None
     print(f"[{'Failed' if error else 'Passed'}] {flow.stem} (1s)" + (f" ({error})" if error else ""))
     if error and len(flows) == 1: print(error)
     body = f"<failure>{error}</failure>" if error else ""
     if "NOREPORT" in flow.read_text() and len(flows) > 1: continue
-    cases.append(f'<testcase id="{flow.stem}" name="{flow.stem}" file="{flow}" time="1.0" status="{"ERROR" if error else "SUCCESS"}">{body}</testcase>')
+    cases.append(f'<testcase id="{flow.stem}" name="{flow.stem}" file="{flow}" time="1.0" timestamp="{stamp}" status="{"ERROR" if error else "SUCCESS"}">{body}</testcase>')
 if report: Path(report).write_text("<testsuites><testsuite>" + "".join(cases) + "</testsuite></testsuites>")
 sys.exit(1 if failed else 0)
+"""
+
+
+FAKE_ADB = r"""#!/usr/bin/env python3
+# fake adb: `shell date` answers the host clock, `logcat` streams the lines the fake maestro logs.
+import sys, time
+from pathlib import Path
+here = Path(sys.argv[0]).resolve().parent
+args = sys.argv[1:]
+(here / "adb-calls.log").open("a").write(" ".join(args) + "\n")
+if "date +%s.%N" in args:
+    print(f"{time.time():.9f}")
+elif "logcat" in args:
+    path = here / "logcat.txt"
+    path.touch()
+    with path.open() as handle:
+        while True:
+            line = handle.readline()
+            if line:
+                sys.stdout.write(line); sys.stdout.flush()
+            else:
+                time.sleep(0.02)
+else:
+    print("Success")
 """
 
 
@@ -995,6 +1029,59 @@ class ReplayTests(unittest.TestCase):
         self.assertIn("seconds", result["flows"][0])
         self.assertIn("install_seconds", result)
         self.assertFalse(result["over_budget"])
+
+    def event_flows(self) -> None:
+        (self.bin / "adb").write_text(FAKE_ADB, encoding="utf-8")
+        os.chmod(self.bin / "adb", 0o755)
+        drain = mock.patch("android_workflow.replay.EVENT_DRAIN_SECONDS", 0.3)
+        drain.start()
+        self.addCleanup(drain.stop)
+
+    def test_event_flows_run_in_one_call_and_each_counts_only_its_own_lines(self) -> None:
+        self.event_flows()
+        tap = '"eventName":"step_clicked","set_id":7,"email":"x@y.z"'
+        (self.flows / "a-games.yaml").write_text(
+            "- launchApp\n# aw-events: \"eventName\":\"step_clicked\"\n# aw-events-tag: QZ_EVENTLOG\n"
+            "# aw-events-count: 1\n# aw-events-fields: eventName set_id\n"
+            f"# EMIT QZ_EVENTLOG {{{tap}}}\n# EMIT Other {{{tap}}}\n", encoding="utf-8")
+        (self.flows / "b-order.yaml").write_text(
+            "- launchApp\n# aw-events: QZ_EVENTLOG: .*\"eventName\":\"shown\"\n# aw-events-count: 2..\n"
+            '# EMIT QZ_EVENTLOG {"eventName":"shown"}\n# EMIT QZ_EVENTLOG {"eventName":"shown"}\n'
+            '# EMIT QZ_EVENTLOG {"eventName":"noise"}\n', encoding="utf-8")
+        result, code = self.replay()
+        self.assertEqual((result["status"], code), ("replayed", 0))
+        self.assertEqual(result["batch"]["flows"], ["a-games.yaml", "b-order.yaml"])
+        self.assertEqual(result["batch"]["alone"], [])
+        games, order = result["flows"]
+        self.assertEqual((games["events"]["matches"], games["events"]["expected"]), (1, "1..1"))
+        self.assertEqual((order["events"]["matches"], order["events"]["expected"]), (2, "2.."))
+        kept = Path(games["events"]["file"]).read_text(encoding="utf-8")
+        self.assertEqual(kept, 'eventName="step_clicked" set_id=7\n')  # only the named fields, never the email
+        self.assertEqual((self.bin / "maestro-batches.log").read_text(), "a-games b-order\n")
+        calls = (self.bin / "adb-calls.log").read_text()
+        self.assertEqual(calls.count("logcat -v epoch"), 1)  # one read for the whole call
+        self.assertNotIn("logcat -c", calls)  # never cleared between flows
+
+    def test_an_event_count_off_fails_the_flow_with_cause_events_after_one_retry(self) -> None:
+        self.event_flows()
+        (self.flows / "a.yaml").write_text(
+            '- launchApp\n# aw-events: "eventName":"clicked"\n# aw-events-count: 1\n'
+            '# EMIT QZ_EVENTLOG {"eventName":"clicked"}\n# EMIT QZ_EVENTLOG {"eventName":"clicked"}\n', encoding="utf-8")
+        before, _ = self.replay("--phase", "before")  # the base build lacks the event by design: not checked
+        self.assertNotEqual(before["flows"][0]["status"], "failed")
+        result, _ = self.replay()
+        flow = result["flows"][0]
+        self.assertEqual((flow["status"], flow["cause"], flow["attempts"]), ("failed", "events", 2))
+        self.assertEqual(flow["events"]["matches"], 2)  # the retry's own lines, not the first attempt's too
+        self.assertIn("expected 1..1", flow["log_tail"])
+
+    def test_an_unfilled_event_pattern_fails_instead_of_matching_everything(self) -> None:
+        self.event_flows()
+        (self.flows / "a.yaml").write_text("- launchApp\n# aw-events: TODO_log_source.*TODO_event_name\n", encoding="utf-8")
+        result, _ = self.replay()
+        flow = result["flows"][0]
+        self.assertEqual((flow["status"], flow["cause"]), ("failed", "events"))
+        self.assertIn("fill `# aw-events:`", flow["events"]["error"])
 
     def test_a_flaky_flow_is_rerun_once(self) -> None:
         (self.flows / "a.yaml").write_text("- FLAKY\n- takeScreenshot: a-shot\n", encoding="utf-8")
