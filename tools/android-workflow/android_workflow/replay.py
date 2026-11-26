@@ -11,6 +11,11 @@ run alone; a `<flow>.sh` next to `<flow>.yaml` runs instead of it, for what Maes
 the network off at a marker) and gets `AW_SERIAL`, `AW_MAESTRO`, `AW_OUT`, `AW_FLOW`, `AW_PHASE` and
 `AW_REPLAY_STATE`: a folder emptied at the start of each replay, where a script marks setup that later
 flows of the same replay can skip (a feature flag already set, `adb root` already done).
+
+The `.yaml` flows a replay runs take their first attempt in ONE `maestro test` call (Maestro's 10-15 s
+startup paid once), each filed as if it ran alone; a `.sh` runs alone, after that call, and so does a
+retry or a fix round (which stops at its first failure). A batched flow must start from its own
+`launchApp`, never from where the previous flow left the app.
 """
 
 from __future__ import annotations
@@ -497,6 +502,70 @@ def _run_flow(flow: Path, maestro: str, serial: str, folder: Path, target: Path,
     return code, str(log)
 
 
+BATCH_DIR = "_batch"
+
+
+def _run_batch(batch: list[Path], maestro: str, serial: str, out: Path, target: Path,
+               timeout: int) -> dict[str, tuple[int, str, float]]:
+    """The first attempt of several Maestro flows in ONE `maestro test` call: Maestro's startup (10-15 s)
+    is paid once instead of once per flow. Each flow's output moves to `out/<flow>/` as if it ran alone,
+    with a `maestro.out` of its own; JUnit gives each flow's result. Returns {flow name: (exit code, log,
+    seconds)} for the flows the call decided; a flow it did not (Maestro died or the call ran past the
+    flows' summed timeouts) is left out, and runs alone."""
+    work = out / BATCH_DIR
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
+    report, console = work / "report.xml", work / "maestro.out"
+    command = [maestro, "--device", serial, "test", "--test-output-dir", str(work / "out"), "--format", "junit",
+               "--output", str(report), *(str(flow) for flow in batch)]
+    try:
+        with console.open("w", encoding="utf-8") as handle:
+            subprocess.run(command, cwd=target, stdout=handle, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                           timeout=timeout * len(batch), check=False)
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    import xml.etree.ElementTree as ElementTree
+
+    try:
+        cases = list(ElementTree.parse(report).getroot().iter("testcase"))
+    except (OSError, ElementTree.ParseError):
+        cases = []
+    lines = console.read_text(encoding="utf-8", errors="replace").splitlines() if console.is_file() else []
+    by_name = {flow.name: flow for flow in batch}
+    by_stem = {flow.stem: flow for flow in batch}
+    names = [case.get("name") or "" for case in cases]
+    decided: dict[str, tuple[int, str, float]] = {}
+    for case in cases:
+        name = case.get("name") or ""
+        flow = by_name.get(Path(case.get("file") or "").name) or by_stem.get(name)
+        if flow is None or flow.name in decided or names.count(name) > 1:
+            continue  # two flows with the same `name:` share an output folder: each runs alone
+        failure = case.find("failure")
+        if failure is None:
+            failure = case.find("error")
+        passed = failure is None and (case.get("status") or "SUCCESS").upper() == "SUCCESS"
+        folder = out / flow.stem
+        shutil.rmtree(folder, ignore_errors=True)
+        produced = next((path for path in (work / "out").glob(f"*/{name}") if path.is_dir()), None) if name else None
+        if produced is not None:
+            shutil.move(str(produced), str(folder))
+        folder.mkdir(parents=True, exist_ok=True)
+        own = [line for line in lines if re.match(rf"\s*\[\w+\] {re.escape(name)}(?: \(|$)", line)]
+        message = "" if failure is None else (failure.text or failure.get("message") or "").strip()
+        log = folder / "maestro.out"
+        log.write_text("\n".join([f"(one `maestro test` call with {len(batch)} flows)", *own,
+                                  *([message] if message else []),
+                                  *([_tail(next(folder.rglob("maestro.log")), 40)] if not passed and any(folder.rglob("maestro.log")) else [])])
+                       + "\n", encoding="utf-8")
+        try:
+            seconds = float(case.get("time") or 0)
+        except ValueError:
+            seconds = 0.0
+        decided[flow.name] = (0 if passed else 1, str(log), seconds)
+    shutil.rmtree(work, ignore_errors=True)
+    return decided
+
+
 def replay(target: Path, serial: str | None = None, phase: str = "after", install_base_apk: bool | None = None,
            lease_timeout: float = 1200.0, only: list[str] | None = None, fresh: bool = False,
            full: bool = False) -> dict[str, Any]:
@@ -660,6 +729,29 @@ def _replay(target: Path, serial: str, phase: str, install_base_apk: bool | None
     owned = sorted({name for names in declared.values() for name in names} | (set(known) if phase == "after" else set()))
     keep_names = {name for item in kept.values() for name in item.get("captured") or []}
     _drop_phase(target, phase, [name for name in owned if name not in keep_names])  # what runs again is captured again
+
+    def flakes_of(flow: Path, digest: str) -> int:
+        entry = health.get(flow.name) or {}
+        return int(entry.get("flaky") or 0) if entry.get("digest") == digest else 0
+
+    def streak_of(flow: Path, digest: str) -> int:
+        last = earlier.get(flow.name) or {}
+        return int(last.get("failed_streak") or 0) if last.get("digest") == digest else 0
+
+    # The Maestro flows that run get their first attempt in one `maestro test` call (startup paid once).
+    # A fix round keeps one call per flow: it stops at the first real failure, before the rest run.
+    batch: dict[str, tuple[int, str, float]] = {}
+    batch_info: dict[str, Any] = {}
+    batch_since = time.time()
+    if not subset:
+        todo = [flow for flow in order if flow.suffix != ".sh" and flow.name not in kept
+                and not (phase == "after" and flakes_of(flow, flow_digest(flow)) >= UNSTABLE_FLAKES)
+                and streak_of(flow, flow_digest(flow)) < STALE_FAILS]
+        if len(todo) > 1:
+            batch_started = time.monotonic()
+            batch = _run_batch(todo, maestro, serial, out, target, flow_timeout)
+            batch_info = {"flows": [flow.name for flow in todo], "seconds": round(time.monotonic() - batch_started, 1),
+                          "alone": [flow.name for flow in todo if flow.name not in batch]}
     results = []
     stopped: str | None = None
     device_errors = 0
@@ -668,15 +760,14 @@ def _replay(target: Path, serial: str, phase: str, install_base_apk: bool | None
             results.append({**kept[flow.name], "reused": True, "seconds": 0.0})
             continue
         digest = flow_digest(flow)
-        if stopped:
+        if stopped and not (flow.name in batch and batch[flow.name][0] == 0):  # a flow that already passed keeps it
             results.append({"flow": flow.name, "status": "not_run", "digest": digest, "captured": [], "attempts": 0,
                             "seconds": 0.0, "reason": stopped})
             continue
         folder = out / flow.stem
         folder.mkdir(parents=True, exist_ok=True)
         last = earlier.get(flow.name) or {}
-        flakes = int((health.get(flow.name) or {}).get("flaky") or 0) \
-            if (health.get(flow.name) or {}).get("digest") == digest else 0
+        flakes = flakes_of(flow, digest)
         if phase == "after" and flakes >= UNSTABLE_FLAKES:
             # It failed and then passed with nothing changed, again: its result says nothing about the change.
             results.append({"flow": flow.name, "status": "unstable", "skipped": True, "digest": digest,
@@ -684,7 +775,7 @@ def _replay(target: Path, serial: str, phase: str, install_base_apk: bool | None
                             "reason": f"flaky in {flakes} replays: not scripted any more; verify its AC by hand "
                                       "(or list it under Not verified) or repair the flow, an edit runs it again"})
             continue
-        streak = int(last.get("failed_streak") or 0) if last.get("digest") == digest else 0
+        streak = streak_of(flow, digest)
         if streak >= STALE_FAILS:
             # Same flow, same source: a third run fails the same way. Only an edit to the flow (or the code) reruns it.
             results.append({"flow": flow.name, "status": "failed", "skipped": True, "digest": digest,
@@ -692,9 +783,14 @@ def _replay(target: Path, serial: str, phase: str, install_base_apk: bool | None
                             "reason": f"failed {streak} replays unchanged on this source: repair the flow or delete it",
                             **({"hints": last["hints"]} if last.get("hints") else {})})
             continue
-        flow_started = time.monotonic()
-        attempt_started = time.time()
-        code, log = _run_flow(flow, maestro, serial, folder, target, phase, flow_timeout)
+        if flow.name in batch:
+            code, log, first_seconds = batch[flow.name]
+            flow_started = time.monotonic() - first_seconds
+            attempt_started = batch_since
+        else:
+            flow_started = time.monotonic()
+            attempt_started = time.time()
+            code, log = _run_flow(flow, maestro, serial, folder, target, phase, flow_timeout)
         attempts = 1
         first_failure: dict[str, Any] | None = None
         # A real failure on the new build is rerun once, from a clean app and Maestro driver. On the base
@@ -735,6 +831,7 @@ def _replay(target: Path, serial: str, phase: str, install_base_apk: bool | None
                         **({"first_failure": first_failure} if flaky and first_failure else {}),
                         **({"hints": hints} if hints else {}),
                         "attempts": attempts, "seconds": round(time.monotonic() - flow_started, 1),
+                        **({"batched": True} if flow.name in batch else {}),
                         **({"frames": metrics} if metrics else {}),
                         **({"events": events} if events else {}),
                         **({"log_tail": _tail(Path(log))} if code else {}),
@@ -775,6 +872,7 @@ def _replay(target: Path, serial: str, phase: str, install_base_apk: bool | None
         "status": status, "phase": phase, "serial": serial, "fingerprint": fingerprint,
         "flows": results, **{key: value for key, value in named.items() if value},
         **({"subset": {"first": first, "stopped": stopped}} if subset else {}),
+        **({"batch": batch_info} if batch_info else {}),
         **({"tree": tree} if tree else {}),
         "identical_to_before": identical, "missing_from_after" if phase == "after" else "missing": missing,
         "build_seconds": build_seconds, "install_seconds": install_seconds, "flows_seconds": flows_seconds,
@@ -809,6 +907,8 @@ def _replay(target: Path, serial: str, phase: str, install_base_apk: bool | None
     counts = [f"{len(named[key])} {label}" for key, label in labels.items() if named[key]]
     if subset:
         counts.insert(0, f"subset: {len(first)} first" if first else "subset")
+    if batch:
+        counts.insert(0, f"{len(batch)} in one maestro call ({batch_info['seconds']}s)")
     note = f"{passed}/{len(results)} flow(s) {'replayed on the new build' if phase == 'after' else 'run on the base build'}" \
            f" in {flows_seconds}s" + (f" ({'; '.join(counts)})" if counts else "") \
            + (f" (build {build_seconds}s before the device, install {install_seconds}s)" if phase == "after" else "")

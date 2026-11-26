@@ -807,27 +807,52 @@ if __name__ == "__main__":
     unittest.main()
 
 
-FAKE_MAESTRO = """#!/bin/sh
-# fake maestro: --device S test --test-output-dir DIR FLOW
-out=""; flow=""
-while [ $# -gt 0 ]; do
-  case "$1" in --test-output-dir) out="$2"; shift;; *.yaml) flow="$1";; esac; shift
-done
-name=$(basename "$flow" .yaml)
-if grep -q FAILME "$flow"; then echo "Assertion is false"; exit 1; fi
-if grep -q FLAKY "$flow" && [ ! -f "$flow.seen" ]; then touch "$flow.seen"; echo "flaky"; exit 1; fi
-if grep -q FAILWHILE "$flow" && [ -f "$(dirname "$0")/fail-now" ]; then echo "Element not found: Save"; exit 1; fi
-if grep -q DRIVERDIED "$flow"; then mkdir -p "$(dirname "$0")/maestro-tests/1"; echo "DeviceServerDiedException: Device server died during 'deviceInfo' on emu-1: UNAVAILABLE" > "$(dirname "$0")/maestro-tests/1/maestro.log"; echo " > Flow x"; exit 1; fi
-if grep -q DEVICEDOWN "$flow"; then echo "io.grpc.StatusRuntimeException: UNAVAILABLE: io exception"; exit 1; fi
-echo "$name" >> "$(dirname "$0")/maestro-runs.log"
-mkdir -p "$out/2026/$name/takeScreenshot"
-declared=$(grep -E '^ *- *(takeScreenshot|startRecording):' "$flow" | sed 's/^[^:]*: *//')
-if [ -n "$declared" ]; then
-  for d in $declared; do printf 'shot-%s' "$(basename "$d")" > "$out/2026/$name/takeScreenshot/$(basename "$d").png"; done
-  printf 'junk' > "$out/2026/$name/takeScreenshot/not-declared.png"
-else
-  printf 'after-%s' "$name" > "$out/2026/$name/takeScreenshot/$name.png"
-fi
+FAKE_MAESTRO = r"""#!/usr/bin/env python3
+# fake maestro: --device S test --test-output-dir DIR [--format junit --output FILE] FLOW...
+import os, re, sys
+from pathlib import Path
+here = Path(sys.argv[0]).resolve().parent
+args, out, report, flows = sys.argv[1:], "", "", []
+i = 0
+while i < len(args):
+    if args[i] in ("--test-output-dir", "--output", "--format", "--device"):
+        if args[i] == "--test-output-dir": out = args[i + 1]
+        if args[i] == "--output": report = args[i + 1]
+        i += 2; continue
+    if args[i].endswith(".yaml"): flows.append(Path(args[i]))
+    i += 1
+if len(flows) > 1:
+    (here / "maestro-batches.log").open("a").write(" ".join(f.stem for f in flows) + "\n")
+def run(flow):
+    text, name = flow.read_text(), flow.stem
+    if "FAILME" in text: return "Assertion is false"
+    seen = Path(str(flow) + ".seen")
+    if "FLAKY" in text and not seen.exists(): seen.touch(); return "flaky"
+    if "FAILWHILE" in text and (here / "fail-now").exists(): return "Element not found: Save"
+    if "DRIVERDIED" in text:
+        (here / "maestro-tests/1").mkdir(parents=True, exist_ok=True)
+        (here / "maestro-tests/1/maestro.log").write_text("DeviceServerDiedException: Device server died during 'deviceInfo' on emu-1: UNAVAILABLE")
+        return " > Flow x"
+    if "DEVICEDOWN" in text: return "io.grpc.StatusRuntimeException: UNAVAILABLE: io exception"
+    with (here / "maestro-runs.log").open("a") as log: log.write(name + "\n")
+    shots = Path(out) / "2026" / name / "takeScreenshot"
+    shots.mkdir(parents=True, exist_ok=True)
+    declared = re.findall(r"^ *- *(?:takeScreenshot|startRecording): *(\S+)", text, re.M)
+    for d in declared: (shots / (os.path.basename(d) + ".png")).write_text("shot-" + os.path.basename(d))
+    if declared: (shots / "not-declared.png").write_text("junk")
+    else: (shots / (name + ".png")).write_text("after-" + name)
+    return None
+cases, failed = [], False
+for flow in flows:
+    error = run(flow)
+    failed |= error is not None
+    print(f"[{'Failed' if error else 'Passed'}] {flow.stem} (1s)" + (f" ({error})" if error else ""))
+    if error and len(flows) == 1: print(error)
+    body = f"<failure>{error}</failure>" if error else ""
+    if "NOREPORT" in flow.read_text() and len(flows) > 1: continue
+    cases.append(f'<testcase id="{flow.stem}" name="{flow.stem}" file="{flow}" time="1.0" status="{"ERROR" if error else "SUCCESS"}">{body}</testcase>')
+if report: Path(report).write_text("<testsuites><testsuite>" + "".join(cases) + "</testsuite></testsuites>")
+sys.exit(1 if failed else 0)
 """
 
 
@@ -1035,6 +1060,56 @@ class ReplayTests(unittest.TestCase):
         self.assertEqual(result["device_errors"], ["a.yaml", "b.yaml"])
         self.assertIn("not on the change", result["next"])
         self.assertIn("2 device error", self.stage_log())
+
+    def batches(self) -> list[list[str]]:
+        log = self.bin / "maestro-batches.log"
+        return [line.split() for line in log.read_text(encoding="utf-8").splitlines()] if log.is_file() else []
+
+    def test_the_maestro_flows_run_in_one_call_and_each_files_its_own_captures(self) -> None:
+        (self.flows / "a.yaml").write_text("- takeScreenshot: a-shot\n", encoding="utf-8")
+        (self.flows / "b.yaml").write_text("- FLAKY\n- takeScreenshot: b-shot\n", encoding="utf-8")
+        (self.flows / "c.yaml").write_text("- takeScreenshot: c-shot\n", encoding="utf-8")
+        (self.flows / "d.yaml").write_text("- FAILME\n", encoding="utf-8")
+        (self.flows / "e.yaml").write_text("- takeScreenshot: e-shot\n", encoding="utf-8")
+        (self.flows / "e.sh").write_text('#!/bin/sh\n"$AW_MAESTRO" --device "$AW_SERIAL" test --test-output-dir "$AW_OUT" "$AW_FLOW"\n',
+                                         encoding="utf-8")
+        os.chmod(self.flows / "e.sh", 0o755)
+        result, _ = self.replay()
+        self.assertEqual(self.batches(), [["a", "b", "c", "d"]])  # the script still runs on its own
+        self.assertEqual(result["batch"]["flows"], ["a.yaml", "b.yaml", "c.yaml", "d.yaml"])
+        by_flow = {item["flow"]: item for item in result["flows"]}
+        self.assertEqual({name: by_flow[name]["captured"] for name in ("a.yaml", "c.yaml", "e.sh")},
+                         {"a.yaml": ["a-shot"], "c.yaml": ["c-shot"], "e.sh": ["e-shot"]})
+        self.assertTrue(by_flow["a.yaml"]["batched"])
+        self.assertNotIn("batched", by_flow["e.sh"])
+        # a failure in the call is retried alone: flaky when the retry passes, failed with its own log when not
+        self.assertEqual((by_flow["b.yaml"]["status"], by_flow["b.yaml"]["attempts"], by_flow["b.yaml"]["flaky"]),
+                         ("passed", 2, True))
+        self.assertEqual((by_flow["d.yaml"]["status"], by_flow["d.yaml"]["attempts"]), ("failed", 2))
+        self.assertIn("Assertion is false", by_flow["d.yaml"]["log_tail"])
+        self.assertTrue((run_dir(self.root) / "media/replay-after/a/maestro.out").is_file())
+        self.assertFalse((run_dir(self.root) / "media/replay-after/_batch").exists())
+        self.assertIn("4 in one maestro call", self.stage_log())
+
+    def test_a_flow_the_call_did_not_report_runs_alone(self) -> None:
+        (self.flows / "a.yaml").write_text("- takeScreenshot: a-shot\n", encoding="utf-8")
+        (self.flows / "b.yaml").write_text("- NOREPORT\n- takeScreenshot: b-shot\n", encoding="utf-8")
+        result, _ = self.replay()
+        self.assertEqual(result["status"], "replayed")
+        self.assertEqual(result["batch"]["alone"], ["b.yaml"])
+        self.assertEqual([item.get("batched", False) for item in result["flows"]], [True, False])
+
+    def test_a_fix_round_runs_its_flows_one_call_each(self) -> None:
+        for name in ("a", "b"):
+            (self.flows / f"{name}.yaml").write_text(f"- FAILWHILE\n- takeScreenshot: {name}-shot\n", encoding="utf-8")
+        (self.bin / "fail-now").touch()
+        self.replay()
+        (self.bin / "maestro-batches.log").unlink()
+        (self.bin / "fail-now").unlink()
+        self.change_source("val x = 1\n")
+        second, _ = self.replay()
+        self.assertIn("subset", second)
+        self.assertEqual((second["status"], self.batches()), ("replayed", []))
 
     def test_a_driver_error_only_in_maestros_own_log_is_a_device_error(self) -> None:
         (self.flows / "a.yaml").write_text("- DRIVERDIED\n- takeScreenshot: a-shot\n", encoding="utf-8")
