@@ -25,7 +25,7 @@ from android_workflow.paths import media_dir, run_dir, state_home, workflow_root
 
 EVIDENCE_LINE = re.compile(r"(?i)\b(capture|evidence|screenshot|clip|record)\b")
 EVIDENCE_NAME = re.compile(r"`([a-z0-9]+(?:-[a-z0-9]+)+)`")
-RECIPE_HEADING = re.compile(r"(?i)navigation recipe")
+RECIPE_HEADING = re.compile(r"(?i)\b(?:navigation|device) recipe")
 PERF_TOPICS = frozenset({"performance", "compose-performance"})
 KNOWN_LIMIT = 30
 
@@ -80,6 +80,12 @@ NAV = """appId: {app_id}
 # Fill each TODO with a selector (text, id or test tag, never coordinates) and wait on what the
 # step shows, never a sleep. A deep link beats tapping through screens: `openLink` once the app is up.
 - launchApp{launch}
+# TODO: wait on the app's first screen before anything else (an openLink right after launchApp is
+# refused: the link's screen may not be drawn when the flow captures it):
+# - extendedWaitUntil:
+#     visible:
+#       id: "..."
+#     timeout: 30000
 {steps}"""
 PINS_LAUNCH = """:
     stopApp: true

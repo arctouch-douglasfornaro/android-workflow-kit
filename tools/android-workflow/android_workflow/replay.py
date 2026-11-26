@@ -217,6 +217,46 @@ OPEN_LINK_RE = re.compile(r"^\s*-\s*openLink\b", re.M)
 LAUNCH_APP_RE = re.compile(r"^\s*-\s*launchApp\b", re.M)
 
 
+TOP_STEP_RE = re.compile(r"^-\s*([A-Za-z]+)\s*:?\s*(.*?)\s*$")
+RUN_FLOW_FILE_RE = re.compile(r"^(?:file\s*:\s*)?['\"]?([\w./-]+\.ya?ml)['\"]?$")
+
+
+def flow_steps(flow: Path, depth: int = 0) -> list[str]:
+    """The flow's top-level commands in order, with each `runFlow: <helper>.yaml` inlined."""
+    source = flow if flow.suffix != ".sh" else next((flow.with_suffix(ext) for ext in (".yaml", ".yml")
+                                                    if flow.with_suffix(ext).is_file()), None)
+    try:
+        lines = source.read_text(encoding="utf-8").split("\n---", 1)[-1].splitlines() if source else []
+    except OSError:
+        return []
+    steps: list[str] = []
+    for index, line in enumerate(lines):
+        step = TOP_STEP_RE.match(line)
+        if not step:
+            continue
+        name, rest = step.group(1), step.group(2)
+        if name == "runFlow" and depth < 5:
+            nested = rest or next((raw.strip() for raw in lines[index + 1:index + 3] if "file" in raw), "")
+            helper = RUN_FLOW_FILE_RE.match(nested.strip())
+            if helper and (flow.parent / helper.group(1)).is_file():
+                steps += flow_steps(flow.parent / helper.group(1), depth + 1)
+                continue
+        steps.append(name)
+    return steps
+
+
+def launch_then_link(flow: Path) -> str | None:
+    """`launchApp` straight into `openLink`: the app's first screen and the link's activity start
+    together, and on a slow device the link's screen is not drawn yet when the flow captures it (the
+    capture shows the previous app while the asserts already passed)."""
+    steps = flow_steps(flow)
+    if any(name == "launchApp" and following == "openLink" for name, following in zip(steps, steps[1:])):
+        return (f"{flow.name}: openLink right after launchApp: wait on the app's first screen in between "
+                "(`extendedWaitUntil` on a test tag or text it shows), or the link's screen may not be drawn "
+                "when the flow captures it")
+    return None
+
+
 def flow_hints(flow: Path, log_text: str) -> list[str]:
     """Known causes of a failed flow that the flow text or its log already show."""
     hints = []
@@ -945,7 +985,7 @@ def _replay(target: Path, serial: str, phase: str, install_base_apk: bool | None
     batch_info: dict[str, Any] = {}
     batch_since = time.time()
     if not subset:
-        todo = [flow for flow in order if flow.suffix != ".sh" and flow.name not in kept
+        todo = [flow for flow in order if flow.suffix != ".sh" and flow.name not in kept and not launch_then_link(flow)
                 and not (phase == "after" and flakes_of(flow, flow_digest(flow)) >= UNSTABLE_FLAKES)
                 and streak_of(flow, flow_digest(flow)) < STALE_FAILS]
         if len(todo) > 1:
@@ -975,6 +1015,11 @@ def _replay(target: Path, serial: str, phase: str, install_base_apk: bool | None
                             "flaky_count": flakes, "captured": [], "attempts": 0, "seconds": 0.0,
                             "reason": f"flaky in {flakes} replays: not scripted any more; verify its AC by hand "
                                       "(or list it under Not verified) or repair the flow, an edit runs it again"})
+            continue
+        unsafe = launch_then_link(flow)
+        if unsafe:  # its captures could show the previous screen: fixed before it takes device time
+            results.append({"flow": flow.name, "status": "failed", "cause": "flow", "digest": digest,
+                            "captured": [], "attempts": 0, "seconds": 0.0, "reason": unsafe})
             continue
         streak = streak_of(flow, digest)
         if streak >= STALE_FAILS:

@@ -55,7 +55,9 @@ Flows live in `RUN/media/flows/`, one per behavior in the plan's recipe (`<surfa
   `assertVisible`, `waitForAnimationToEnd`) or poll with a cap.
 - **Shared navigation in `_nav.yaml`** (`runFlow: _nav.yaml`; `_*` files never run alone), with the
   recipe's selectors (text / test tag / id, never coordinates). When the recipe has a deep link, start
-  the flow from it (`openLink`) instead of tapping through screens.
+  the flow from it (`openLink`) instead of tapping through screens, once the app's first screen is up:
+  an `openLink` right after `launchApp` is refused (the link's screen may not be drawn when it is
+  captured), so wait on that screen (`extendedWaitUntil`) in between.
 - **Every flow starts from its own `launchApp`**: the replay runs all `.yaml` flows in one `maestro
   test` call, so a flow never relies on where the previous one left the app. Feature-flag pins go in the
   launch (`launchApp: {stopApp: true, arguments: {<device.pins_extra>: '<json>'}}`), not in a `.sh`.
@@ -115,7 +117,8 @@ the setting only when an AC is about what happens when it changes at runtime.
      by hand (steps 3–4), then save the flows you drove.
    - A failed flow's `cause`: `step`/`timeout` (the screen is not what the flow expects: the change or
      the flow is wrong), `events` (the flow ran but its `aw-events` count is off, or the pattern is
-     unfilled: check the pattern against `<flow>-events.txt` before calling it a FAIL), `app_crash`, or
+     unfilled: check the pattern against `<flow>-events.txt` before calling it a FAIL), `flow` (refused
+     before running, the reason says what to fix in it), `app_crash`, or
      `device` (Maestro's driver or adb). Only device errors: replay
      once more, never a FAIL. `flaky` (failed then passed with nothing changed): its captures count,
      note it under Anomalies. `unstable` (no longer run): verify by hand or Not verified. `not_run` (a

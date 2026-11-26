@@ -1083,6 +1083,22 @@ class ReplayTests(unittest.TestCase):
         self.assertEqual((flow["status"], flow["cause"]), ("failed", "events"))
         self.assertIn("fill `# aw-events:`", flow["events"]["error"])
 
+    def test_a_deep_link_right_after_launch_is_refused_before_it_takes_the_device(self) -> None:
+        (self.flows / "_nav.yaml").write_text("appId: x\n---\n- launchApp:\n    stopApp: true\n", encoding="utf-8")
+        (self.flows / "detail.yaml").write_text(
+            "appId: x\n---\n- runFlow: _nav.yaml\n- openLink: notes://note/1\n- takeScreenshot: detail\n", encoding="utf-8")
+        (self.flows / "list.yaml").write_text("appId: x\n---\n- runFlow: _nav.yaml\n- takeScreenshot: list\n", encoding="utf-8")
+        result, _ = self.replay()
+        detail = next(item for item in result["flows"] if item["flow"] == "detail.yaml")
+        self.assertEqual((detail["status"], detail["cause"], detail["attempts"]), ("failed", "flow", 0))
+        self.assertIn("openLink right after launchApp", detail["reason"])
+        self.assertNotIn("detail", (self.bin / "maestro-runs.log").read_text())  # no device time spent on it
+        (self.flows / "_nav.yaml").write_text(
+            "appId: x\n---\n- launchApp:\n    stopApp: true\n- extendedWaitUntil:\n    visible:\n      id: notes_list\n",
+            encoding="utf-8")
+        fixed, code = self.replay()
+        self.assertEqual((fixed["status"], code), ("replayed", 0))
+
     def test_a_flaky_flow_is_rerun_once(self) -> None:
         (self.flows / "a.yaml").write_text("- FLAKY\n- takeScreenshot: a-shot\n", encoding="utf-8")
         result, _ = self.replay()

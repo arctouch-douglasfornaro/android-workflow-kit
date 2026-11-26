@@ -586,6 +586,13 @@ class ScaffoldTests(test_decide.RunTests):
         self.assertIn("- launchApp:\n    stopApp: true", nav)
         self.assertIn("#   featureFlagPins: ", nav)
 
+    def test_a_device_recipe_heading_names_the_flows_too(self) -> None:
+        from android_workflow.flows import evidence_names, recipe
+
+        plan = ("## Plan\n\nDevice recipe (feature map row \"Note detail\"):\n1. Open notes://note/1.\n"
+                "2. Assert the edited line. Capture `note-detail-edited`.\n\n## Tests\n")
+        self.assertEqual(evidence_names(recipe(plan)), ["note-detail-edited"])
+
     def test_an_ac_about_audio_keeps_the_device_stage(self) -> None:
         self.start("--level", "express")
         test_decide.cli("update-spec", "--target", str(self.root), "--surfaces", "",
