@@ -43,6 +43,17 @@ hands over (a bug triage passes its symptom, reproduction, evidence and cause).
 reuse.>
 ```
 
+Add these to the ticket when they apply:
+
+- **UI work:** the link to the exact design frame, the exact copy, and the evidence the PR must show
+  (a screenshot of each state or variant).
+- **New strings:** the project's localization skill or rule, when it has one.
+- **A product decision still open:** the assumption this ticket takes, so a different decision points
+  straight at it.
+- **A blocker outside the code:** name it (a spec row, an API contract, a flag key to confirm) and what
+  unblocks it.
+- **A pattern to reuse:** the sibling implementation to copy, with `file:line`.
+
 For a bug, the description says what happens and what is expected, and the ticket adds a
 **Steps to reproduce** list (with the build or version and the device) before the acceptance criteria,
 plus the evidence it has (a screenshot, a clip, a log line) and the probable cause with `file:line`
