@@ -192,6 +192,14 @@ To watch a PR that is already open: `/android-workflow APP-123 --watch` (add `--
 branch is not checked out). The `watch` keys in `.ai/android-workflow.json` (`auto_merge`,
 `require_review`, `merge_method`, `max_hours`, `bots`) are in the [CLI reference](tools/android-workflow/README.md).
 
+To watch **all** your open PRs, run `/android-workflow` (or `/android-workflow --watch`) with no ticket in
+the app's main checkout. It is a listener: each of your open PRs in this repository gets its own tab
+running `/android-workflow <ID> --watch --pr N`, in the checkout of the PR's branch (a new `wt-<branch>`
+worktree when none has it), until the PR is merged. A PR another session already watches is left
+alone, PRs you open later get their tab too, and a tab you close stays closed until you start the
+listener again. Forks are reported, never checked out; drafts are watched unless `watch.inbox.drafts`
+is `false`. Tabs open with the `review.inbox` terminal and agent settings.
+
 ### 6. Watch the agents work
 
 Each run has a live page that shows the agents as an office: one desk per agent, its clock and tokens,

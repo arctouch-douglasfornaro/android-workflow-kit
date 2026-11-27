@@ -1361,10 +1361,21 @@ def dispatch(target: Path, args: Any) -> tuple[dict[str, Any], int]:
             raise ValueError("reply needs --item and either --body or --skip (--edit needs --body)")
         result = reply(target, args.item, body=args.body, skip=args.skip, edit=edit)
         return {**result, "then": "the other replies, then " + next_step({"action": "wait"}, target)}, 0
+    if args.action == "inbox":
+        from android_workflow import pr_inbox
+
+        if getattr(args, "once", False):
+            return pr_inbox.inbox_once(target), 0
+        return pr_inbox.inbox(target, wait=getattr(args, "wait", False), timeout=args.timeout), 0
     if args.action == "launch":
         from android_workflow.review_inbox import launch_watch
 
-        return launch_watch(target), 0
+        if args.pr:  # one of the developer's PRs, from the main checkout (CLI pr inbox)
+            from android_workflow import pr_inbox
+
+            result = pr_inbox.launch(target, int(args.pr), dry_run=getattr(args, "dry_run", False))
+            return result, 0 if result["status"] in {"launched", "running", "dry_run", "ended"} else 1
+        return launch_watch(target, dry_run=getattr(args, "dry_run", False)), 0
     if args.action == "finish":
         from android_workflow.paths import run_dir
         from android_workflow.review_inbox import finish

@@ -4524,10 +4524,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     office_parser.add_argument("--days", type=float, help="with --prune: also drop past runs idle this many days")
     pr_parser = subparsers.add_parser("pr", help="PR Watcher: follow the open PR until it is merged")
     pr_parser.add_argument("action", choices=("status", "wait", "reply", "rerequest", "ci", "sync", "merge", "feedback",
-                                              "body", "base", "gh", "launch", "finish"))
+                                              "body", "base", "gh", "launch", "finish", "inbox"))
     pr_parser.add_argument("--target", required=True, type=Path)
     pr_parser.add_argument("--pr", type=int, help="PR number (default: the one this run opened, else the branch's)")
     pr_parser.add_argument("--timeout", type=float, default=540.0, help="wait: give up after this many seconds")
+    pr_parser.add_argument("--once", action="store_true",
+                           help="inbox: first pass of the listener, launches a watch for every open PR of yours not watched")
+    pr_parser.add_argument("--wait", action="store_true", help="inbox: poll until a new PR of yours opens")
+    pr_parser.add_argument("--dry-run", action="store_true", dest="dry_run", help="launch: write the launcher only")
     pr_parser.add_argument("--interval", type=float, default=60.0, help="wait: seconds between reads (it slows down while idle)")
     pr_parser.add_argument("--item", help="reply: the comment id from pr-inbox.json")
     pr_parser.add_argument("--body", help="reply: the answer to post")

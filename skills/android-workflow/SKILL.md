@@ -7,6 +7,8 @@ description: >-
   Use when the user types /android-workflow, /Android Workflow, or asks to run
   this workflow on an Android ticket, Jira or Linear id, or to watch or answer the
   comments of a PR this workflow opened ("Use o Android Workflow", "PR Watcher").
+  With no ticket it listens for the developer's own open PRs and watches each
+  one in its own session until merged ("watch my PRs", "fica ouvindo meus PRs").
 ---
 
 # Android Workflow
@@ -39,9 +41,11 @@ diff, Gradle logs or images yourself). You only run CLI commands and spawn or re
     [--level express|standard|full] [--worktree] [--no-device]
     [--no-commit] [--no-push] [--no-pr] [--no-watch] [--base BRANCH]
 /android-workflow <ticket-id> --watch [--pr NUMBER]      (only the PR Watcher, for a PR already open)
+/android-workflow [--watch] [--target PATH]            (no ticket: listener of your own PRs, see *Listener*)
 ```
 
-Codex: `$android-workflow`. If the user omitted fields, ask once. Do not invent acceptance
+Codex: `$android-workflow`. With no ticket id it is the listener, never a question. If the user
+omitted other fields of a ticket run, ask once. Do not invent acceptance
 criteria or business rules. Delivery (commit, push, PR) is **on by default**: invoking the
 workflow authorizes it, and **every run that produced code ends in a PR** — ready for review when
 every check passed, a draft listing what is still open when it did not. The `--no-*` flags stop
@@ -354,6 +358,30 @@ CLI cleanup --target T [--all] [--pr N] [--base] [--dry-run]   (worktrees of mer
     failing optional check blocks until the watcher calls it `unrelated`. Your own comments on the PR
     are a review too (you checking the PR): the watcher answers them like anyone else's (`own: true`),
     and never answers its own replies. Threads are answered, never resolved.
+
+## Listener (no ticket id)
+
+`/android-workflow` or `/android-workflow --watch` with no ticket is a **listener** of the developer's
+own open PRs in this app's repository (`TARGET` = the main checkout): it never watches a PR itself.
+Each PR gets its own agent session in a new terminal tab running the ordinary
+`/android-workflow <ID> --watch --pr N` (step 5) in the checkout of the PR's branch (the main checkout
+on that branch, its worktree, or a new `wt-<branch>` worktree the CLI creates), until it is merged.
+
+1. First chat line: the repository and that each PR is watched in its own tab. Then
+   `CLI pr inbox --target TARGET --once`: it launches a tab for every open PR with no live watch (a PR
+   whose checkout has a running watch, or a session that worked there in the last 15 min, is left
+   alone). Relay its `summary` lines.
+2. Loop: `CLI pr inbox --target TARGET --wait` (background, `--timeout 3300` on Claude Code) and act on
+   its `status`, then wait again:
+   - `new`: run every `commands` entry (`CLI pr launch --target TARGET --pr N`) and relay its `tell` line;
+     `failed` or an error → relay it with the script path the developer can run. With a task board
+     (Terminal One), one task per PR ("Watch PR #N: <title>").
+   - `skipped`: one line per PR with its `why` (a fork; a draft when `watch.inbox.drafts` is false).
+   - `idle` / `timed_out` / `offline`: wait again silently.
+   Never `--once` again in the loop: a tab the developer closed stays closed until they start the
+   listener again or run `/android-workflow <ID> --watch`.
+3. The listener ends only with this session or when the developer says stop. The launched sessions
+   keep running and end themselves with `CLI pr finish` when their PR is merged or closed.
 
 Two runs at once (two tickets, two worktrees) are kept apart by the CLI: build slots, one
 device leased per run (`wait_device` names who holds each), base APKs cached by commit. With 3 or

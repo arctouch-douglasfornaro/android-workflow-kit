@@ -55,10 +55,12 @@ DEFAULT_INBOX = {
 AGENTS: dict[str, dict[str, str]] = {
     "claude": {"command": "claude -n {name} {prompt}",
                "review": "/android-review {pr} --target {target}",
-               "watch": "/android-workflow {ticket} --watch --pr {pr}"},
+               "watch": "/android-workflow {ticket} --watch --pr {pr}",
+               "watch_new": "/android-workflow {ticket} {title} --watch --pr {pr}"},
     "codex": {"command": "codex {prompt}",
               "review": "Use the android-review skill: /android-review {pr} --target {target}",
-              "watch": "Use the android-workflow skill: /android-workflow {ticket} --watch --pr {pr}"},
+              "watch": "Use the android-workflow skill: /android-workflow {ticket} --watch --pr {pr}",
+              "watch_new": "Use the android-workflow skill: /android-workflow {ticket} {title} --watch --pr {pr}"},
 }
 
 SEARCH_QUERY = """
@@ -162,6 +164,16 @@ def skip_reason(pr: dict[str, Any], config: dict[str, Any]) -> str | None:
 
 def launch_dir(target: Path) -> Path:
     return cache_dir(target) / LAUNCH_DIR
+
+
+def script_home(target: Path) -> Path:
+    """The app's main checkout of `target` (a worktree's too), or `target` when git cannot say."""
+    from android_workflow.cleanup import main_checkout
+
+    try:
+        return main_checkout(target)
+    except (ValueError, OSError, subprocess.SubprocessError):
+        return target
 
 
 def pid_file(target: Path, number: int, kind: str = "PR") -> Path:
@@ -336,8 +348,11 @@ def _env_lines(target: Path) -> list[str]:
 
 def write_script(target: Path, number: int, config: dict[str, Any], kind: str = "PR", name: str | None = None,
                  prompt: str | None = None) -> Path:
-    """The launcher: records its PID (kept by `exec`) and replaces itself with the agent session."""
-    script = launch_dir(target) / f"{kind}-{number}.sh"
+    """The launcher: records its PID (kept by `exec`) and replaces itself with the agent session.
+
+    The script lives in the app's main checkout even when the session runs in a worktree: Terminal One
+    files the tab under the project of the script's folder, and a worktree would be another project."""
+    script = launch_dir(script_home(target)) / f"{kind}-{number}.sh"
     script.parent.mkdir(parents=True, exist_ok=True)
     script.write_text(
         "\n".join([
@@ -438,14 +453,25 @@ def launch_watch(target: Path, dry_run: bool = False) -> dict[str, Any]:
         raise ValueError("this run has no PR yet: `CLI pr status` first")
     if watch.get("ended"):
         return {"status": "ended", "pr": number, "next": f"nothing: the PR is {watch['ended']}"}
-    if session_alive(target, int(number), "WATCH"):
+    return open_watch(target, int(number), ticket, dry_run=dry_run)
+
+
+def open_watch(target: Path, number: int, ticket: str, title: str | None = None,
+               dry_run: bool = False) -> dict[str, Any]:
+    """A new terminal tab running the PR Watcher of PR `number` in checkout `target`. `title` (a PR with no
+    run in that checkout yet) goes into the prompt, so the session can `CLI start` it."""
+    if session_alive(target, number, "WATCH"):
         return {"status": "running", "pr": number, "next": "nothing: a session already watches this PR"}
     config = inbox_config(target)
-    script = write_script(target, int(number), config, kind="WATCH", name=f"watch PR-{number}",
-                          prompt=agent_prompt(config, "watch", ticket=ticket, pr=number))
+    if title:
+        clean = " ".join(str(title).replace('"', "'").split())[:120]
+        prompt = agent_prompt(config, "watch_new", ticket=ticket, pr=number, title=f'"{clean}"')
+    else:
+        prompt = agent_prompt(config, "watch", ticket=ticket, pr=number)
+    script = write_script(target, number, config, kind="WATCH", name=f"watch PR-{number}", prompt=prompt)
     command = open_command(script, config)
     if dry_run:
-        return {"status": "dry_run", "pr": number, "script": str(script), "command": command}
+        return {"status": "dry_run", "pr": number, "script": str(script), "command": command, "prompt": prompt}
     opened = subprocess.run(command, text=True, capture_output=True, check=False, timeout=60)
     if opened.returncode != 0:
         return {"status": "failed", "pr": number, "script": str(script),
@@ -529,6 +555,7 @@ def finish(target: Path, number: int, kind: str = "PR") -> dict[str, Any]:
     removed = cleanup(main, pr=number, force=True)
     for name in (f"{kind}-{number}.sh", f"{kind}-{number}.pid"):
         (launch_dir(home) / name).unlink(missing_ok=True)
+    (launch_dir(main) / f"{kind}-{number}.sh").unlink(missing_ok=True)  # write_script keeps it in the main checkout
     result: dict[str, Any] = {"status": "finished", "pr": number, "state": state.lower(),
                               "removed": [item["path"] for item in removed["removed"]],
                               "kept": removed["kept"], "failed": removed["failed"]}
