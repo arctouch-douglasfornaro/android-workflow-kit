@@ -4573,14 +4573,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     review_parser.add_argument("--require", help="device: why the device must run although no UI file changed")
     review_parser.add_argument("--skip", help="ticket: go on without the Jira ticket, and why")
     triage_parser = subparsers.add_parser("triage", help="android-bug-triage: reproduce a bug, find its cause, draft the ticket")
-    triage_parser.add_argument("triage_action", choices=("start", "next", "report", "posted", "repro", "ticket"))
+    triage_parser.add_argument("triage_action", choices=("start", "next", "report", "posted", "replied", "repro",
+                                                          "ticket", "add"))
     triage_parser.add_argument("--target", required=True, type=Path)
-    triage_parser.add_argument("--input", help="start: a ticket key or link (Jira or Linear), a stack trace or a description")
+    triage_parser.add_argument("--input", help="start / add: anything that reports the bug: a ticket key or link, a "
+                                                "Slack thread, any other link, a stack trace, a description, or a mix")
+    triage_parser.add_argument("--source", help="ticket: the source id (from fetch_sources) to go on without")
+    triage_parser.add_argument("--accept-thin", action="store_true", dest="accept_thin",
+                               help="add: reproduce from the thin report as it is")
     triage_parser.add_argument("--no-device", action="store_true", dest="no_device")
     triage_parser.add_argument("--dry-run", action="store_true", dest="dry_run")
-    triage_parser.add_argument("--draft-id", dest="draft_id", help="posted: the draft id the developer approved")
-    triage_parser.add_argument("--url", help="posted: the comment or ticket link")
-    triage_parser.add_argument("--skip", help="posted / repro / ticket: go on without it, and why")
+    triage_parser.add_argument("--draft-id", dest="draft_id", help="posted / replied: the draft id the developer approved")
+    triage_parser.add_argument("--url", help="posted / replied: the comment, ticket or Slack message link")
+    triage_parser.add_argument("--skip", help="posted / replied / repro / ticket: go on without it, and why")
     triage_parser.add_argument("--again", action="store_true", help="repro: reproduce again")
     triage_parser.add_argument("--accept-blocked", action="store_true", dest="accept_blocked",
                                help="repro: go on to the cause from the code alone")

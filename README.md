@@ -321,15 +321,17 @@ Details: [`skills/android-review/SKILL.md`](skills/android-review/SKILL.md) and 
 ## Triaging a bug
 
 ```text
-/android-bug-triage APP-123          # a Jira or Linear key or link, a stack trace, or a description
+/android-bug-triage APP-123          # a key, any link (Slack thread, Sentry, GitHub…), a stack trace, a description, or a mix
 ```
 
-Before anyone fixes a bug, the triage tells you whether it is real and where it comes from. It reads the
-ticket (the tracker is detected from the key or link), builds the base branch in its own checkout and
+Before anyone fixes a bug, the triage tells you whether it is real and where it comes from. It reads every
+source the input names (a Jira or Linear ticket, a Slack thread, a GitHub issue, a Sentry or Crashlytics
+link, a doc; one level of the tickets and threads they name), builds the base branch in its own checkout and
 tries the reported steps on an emulator with a Maestro flow, with a video and the app's filtered logcat.
 Then the Planner traces the cause through the code (`file:line`, ranked hypotheses) and plans the fix.
 The result goes to `.ai/workflow/<ID>/triage-report.md`, and a comment for the ticket (or a new ticket,
-with the `create-ticket` skill) is shown to you and posted only after your OK.
+with the `create-ticket` skill) is shown to you and posted only after your OK. When the bug came from a
+Slack thread, a reply for that thread follows, under the same rule.
 
 It never writes code. When it found the cause, it offers `/android-workflow <ID>`, which continues the
 same run: the plan is ready and the reproduction flow becomes the device proof of the fix. A bug that
